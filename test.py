@@ -214,9 +214,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_file",
         type=str,
-        # default="/media/ricardo/data2/driveact_models/results/drive/topk+merge/evad-hm-stm_57f13wlm_fold0.ckpt",
-        default="/home/ricardo/Documents/projects/poguise/poguise_c2hntf6v_epoch=51-val_loss=0.507.ckpt",
-        # default="checkpoints/evad-hm-stm/4615a6ku/evad-hm-stm_4615a6ku_epoch=47-val_loss=0.331.ckpt"
+        required=True,
+        help="Path to the checkpoint file",
     )
 
     parser.add_argument("--num_workers", type=int, default=16)

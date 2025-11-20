@@ -5,7 +5,6 @@ import os
 import pandas as pd
 import numpy as np
 import torchvision
-import time
 from mmpose.codecs import UDPHeatmap
 from argparse import ArgumentParser
 import json
@@ -134,8 +133,6 @@ class ToyotaSMDataset(Dataset):
                 CS_DICT if self.task_type == "CS" else CV_DICT
             )
         self.data_df["label"] -= 1
-        # self.data_df = self.data_df.iloc[3980:3990] #DEBUG
-        # self.data_df = self.data_df.reset_index(drop=True)
         self.y = torch.tensor(self.data_df.label.values, dtype=torch.long)
 
         self.length = len(self.data_df)
@@ -155,7 +152,6 @@ class ToyotaSMDataset(Dataset):
         if self.n_landmarks:
             self.landmark_list = []
             # read landmarks into memory
-            start = time.time()
             file_folder = "skeleton"
 
             for i in range(self.length):
@@ -184,14 +180,11 @@ class ToyotaSMDataset(Dataset):
                 # repeat last landmark to match number of frames
                 landmarks_file.append(landmarks_file[-1])
                 self.landmark_list.append(landmarks_file)
-            print("eager loading landmarks", "time", time.time() - start)
             # iterate over frames and landmarks in memory
 
     def add_model_specific_args(parent_parser):
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
-        parser.add_argument(
-            "--data_dir", type=str, default="/media/ricardo/data2/toyotasm"
-        )
+        parser.add_argument("--data_dir", type=str, default="/datasets/toyotasm")
         parser.add_argument("--heatmap_agg", type=int, default=1)
         parser.add_argument("--num_classes", type=int, default=31)
         parser.add_argument("--n_landmarks", type=int, default=13)

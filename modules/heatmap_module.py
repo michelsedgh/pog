@@ -115,7 +115,6 @@ class HeatmapModule(pl.LightningModule):
                 getattr(self.model.hparams, "lr_head_hm", None)
                 and self.model.hparams.lr_head_hm
             ):
-                print("USING DIFFERENT LR FOR HEATMAP HEAD")
                 # Python
                 params = [
                     {
@@ -215,7 +214,6 @@ class HeatmapModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         # "batch" is the output of the training data loader.
         if isinstance(batch, torch._utils.ExceptionWrapper):
-            print("batch is ExceptionWrapper", batch.exc_msg)
             batch.reraise()
         imgs, labels = batch
         if self.model.hparams.get("linear_probe", False):
@@ -283,7 +281,6 @@ class HeatmapModule(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         if isinstance(batch, torch._utils.ExceptionWrapper):
-            print("batch is ExceptionWrapper", batch.exc_msg)
             batch.reraise()
         imgs, labels = batch
 
@@ -399,16 +396,6 @@ class HeatmapModule(pl.LightningModule):
         loss = self.val_loss(preds, labels)
         # save prediction and labels for to csv
 
-        print(
-            "calc loss epoch rank:",
-            self.trainer.global_rank,
-            "loss",
-            loss,
-            "best_val_loss",
-            best_val_loss,
-            preds.shape,
-            labels.shape,
-        )
         if best_val_loss is None or loss < best_val_loss:
             self.log(
                 "best_val_loss",
@@ -469,7 +456,6 @@ class HeatmapModule(pl.LightningModule):
                 )
         self.validation_step_outputs.clear()
         self.validation_step_outputs = {"preds": [], "labels": []}
-        print("done on_validation_epoch_end")
         return super().on_validation_epoch_end()
 
     def test_step(self, batch, batch_idx):
