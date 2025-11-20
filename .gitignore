@@ -165,3 +165,4 @@ wandb/
 *.pkl
 *.pickle
 *.ckpt
+.vscode

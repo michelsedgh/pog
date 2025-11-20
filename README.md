@@ -1,3 +1,55 @@
 # Pose-guided token selection for the recognition of activities of daily living
 
-Code will be made available upon publication
+This is the official implementation of the paper:
+
+**Pose-guided token selection for the recognition of activities of daily living**  
+Ricardo Pizarro, Roberto Valle, José M. Buenaposada, Luis M. Bergasa, Luis Baumela  
+*Image and Vision Computing*, 2025  
+[Paper Link](https://www.sciencedirect.com/science/article/pii/S0262885625002744)
+
+**Note:** This is a limited release. Currently, only the weights for the Toyota Smarthome Cross-Subject (CS) protocol are available.
+
+## Docker Usage
+
+To run the code using the Docker image, you need to mount your dataset and checkpoints directories.
+
+```bash
+docker run --gpus 0 -it -v /path/to/your/datasets:/datasets poguise sh
+```
+
+Ensure that your dataset structure inside the container matches what the scripts expect (e.g., `/datasets/toyotasm`).
+
+## Dataset Preparation
+
+Before training or testing, you need to prepare the dataset by extracting frames and generating label files.
+
+### 1. Extract Frames
+
+Use the `utils/video_to_frames.py` script to extract frames from the video files. This script expects the videos to be located in `/datasets/toyotasm/mp4/` and will output frames to `/datasets/toyotasm/frames/`.
+
+```bash
+python utils/video_to_frames.py
+```
+
+### 2. Generate Test Labels
+
+Use the `utils/preproc_toyota_labels.py` script to generate the test labels CSV file. This script requires the frames to be already extracted as it counts the number of frames per video.
+
+```bash
+python utils/preproc_toyota_labels.py --root /datasets/toyotasm --protocol CS
+```
+
+Replace `CS` with `CV` for the Cross-View protocol if needed.
+
+## Testing
+
+To test the model, use the following command:
+
+```bash
+python test.py --model_file "poguise_c2hntf6v_epoch=51-val_loss=0.507.ckpt" --data_dir "/datasets/toyotasm"
+```
+
+## Weights
+
+### Toyota Smarthome Cross-Subject (CS) protocol
+Link: [poguise_c2hntf6v_epoch=51-val_loss=0.507.ckpt](https://universidaddealcala-my.sharepoint.com/:u:/g/personal/ricardo_pizarroc_edu_uah_es/IQDZ86hAZSr3QpGbCqoAzd5xAU3B6Aup_XPLxnY-cJQfWTw?e=GpduYJ)

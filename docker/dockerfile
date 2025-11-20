@@ -1,0 +1,19 @@
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
+USER 0
+ENV DEBIAN_FRONTEND noninteractive
+RUN apt update && apt-get update && apt-get install ffmpeg libsm6 libxext6  build-essential git wget software-properties-common -y
+COPY environment.yml .
+RUN conda update -n base -c conda-forge conda && conda install -n base conda-libmamba-solver && conda config --set solver libmamba && conda env create -f environment.yml
+# COPY requirements.txt .
+RUN conda run -n dl-env pip install --no-cache-dir torch==2.6.0 TorchCodec==0.2.1 --index-url=https://download.pytorch.org/whl/cu124 -U
+# RUN python3 -m venv /opt/venv
+# ENV PATH="/opt/venv/bin:$PATH"
+# RUN pip install --no-cache-dir -r requirements.txt
+ARG USER_ID=${USER_ID} 
+ARG USER_GID=${USER_GID}
+ARG USER=${USER}
+RUN groupadd -g $USER_GID $USER && useradd --uid $USER_ID --gid $USER_GID -m $USER 
+COPY augmentations.py .
+RUN cp augmentations.py /opt/conda/envs/dl-env/lib/python3.12/site-packages/pytorchvideo/transforms/augmentations.py
+RUN echo "conda activate dl-env" >> ~/.bashrc
+ENV PATH /opt/conda/envs/dl-env/bin:$PATH
