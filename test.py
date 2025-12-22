@@ -17,8 +17,9 @@ import numpy as np
 from collections import defaultdict
 import json
 
-from datasets.ntu120 import NTUDataset
+# from datasets.ntu120 import NTUDataset
 from datasets.toyotasm import ToyotaSMDataset
+from datasets.driveact import DriveActDataset
 
 seed_everything(42)
 
@@ -41,12 +42,6 @@ def main(hparams, network, dataset):
         hparams.num_workers = num_cpu // hparams.gpus
     print(hparams)
 
-    # init module
-    # if "multi" in hparams.model_name:
-    #     model = MVModule(network, hparams)
-    # else:
-    #     model = BaseModule(network, hparams)
-    # torch.serialization.add_safe_globals([NTUDataset])
     checkpoint = torch.load(
         hparams.model_file,
         map_location=lambda storage, loc: storage,
@@ -76,7 +71,6 @@ def main(hparams, network, dataset):
     wandb_logger = WandbLogger(
         name=hparams.model_name,
         project=project_folder,
-        # entity=os.getenv("WANDB_ENTITY"),
     )
     if os.getenv("NODE_RANK", 0) == 0 and os.getenv("LOCAL_RANK", 0) == 0:
         run_id = wandb_logger.experiment.id
@@ -169,7 +163,6 @@ def main(hparams, network, dataset):
     final_top1 = np.mean(np.array(final_top1))
     final_top5 = np.mean(np.array(final_top5))
     final_top1.shape
-    # Top1: 0.8686274509803922 Top5: 0.9790849673202614
     # calculate mean per class accuracy
     per_class_accuracy = np.mean(list(per_class_accuracy.values()))
     tnc = hparams.test_num_crop
@@ -182,9 +175,6 @@ def main(hparams, network, dataset):
             f"c_{tnc}_s_{tns}_per_class_accuracy": float(per_class_accuracy),
         }
     )
-    # load best model
-    # if trainer.is_global_zero and hparams.gpus == 1 and weight_avg == False:
-    #     trainer.test(model)
 
 
 if __name__ == "__main__":
@@ -196,21 +186,9 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", default=32, type=int)
     parser.add_argument("--test_num_crop", default=1, type=int)
     parser.add_argument("--test_num_segment", default=1, type=int)
-    # parser.add_argument("--n_frames", default=16, type=int)
+    parser.add_argument("--n_frames_stride", default=-3, type=int)
+    parser.add_argument("--dataset", type=str)
 
-    # parser.add_argument("--lr", type=float, default=0.00000016421098329394)
-    # parser.add_argument("--weight_decay", type=float, default=0.04189349345119998)
-    # parser.add_argument("--lr_head", type=float, default=0.00000016421098329394)
-    # parser.add_argument("--weight_decay_head", type=float, default=0.04189349345119998)
-    # parser.add_argument("--lr_head_hm", type=float, default=0.0)
-    # parser.add_argument("--weight_decay_head_hm", type=float, default=0.01)
-    # # logging
-    # # parser.add_argument("--project_folder", type=str, default="hmdb51")
-    # parser.add_argument("--project_folder", type=str, default="thumos14")
-
-    # # model, view and dataset args
-    # parser.add_argument("--model_name", type=str, default="adatad")
-    # parser.add_argument("--dataset_artifact", type=str, default="driveact-frames")
     parser.add_argument(
         "--model_file",
         type=str,
@@ -222,10 +200,8 @@ if __name__ == "__main__":
 
     hparams, _ = parser.parse_known_args()
     network = POGUISE
-    # parser = network.add_model_specific_args(parser)
-    dataset = ToyotaSMDataset
-    # parser = dataset.add_model_specific_args(parser)
-    # # parse params
-    # hparams, _ = parser.parse_known_args()
-
+    if hparams.dataset == "driveact":
+        dataset = DriveActDataset
+    elif hparams.dataset == "toyotasm":
+        dataset = ToyotaSMDataset
     main(hparams, network, dataset)
