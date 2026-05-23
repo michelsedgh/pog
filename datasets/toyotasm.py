@@ -1,5 +1,5 @@
 # %%
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, get_worker_info
 import torch
 import os
 import pandas as pd
@@ -8,6 +8,10 @@ import torchvision
 from mmpose.codecs import UDPHeatmap
 from argparse import ArgumentParser
 import json
+import re
+import shutil
+import tempfile
+import zipfile
 from utils.ntu import frame_utils as utils
 
 CS_DICT = {
@@ -94,6 +98,27 @@ class ToyotaSMDataset(Dataset):
         self.jitter_scales_max = kwargs["jitter_scales_max"]
         self.test_num_crop = test_num_crop
         self.test_num_segment = test_num_segment
+        self.frame_source = kwargs.get("toyota_frame_source", "auto")
+        self.split_source = kwargs.get("toyota_split_source", "auto")
+        self.toyota_seed = int(kwargs.get("toyota_seed", 42))
+        self.toyota_val_fraction = float(kwargs.get("toyota_val_fraction", 0.15))
+        self.toyota_test_fraction = float(kwargs.get("toyota_test_fraction", 0.20))
+        self.toyota_max_samples = int(kwargs.get("toyota_max_samples", 0) or 0)
+        self.mp4_zip_path = kwargs.get("toyota_mp4_zip")
+        if not self.mp4_zip_path and str(data_dir).lower().endswith(".zip"):
+            self.mp4_zip_path = data_dir
+            self.data_dir = os.path.dirname(data_dir) or "."
+        self.video_cache_dir = kwargs.get("toyota_video_cache_dir") or os.path.join(
+            tempfile.gettempdir(), "poguise_toyota_mp4_cache"
+        )
+        self.skeleton_zip_path = kwargs.get("toyota_skeleton_zip") or os.path.join(
+            self.data_dir, "toyota_smarthome_skeleton_v1.2.zip"
+        )
+        self.frame_count_cache_path = kwargs.get(
+            "toyota_frame_count_cache"
+        ) or os.path.join(self.data_dir, "toyota_mp4_frame_counts.json")
+        self._frame_count_cache = {}
+        self._mp4_zip_names = None
         self.mean = torch.tensor([0.485, 0.456, 0.406])  # videomae normalization
         self.std = torch.tensor([0.229, 0.224, 0.225])
         # self.mean = torch.tensor([1,1,1])
@@ -104,34 +129,12 @@ class ToyotaSMDataset(Dataset):
             self.heatmap_generator = UDPHeatmap(
                 input_size=(224, 224), heatmap_size=self.heatmap_size, sigma=1.5
             )
-        if self.set_type == "test":
-            self.data_df = pd.read_csv(
-                os.path.join(data_dir, f"test_Labels_{self.task_type}.csv")
-            )
-            self.data_df.columns = ["file_id", "start", "end"]
-            self.data_df["label"] = self.data_df.file_id.apply(
-                lambda x: x.split("_")[0]
-            )
-            self.data_df["label"] = self.data_df.label.map(
-                CS_DICT if self.task_type == "CS" else CV_DICT
-            )
-        else:
-            self.data_df = pd.read_csv(
-                os.path.join(
-                    data_dir,
-                    "splits",
-                    set_type + f"_{self.task_type}.txt",
-                ),
-            )
-            self.data_df.columns = ["file_id"]
-            self.data_df["file_id"] = self.data_df["file_id"].apply(lambda x: x[:-4])
-            # Apply the split and retain the first element for each row
-            self.data_df["label"] = self.data_df["file_id"].apply(
-                lambda x: x.split("_")[0]
-            )
-            self.data_df["label"] = self.data_df["label"].map(
-                CS_DICT if self.task_type == "CS" else CV_DICT
-            )
+        self.frame_source = self._resolve_frame_source()
+        if self.frame_source in ["mp4", "mp4_zip"]:
+            self._load_frame_count_cache()
+        self.data_df = self._load_split()
+        if self.toyota_max_samples > 0:
+            self.data_df = self.data_df.head(self.toyota_max_samples).copy()
         self.data_df["label"] -= 1
         self.y = torch.tensor(self.data_df.label.values, dtype=torch.long)
 
@@ -153,33 +156,46 @@ class ToyotaSMDataset(Dataset):
             self.landmark_list = []
             # read landmarks into memory
             file_folder = "skeleton"
+            skeleton_zip = None
+            if not os.path.isdir(os.path.join(self.data_dir, file_folder)):
+                if os.path.exists(self.skeleton_zip_path):
+                    skeleton_zip = zipfile.ZipFile(self.skeleton_zip_path)
+                else:
+                    raise FileNotFoundError(
+                        "Toyota skeleton labels were not found. Expected either "
+                        f"{os.path.join(self.data_dir, file_folder)} or "
+                        f"{self.skeleton_zip_path}."
+                    )
 
-            for i in range(self.length):
-                if i % 1000 == 0:
-                    print(f"Loading landmarks: {i}/{self.length}")
-                row = self.data_df.iloc[i]
-                file_name = f"{row.file_id}_pose3d.json"
-                # read json
-                data = json.load(
-                    open(os.path.join(self.data_dir, file_folder, file_name))
-                )
-                landmarks_file = []
-                for frame in data["frames"]:
-                    if len(frame) > 1:
-                        print(frame, row.file_id)
-                        raise ValueError("More than one person in frame")
-                    if len(frame) == 0:
+            try:
+                for i in range(self.length):
+                    if i % 1000 == 0:
+                        print(f"Loading landmarks: {i}/{self.length}")
+                    row = self.data_df.iloc[i]
+                    file_name = f"{row.file_id}_pose3d.json"
+                    data = self._read_skeleton_json(file_folder, file_name, skeleton_zip)
+                    landmarks_file = []
+                    for frame in data["frames"]:
+                        if len(frame) > 1:
+                            print(frame, row.file_id)
+                            raise ValueError("More than one person in frame")
+                        if len(frame) == 0:
+                            landmarks_file.append(torch.zeros((self.n_landmarks, 2)))
+                            continue
+                        landmarks_x = frame[0]["pose2d"][:13]
+                        landmarks_y = frame[0]["pose2d"][13:]
+                        landmarks = list(zip(landmarks_x, landmarks_y))
+                        landmarks = torch.tensor(landmarks)
+                        landmarks = torch.round(landmarks).to(torch.int)
+                        landmarks_file.append(landmarks)
+                    if not landmarks_file:
                         landmarks_file.append(torch.zeros((self.n_landmarks, 2)))
-                        continue
-                    landmarks_x = frame[0]["pose2d"][:13]
-                    landmarks_y = frame[0]["pose2d"][13:]
-                    landmarks = list(zip(landmarks_x, landmarks_y))
-                    landmarks = torch.tensor(landmarks)
-                    landmarks = torch.round(landmarks).to(torch.int)
-                    landmarks_file.append(landmarks)
-                # repeat last landmark to match number of frames
-                landmarks_file.append(landmarks_file[-1])
-                self.landmark_list.append(landmarks_file)
+                    # repeat last landmark to match number of frames
+                    landmarks_file.append(landmarks_file[-1])
+                    self.landmark_list.append(landmarks_file)
+            finally:
+                if skeleton_zip is not None:
+                    skeleton_zip.close()
             # iterate over frames and landmarks in memory
 
     def add_model_specific_args(parent_parser):
@@ -195,6 +211,28 @@ class ToyotaSMDataset(Dataset):
         parser.add_argument("--uniform_sampling", type=int, default=1)
         parser.add_argument("--backend_video", type=str, default="torch")
         parser.add_argument("--task_type", type=str, default="CS")
+        parser.add_argument(
+            "--toyota_frame_source",
+            type=str,
+            default="auto",
+            choices=["auto", "frames", "mp4", "mp4_zip"],
+            help="Toyota input source. auto uses extracted frames, then mp4, then a video zip.",
+        )
+        parser.add_argument(
+            "--toyota_split_source",
+            type=str,
+            default="auto",
+            choices=["auto", "files"],
+            help="Toyota split source. auto uses official split files when present, otherwise creates a deterministic subject split.",
+        )
+        parser.add_argument("--toyota_seed", type=int, default=42)
+        parser.add_argument("--toyota_val_fraction", type=float, default=0.15)
+        parser.add_argument("--toyota_test_fraction", type=float, default=0.20)
+        parser.add_argument("--toyota_max_samples", type=int, default=0)
+        parser.add_argument("--toyota_skeleton_zip", type=str, default=None)
+        parser.add_argument("--toyota_mp4_zip", type=str, default=None)
+        parser.add_argument("--toyota_video_cache_dir", type=str, default=None)
+        parser.add_argument("--toyota_frame_count_cache", type=str, default=None)
 
         return parser
 
@@ -230,19 +268,14 @@ class ToyotaSMDataset(Dataset):
 
         for i_try in range(self._num_retries):
 
-            n_frames = len(
-                os.listdir(
-                    os.path.join(
-                        self.data_dir, "frames", self.data_df.iloc[idx].file_id
-                    )
-                )
-            )
+            file_id = self.data_df.iloc[idx].file_id
+            n_frames = self._num_frames(file_id)
             label = self.y[idx]
             if self.set_type == "test":
                 start_frame = self.data_df.iloc[idx].start
                 end_frame = self.data_df.iloc[idx].end
-                if end_frame == n_frames:
-                    end_frame -= 1
+                if end_frame < 0 or end_frame >= n_frames:
+                    end_frame = n_frames - 1
             elif n_frames > 128:  # test has 128 frames segments
                 if self.set_type == "train":
                     start_frame = np.random.randint(0, n_frames - 128)
@@ -261,10 +294,7 @@ class ToyotaSMDataset(Dataset):
                 frames_idx = np.pad(
                     frames_idx, (0, self.n_frames - len(frames_idx)), "edge"
                 )
-            frames = self.read_all_frames(
-                os.path.join(self.data_dir, "frames", self.data_df.iloc[idx].file_id),
-                frames_idx,
-            )
+            frames = self._read_sampled_frames(file_id, frames_idx)
             # frames = frames[frames_idx]
             # convert frames from T, C, H, W to T H W C
             frames = frames.permute(0, 2, 3, 1)
@@ -352,6 +382,271 @@ class ToyotaSMDataset(Dataset):
                     spatial_sample_index,
                 )
             return frames, label
+
+    def _resolve_frame_source(self):
+        if self.frame_source != "auto":
+            if self.frame_source == "mp4_zip":
+                self.mp4_zip_path = self.mp4_zip_path or self._find_default_mp4_zip()
+            return self.frame_source
+        frames_dir = os.path.join(self.data_dir, "frames")
+        if os.path.isdir(frames_dir) and any(os.scandir(frames_dir)):
+            return "frames"
+        mp4_dir = os.path.join(self.data_dir, "mp4")
+        if os.path.isdir(mp4_dir):
+            return "mp4"
+        self.mp4_zip_path = self.mp4_zip_path or self._find_default_mp4_zip()
+        if self.mp4_zip_path and os.path.exists(self.mp4_zip_path):
+            return "mp4_zip"
+        raise FileNotFoundError(
+            f"Could not find Toyota frames, mp4 directory, or mp4 zip under {self.data_dir}."
+        )
+
+    def _find_default_mp4_zip(self):
+        candidates = [
+            "toyota_smarthome_mp4.zip",
+            "toyota_smarthome_videos.zip",
+            "toyotasm_mp4.zip",
+            "mp4.zip",
+            "videos.zip",
+        ]
+        for candidate in candidates:
+            path = os.path.join(self.data_dir, candidate)
+            if os.path.exists(path):
+                return path
+        return None
+
+    def _label_dict(self):
+        return CS_DICT if self.task_type == "CS" else CV_DICT
+
+    def _load_split(self):
+        if self.set_type == "test":
+            split_path = os.path.join(self.data_dir, f"test_Labels_{self.task_type}.csv")
+        else:
+            split_path = os.path.join(
+                self.data_dir, "splits", self.set_type + f"_{self.task_type}.txt"
+            )
+        if os.path.exists(split_path):
+            return self._load_split_file(split_path)
+        if self.split_source == "files":
+            raise FileNotFoundError(
+                f"Toyota split file not found: {split_path}. Use "
+                "--toyota_split_source auto to generate a deterministic split."
+            )
+        print(
+            f"Toyota split file not found: {split_path}. "
+            "Generating deterministic subject split from mp4 filenames."
+        )
+        return self._build_auto_split()
+
+    def _load_split_file(self, split_path):
+        if self.set_type == "test":
+            data_df = pd.read_csv(split_path)
+            data_df.columns = ["file_id", "start", "end"]
+        else:
+            data_df = pd.read_csv(split_path)
+            data_df.columns = ["file_id"]
+            data_df["file_id"] = data_df["file_id"].apply(lambda x: x[:-4])
+        data_df["label"] = data_df.file_id.apply(lambda x: x.split("_")[0])
+        data_df["label"] = data_df.label.map(self._label_dict())
+        data_df = data_df.dropna(subset=["label"]).copy()
+        data_df["label"] = data_df["label"].astype(int)
+        return data_df
+
+    def _build_auto_split(self):
+        mp4_dir = os.path.join(self.data_dir, "mp4")
+        if self.frame_source == "mp4_zip":
+            names = self._mp4_zip_index().keys()
+        elif os.path.isdir(mp4_dir):
+            names = [name[:-4] for name in os.listdir(mp4_dir) if name.endswith(".mp4")]
+        else:
+            raise FileNotFoundError(
+                f"Automatic Toyota split creation needs mp4 files in {mp4_dir} "
+                "or --toyota_mp4_zip."
+            )
+        rows = []
+        label_dict = self._label_dict()
+        for file_id in sorted(names):
+            label_name = file_id.split("_")[0]
+            if label_name not in label_dict:
+                continue
+            subject = self._subject_id(file_id)
+            if subject is None:
+                continue
+            rows.append(
+                {
+                    "file_id": file_id,
+                    "label": label_dict[label_name],
+                    "subject": subject,
+                }
+            )
+        if not rows:
+            raise RuntimeError("No Toyota mp4 files with known labels found.")
+
+        df = pd.DataFrame(rows)
+        subjects = np.array(sorted(df.subject.unique()))
+        rng = np.random.default_rng(self.toyota_seed)
+        rng.shuffle(subjects)
+        n_subjects = len(subjects)
+        n_test = int(round(n_subjects * self.toyota_test_fraction))
+        n_val = int(round((n_subjects - n_test) * self.toyota_val_fraction))
+        if n_subjects >= 3:
+            n_test = max(1, n_test)
+            n_val = max(1, n_val)
+        test_subjects = set(subjects[:n_test])
+        val_subjects = set(subjects[n_test : n_test + n_val])
+
+        if self.set_type == "test":
+            split_df = df[df.subject.isin(test_subjects)].copy()
+            split_df["start"] = 0
+            split_df["end"] = -1
+        elif self.set_type == "val":
+            split_df = df[df.subject.isin(val_subjects)].copy()
+        else:
+            held_out = test_subjects | val_subjects
+            split_df = df[~df.subject.isin(held_out)].copy()
+
+        split_df = split_df.drop(columns=["subject"]).reset_index(drop=True)
+        if split_df.empty:
+            raise RuntimeError(
+                f"Generated Toyota {self.set_type} split is empty. Adjust "
+                "--toyota_val_fraction/--toyota_test_fraction."
+            )
+        return split_df
+
+    def _subject_id(self, file_id):
+        match = re.search(r"_p(\d+)_", file_id)
+        if match is None:
+            return None
+        return int(match.group(1))
+
+    def _read_skeleton_json(self, file_folder, file_name, skeleton_zip=None):
+        skeleton_path = os.path.join(self.data_dir, file_folder, file_name)
+        if os.path.exists(skeleton_path):
+            with open(skeleton_path) as f:
+                return json.load(f)
+        if skeleton_zip is not None:
+            with skeleton_zip.open(file_name) as f:
+                return json.load(f)
+        raise FileNotFoundError(skeleton_path)
+
+    def _load_frame_count_cache(self):
+        if self.frame_count_cache_path and os.path.exists(self.frame_count_cache_path):
+            with open(self.frame_count_cache_path) as f:
+                self._frame_count_cache = json.load(f)
+
+    def _save_frame_count_cache(self):
+        if not self.frame_count_cache_path:
+            return
+        if get_worker_info() is not None:
+            return
+        cache_dir = os.path.dirname(self.frame_count_cache_path)
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
+        tmp_path = f"{self.frame_count_cache_path}.{os.getpid()}.tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(self._frame_count_cache, f)
+        os.replace(tmp_path, self.frame_count_cache_path)
+
+    def _num_frames(self, file_id):
+        if self.frame_source == "frames":
+            return len(os.listdir(os.path.join(self.data_dir, "frames", file_id)))
+
+        if file_id in self._frame_count_cache:
+            return int(self._frame_count_cache[file_id])
+
+        video_path = self._video_path(file_id)
+        n_frames = self._count_video_frames(video_path)
+        self._frame_count_cache[file_id] = int(n_frames)
+        self._save_frame_count_cache()
+        return n_frames
+
+    def _count_video_frames(self, video_path):
+        try:
+            import cv2
+
+            cap = cv2.VideoCapture(video_path)
+            n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+            if n_frames > 0:
+                return n_frames
+        except Exception:
+            pass
+        video, _, _ = torchvision.io.read_video(video_path, pts_unit="sec")
+        if video.shape[0] == 0:
+            raise RuntimeError(f"No frames decoded from {video_path}")
+        return int(video.shape[0])
+
+    def _read_sampled_frames(self, file_id, frames_idx):
+        if self.frame_source == "frames":
+            return self.read_all_frames(
+                os.path.join(self.data_dir, "frames", file_id),
+                frames_idx,
+            )
+        return self.read_all_video_frames(
+            self._video_path(file_id),
+            frames_idx,
+        )
+
+    def _video_path(self, file_id):
+        if self.frame_source == "mp4":
+            return os.path.join(self.data_dir, "mp4", file_id + ".mp4")
+        if self.frame_source == "mp4_zip":
+            return self._extract_video_from_zip(file_id)
+        raise ValueError(f"Unsupported frame source for video path: {self.frame_source}")
+
+    def _mp4_zip_index(self):
+        if self._mp4_zip_names is not None:
+            return self._mp4_zip_names
+        if not self.mp4_zip_path or not os.path.exists(self.mp4_zip_path):
+            raise FileNotFoundError(
+                "Toyota mp4 zip not found. Pass --toyota_mp4_zip /path/to/videos.zip."
+            )
+        with zipfile.ZipFile(self.mp4_zip_path) as zf:
+            self._mp4_zip_names = {
+                os.path.splitext(os.path.basename(name))[0]: name
+                for name in zf.namelist()
+                if name.lower().endswith(".mp4")
+            }
+        return self._mp4_zip_names
+
+    def _extract_video_from_zip(self, file_id):
+        os.makedirs(self.video_cache_dir, exist_ok=True)
+        cache_path = os.path.join(self.video_cache_dir, file_id + ".mp4")
+        if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+            return cache_path
+
+        zip_name = self._mp4_zip_index().get(file_id)
+        if zip_name is None:
+            raise FileNotFoundError(f"{file_id}.mp4 was not found inside {self.mp4_zip_path}")
+
+        tmp_path = f"{cache_path}.{os.getpid()}.tmp"
+        try:
+            with zipfile.ZipFile(self.mp4_zip_path) as zf:
+                with zf.open(zip_name) as src, open(tmp_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst, length=8 * 1024 * 1024)
+            os.replace(tmp_path, cache_path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        return cache_path
+
+    def read_all_video_frames(self, video_path, frames_idx):
+        video, _, _ = torchvision.io.read_video(video_path, pts_unit="sec")
+        if video.shape[0] == 0:
+            raise RuntimeError(f"No frames decoded from {video_path}")
+        frames_idx = np.asarray(frames_idx, dtype=np.int64)
+        frames_idx = np.clip(frames_idx, 0, video.shape[0] - 1)
+        frames = video[frames_idx].permute(0, 3, 1, 2)
+        if len(frames) < self.n_frames:
+            frames = torch.cat(
+                [
+                    frames,
+                    frames[-1]
+                    .unsqueeze(0)
+                    .repeat(self.n_frames - len(frames), 1, 1, 1),
+                ]
+            )
+        return frames
 
     def read_all_frames(self, frame_folder, frames_idx=None):
         # read all frames in a folder

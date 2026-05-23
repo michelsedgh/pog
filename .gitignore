@@ -2,11 +2,13 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
+*.mp4
 # C extensions
 *.so
 *.png
 *.pt
+toyota_mp4_frame_counts.json
+toyota_mp4_cache/
 # Distribution / packaging
 .Python
 build/
@@ -166,3 +168,4 @@ wandb/
 *.pickle
 *.ckpt
 .vscode
+toyota_smarthome_skeleton_v1.2.zip

@@ -178,6 +178,18 @@ class BaseDataModule(pl.LightningDataModule):
         if stage == "predict":
             pass
 
+    def _loader_worker_kwargs(self):
+        num_workers = int(getattr(self.hparams, "num_workers", 0) or 0)
+        kwargs = {"num_workers": num_workers, "pin_memory": True}
+        if num_workers > 0:
+            kwargs["persistent_workers"] = bool(
+                getattr(self.hparams, "persistent_workers", 1)
+            )
+            prefetch_factor = getattr(self.hparams, "prefetch_factor", None)
+            if prefetch_factor is not None:
+                kwargs["prefetch_factor"] = int(prefetch_factor)
+        return kwargs
+
     def train_dataloader(self):
         # # Balanced batch sampler
         # loss_weights = self.train_dataset.calc_class_weights()
@@ -214,10 +226,7 @@ class BaseDataModule(pl.LightningDataModule):
                 self.train_dataset,
                 batch_size=self.hparams.batch_size,
                 shuffle=True,
-                num_workers=self.hparams.num_workers,
-                pin_memory=True,
-                # prefetch_factor=1,
-                persistent_workers=True,
+                **self._loader_worker_kwargs(),
                 collate_fn=collate_fn,
                 drop_last=True,
                 # sampler=sampler,
@@ -229,10 +238,7 @@ class BaseDataModule(pl.LightningDataModule):
                     self.train_dataset,
                     batch_size=self.hparams.batch_size,
                     shuffle=True,
-                    num_workers=self.hparams.num_workers,
-                    pin_memory=True,
-                    # prefetch_factor=1,
-                    persistent_workers=True,
+                    **self._loader_worker_kwargs(),
                     collate_fn=thumos_collate_fn,
                     drop_last=True,
                 )
@@ -241,9 +247,7 @@ class BaseDataModule(pl.LightningDataModule):
                     self.train_dataset,
                     batch_size=self.hparams.batch_size,
                     shuffle=True,
-                    num_workers=self.hparams.num_workers,
-                    pin_memory=True,
-                    persistent_workers=True,
+                    **self._loader_worker_kwargs(),
                     drop_last=True,
                 )
 
@@ -252,19 +256,13 @@ class BaseDataModule(pl.LightningDataModule):
             return DataLoader(
                 self.val_dataset,
                 batch_size=self.hparams.batch_size,
-                num_workers=self.hparams.num_workers,
-                pin_memory=True,
-                # prefetch_factor=1,
-                persistent_workers=True,
+                **self._loader_worker_kwargs(),
                 collate_fn=thumos_collate_fn,
             )
         return DataLoader(
             self.val_dataset,
             batch_size=self.hparams.batch_size,
-            num_workers=self.hparams.num_workers,
-            pin_memory=True,
-            # prefetch_factor=1,
-            persistent_workers=True,
+            **self._loader_worker_kwargs(),
             # worker_init_fn=dataload_init
         )
 
@@ -273,18 +271,14 @@ class BaseDataModule(pl.LightningDataModule):
             return DataLoader(
                 self.test_dataset,
                 batch_size=self.hparams.batch_size,
-                num_workers=self.hparams.num_workers,
-                pin_memory=True,
-                # prefetch_factor=1,
-                persistent_workers=True,
+                **self._loader_worker_kwargs(),
                 collate_fn=thumos_collate_fn,
             )
         else:
             return DataLoader(
                 self.test_dataset,
                 batch_size=self.hparams.batch_size,
-                num_workers=self.hparams.num_workers,
-                pin_memory=True,
+                **self._loader_worker_kwargs(),
             )
 
     def predict_dataloader(self):

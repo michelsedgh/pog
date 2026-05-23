@@ -34,10 +34,7 @@ def main(hparams, network, dataset):
     if hparams.gpus == -1:
         hparams.gpus = torch.cuda.device_count()
     num_cpu = len(os.sched_getaffinity(0))
-    # if using slurm do not modify num_workers
-    if "SLURM_JOB_ID" in os.environ:
-        num_cpu = hparams.num_workers
-    else:
+    if hparams.num_workers is None:
         num_cpu = 8 if num_cpu < 16 else num_cpu
         hparams.num_workers = num_cpu // hparams.gpus
     print(hparams)
@@ -48,13 +45,10 @@ def main(hparams, network, dataset):
         weights_only=False,
     )
     file_hparams = dict(checkpoint["datamodule_hyper_parameters"])
-    # convert namespace to dict
-    hparams = vars(hparams)
-    # overwrite file hparams with command line hparams Namespace
-    file_hparams.update(hparams)
-    hparams.update(file_hparams)
-    # convert back to namespace
-    hparams = argparse.Namespace(**hparams)
+    cli_hparams = {k: v for k, v in vars(hparams).items() if v is not None}
+    # overwrite checkpoint hparams with explicit command-line hparams
+    file_hparams.update(cli_hparams)
+    hparams = argparse.Namespace(**file_hparams)
     # add mode = 'test' to hparams
     hparams.mode = "test"
     print(hparams)
@@ -188,6 +182,22 @@ if __name__ == "__main__":
     parser.add_argument("--test_num_segment", default=1, type=int)
     parser.add_argument("--n_frames_stride", default=-3, type=int)
     parser.add_argument("--dataset", type=str)
+    parser.add_argument("--data_dir", type=str, default=None)
+    parser.add_argument("--task_type", type=str, default=None)
+    parser.add_argument("--n_landmarks", type=int, default=None)
+    parser.add_argument("--heatmap_agg", type=int, default=None)
+    parser.add_argument("--jitter_scales_min", type=int, default=None)
+    parser.add_argument("--jitter_scales_max", type=int, default=None)
+    parser.add_argument("--toyota_frame_source", type=str, default=None)
+    parser.add_argument("--toyota_split_source", type=str, default=None)
+    parser.add_argument("--toyota_seed", type=int, default=None)
+    parser.add_argument("--toyota_val_fraction", type=float, default=None)
+    parser.add_argument("--toyota_test_fraction", type=float, default=None)
+    parser.add_argument("--toyota_max_samples", type=int, default=None)
+    parser.add_argument("--toyota_skeleton_zip", type=str, default=None)
+    parser.add_argument("--toyota_mp4_zip", type=str, default=None)
+    parser.add_argument("--toyota_video_cache_dir", type=str, default=None)
+    parser.add_argument("--toyota_frame_count_cache", type=str, default=None)
 
     parser.add_argument(
         "--model_file",
@@ -196,7 +206,8 @@ if __name__ == "__main__":
         help="Path to the checkpoint file",
     )
 
-    parser.add_argument("--num_workers", type=int, default=16)
+    parser.add_argument("--num_workers", type=int, default=None)
+    parser.add_argument("--prefetch_factor", type=int, default=None)
 
     hparams, _ = parser.parse_known_args()
     network = POGUISE
