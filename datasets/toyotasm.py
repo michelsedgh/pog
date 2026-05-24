@@ -849,7 +849,6 @@ class ToyotaSMDataset(Dataset):
                 "actions": actions,
                 "boxes": boxes,
                 "valid": valid,
-                "label": label,
             }
 
         points = person_keypoints[visible]
@@ -882,7 +881,6 @@ class ToyotaSMDataset(Dataset):
             "actions": actions,
             "boxes": boxes,
             "valid": valid,
-            "label": label,
         }
 
     def _actor_slot(self, slot):
