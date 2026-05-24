@@ -1,0 +1,240 @@
+import argparse
+import os
+import sys
+from argparse import ArgumentParser
+
+import torch
+from pytorch_lightning import Trainer, seed_everything
+from pytorch_lightning.callbacks import Callback
+from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.loggers import CSVLogger
+
+from datamodule.base_datamod import BaseDataModule
+from datasets.toyotasm import ToyotaSMDataset
+from models.poguise import POGUISE
+from modules.heatmap_module import HeatmapModule
+
+
+os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+
+
+class DatasetEpochCallback(Callback):
+    def _set_epoch(self, trainer, epoch):
+        datamodule = trainer.datamodule
+        if datamodule is None or not hasattr(datamodule, "train_dataset"):
+            return
+        train_dataset = datamodule.train_dataset
+        if hasattr(train_dataset, "set_epoch"):
+            train_dataset.set_epoch(epoch)
+
+    def on_fit_start(self, trainer, pl_module):
+        self._set_epoch(trainer, trainer.current_epoch)
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        self._set_epoch(trainer, trainer.current_epoch + 1)
+
+
+def _explicit_cli_overrides(parser, args):
+    option_to_dest = {}
+    for action in parser._actions:
+        for option in action.option_strings:
+            option_to_dest[option] = action.dest
+
+    provided = set()
+    for token in sys.argv[1:]:
+        if not token.startswith("--"):
+            continue
+        option = token.split("=", 1)[0]
+        dest = option_to_dest.get(option)
+        if dest is not None:
+            provided.add(dest)
+
+    values = vars(args)
+    return {dest: values[dest] for dest in provided}
+
+
+def _load_checkpoint(path):
+    if not path:
+        return None
+    return torch.load(path, map_location="cpu", weights_only=False)
+
+
+def _merged_hparams(args, cli_overrides, checkpoint):
+    merged = vars(args).copy()
+    if checkpoint is not None:
+        merged.update(checkpoint.get("hyper_parameters", {}))
+        merged.update(checkpoint.get("datamodule_hyper_parameters", {}))
+    merged.update(cli_overrides)
+
+    if merged.get("max_epochs") is not None:
+        merged["max_nb_epochs"] = merged["max_epochs"]
+    merged["mode"] = "train"
+    merged["dataset_artifact"] = merged.get("dataset_artifact") or merged.get("dataset")
+    return argparse.Namespace(**merged)
+
+
+def _dataset_class(name):
+    if name == "toyotasm":
+        return ToyotaSMDataset
+    if name == "driveact":
+        from datasets.driveact import DriveActDataset
+
+        return DriveActDataset
+    raise ValueError(f"Unsupported dataset: {name}")
+
+
+def _copy_clip_head_to_actor_head(module):
+    model = module.model
+    if not getattr(model, "actor_prompt", False):
+        return
+    if not hasattr(model, "actor_head") or not hasattr(model, "head"):
+        return
+    if model.actor_head.weight.shape != model.head.weight.shape:
+        return
+    with torch.no_grad():
+        model.actor_head.weight.copy_(model.head.weight)
+        model.actor_head.bias.copy_(model.head.bias)
+    print("Initialized actor_head from checkpoint class head.")
+
+
+def build_parser():
+    parser = ArgumentParser()
+    parser = POGUISE.add_model_specific_args(parser)
+    parser = ToyotaSMDataset.add_model_specific_args(parser)
+
+    parser.add_argument("--dataset", type=str, default="toyotasm")
+    parser.add_argument("--dataset_artifact", type=str, default="toyotasm")
+    parser.add_argument("--model_file", type=str, default=None)
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None)
+    parser.add_argument("--strict_load", type=int, default=None)
+
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--accelerator", type=str, default="auto")
+    parser.add_argument("--gpus", type=int, default=1)
+    parser.add_argument("--nodes", type=int, default=1)
+    parser.add_argument("--strategy", type=str, default="auto")
+    parser.add_argument("--precision", type=str, default="bf16-mixed")
+    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--num_workers", type=int, default=8)
+    parser.add_argument("--persistent_workers", type=int, default=1)
+    parser.add_argument("--prefetch_factor", type=int, default=None)
+    parser.add_argument("--max_epochs", type=int, default=None)
+    parser.add_argument("--max_nb_epochs", type=int, default=200)
+    parser.add_argument("--accum_grad_batches", type=int, default=2)
+    parser.add_argument("--gradient_clip_val", type=float, default=1.5)
+    parser.add_argument("--num_sanity_val_steps", type=int, default=2)
+
+    parser.add_argument("--project_folder", type=str, default="toyotaSM")
+    parser.add_argument("--model_name", type=str, default="poguise_actor_prompt")
+    parser.add_argument("--default_root_dir", type=str, default="./checkpoints")
+    parser.add_argument("--save_top_k", type=int, default=3)
+    parser.add_argument("--reload_dataloaders_every_n_epochs", type=int, default=None)
+
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr_head", type=float, default=6e-4)
+    parser.add_argument("--lr_head_hm", type=float, default=0.0)
+    parser.add_argument("--weight_decay", type=float, default=0.04)
+    parser.add_argument("--weight_decay_head", type=float, default=0.01)
+    parser.add_argument("--weight_decay_head_hm", type=float, default=0.01)
+    parser.add_argument("--t_max_scheduler", type=int, default=10)
+    parser.add_argument("--warm_restarts", type=int, default=0)
+
+    parser.add_argument("--label_smoothing", type=float, default=0.1)
+    parser.add_argument("--mixup", type=int, default=0)
+    parser.add_argument("--target_kp_loss_weight", type=int, default=0)
+    parser.add_argument("--kp_loss_weight", type=float, default=10000.0)
+    parser.add_argument("--log_kp_loss_weight", type=int, default=0)
+    parser.add_argument("--grad_weights", type=int, default=0)
+    parser.add_argument("--deepspeed_optim", type=int, default=0)
+    parser.add_argument("--kp_only", type=int, default=0)
+
+    return parser
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+    cli_overrides = _explicit_cli_overrides(parser, args)
+    checkpoint = _load_checkpoint(args.model_file)
+    hparams = _merged_hparams(args, cli_overrides, checkpoint)
+
+    if hparams.actor_prompt and hparams.mixup:
+        raise ValueError("actor_prompt training requires --mixup 0")
+
+    seed_everything(hparams.seed)
+    dataset = _dataset_class(hparams.dataset)
+    module = HeatmapModule(model=POGUISE, **vars(hparams))
+
+    if checkpoint is not None:
+        strict = (
+            bool(hparams.strict_load)
+            if hparams.strict_load is not None
+            else not bool(hparams.actor_prompt)
+        )
+        result = module.load_state_dict(checkpoint["state_dict"], strict=strict)
+        if hparams.actor_prompt:
+            _copy_clip_head_to_actor_head(module)
+        if not strict:
+            print("Missing keys:", result.missing_keys)
+            print("Unexpected keys:", result.unexpected_keys)
+
+    datamodule_params = vars(hparams).copy()
+    datamodule_params.pop("dataset", None)
+    datamodule = BaseDataModule(dataset, **datamodule_params)
+
+    accelerator = hparams.accelerator
+    if accelerator == "auto":
+        accelerator = "gpu" if hparams.gpus and torch.cuda.is_available() else "cpu"
+    devices = hparams.gpus if accelerator == "gpu" else "auto"
+    strategy = hparams.strategy
+    if strategy == "auto" and accelerator == "gpu" and int(hparams.gpus) > 1:
+        strategy = "ddp"
+
+    root_dir = os.path.join(hparams.default_root_dir, hparams.model_name)
+    logger = CSVLogger(save_dir=hparams.default_root_dir, name=hparams.model_name)
+    checkpoint_callback = ModelCheckpoint(
+        monitor="val_loss",
+        mode="min",
+        save_top_k=hparams.save_top_k,
+        save_last=True,
+        filename="{epoch:03d}-{val_loss:.4f}",
+    )
+    callbacks = [checkpoint_callback, DatasetEpochCallback()]
+    synthetic_curriculum = (
+        hparams.actor_prompt
+        and hparams.toyota_synthetic_warmup_epochs > 0
+        and (
+            hparams.toyota_synthetic_two_actor_prob
+            + hparams.toyota_synthetic_three_actor_prob
+            > 0
+        )
+    )
+    reload_every = hparams.reload_dataloaders_every_n_epochs
+    if reload_every is None:
+        reload_every = 1 if synthetic_curriculum else 0
+
+    trainer = Trainer(
+        accelerator=accelerator,
+        devices=devices,
+        num_nodes=hparams.nodes,
+        strategy=strategy,
+        max_epochs=hparams.max_nb_epochs,
+        precision=hparams.precision,
+        default_root_dir=root_dir,
+        logger=logger,
+        callbacks=callbacks,
+        accumulate_grad_batches=hparams.accum_grad_batches,
+        gradient_clip_val=hparams.gradient_clip_val,
+        num_sanity_val_steps=hparams.num_sanity_val_steps,
+        reload_dataloaders_every_n_epochs=reload_every,
+        benchmark=True,
+    )
+    trainer.fit(
+        module,
+        datamodule=datamodule,
+        ckpt_path=hparams.resume_from_checkpoint,
+    )
+
+
+if __name__ == "__main__":
+    main()

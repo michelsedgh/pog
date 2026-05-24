@@ -142,6 +142,7 @@ class POGUISE(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
         self.mode = self.hparams.get("mode", "train")
+        self.actor_prompt = bool(self.hparams.get("actor_prompt", 0))
         self._create_network()
         # freeze backbone if specified
         if self.hparams.freeze_backbone:
@@ -165,6 +166,8 @@ class POGUISE(pl.LightningModule):
                 merge_type=self.hparams.merge_type,
                 mode=self.mode,
                 hw_out_conv=self.hparams.hw_out_conv,
+                actor_prompt=self.actor_prompt,
+                num_actor_tokens=self.hparams.get("num_actor_tokens", 8),
             )
         else:
             self.net = vit_base_patch16_224(
@@ -183,6 +186,8 @@ class POGUISE(pl.LightningModule):
                 merge_type=self.hparams.merge_type,
                 mode=self.mode,
                 hw_out_conv=self.hparams.hw_out_conv,
+                actor_prompt=self.actor_prompt,
+                num_actor_tokens=self.hparams.get("num_actor_tokens", 8),
             )
         if self.hparams.pretrained == "DEFAULT":
             if os.path.exists("vit_b_k710_dl_from_giant.pth"):
@@ -206,6 +211,13 @@ class POGUISE(pl.LightningModule):
         # Mapping to classification output
         self.net.head = nn.Identity(self.net.num_features, self.net.num_features)
         self.head = nn.Linear(self.net.num_features, self.hparams.num_classes)
+        if self.actor_prompt:
+            self.actor_head = nn.Linear(self.net.num_features, self.hparams.num_classes)
+            self.presence_head = (
+                nn.Linear(self.net.num_features, 1)
+                if self.hparams.get("actor_presence_head", 0)
+                else None
+            )
         if self.hparams.get("linear_probe", 0):
             self._freeze_backbone()
             self.head = Classifier(
@@ -225,6 +237,12 @@ class POGUISE(pl.LightningModule):
         # Unfreeze the head
         for param in self.head.parameters():
             param.requires_grad = True
+        if self.actor_prompt:
+            for param in self.actor_head.parameters():
+                param.requires_grad = True
+            if self.presence_head is not None:
+                for param in self.presence_head.parameters():
+                    param.requires_grad = True
 
     def _freeze_stages(self):
         if self.frozen_stages >= 0:
@@ -240,9 +258,22 @@ class POGUISE(pl.LightningModule):
                 for param in m.parameters():
                     param.requires_grad = False
 
-    def forward(self, x):
+    def forward(self, x, boxes=None, valid=None):
         # convert to b c t h w
         x = x.permute(0, 2, 1, 3, 4)
+        if self.actor_prompt:
+            if self.hparams.n_landmarks > 0:
+                _, x_actor, x_heatmap = self.net(x, boxes=boxes, valid=valid)
+            else:
+                _, x_actor = self.net(x, boxes=boxes, valid=valid)
+                x_heatmap = 0
+            if self.hparams.ret_feat:
+                return x_actor
+            action_logits = self.actor_head(x_actor)
+            if self.presence_head is not None:
+                presence_logits = self.presence_head(x_actor).squeeze(-1)
+                return action_logits, x_heatmap, presence_logits
+            return action_logits, x_heatmap
         if self.hparams.n_landmarks > 0:
             x_class, x_heatmap = self.net(x)
             if self.hparams.ret_feat:
@@ -292,6 +323,10 @@ class POGUISE(pl.LightningModule):
         # parser.add_argument("--enhanced_weight_class_obj", type=float, default=1)
         parser.add_argument("--hw_out_conv", type=int, default=8)
         parser.add_argument("--n_registers", type=int, default=4)
+        parser.add_argument("--actor_prompt", type=int, default=0)
+        parser.add_argument("--num_actor_tokens", type=int, default=8)
+        parser.add_argument("--actor_presence_head", type=int, default=0)
+        parser.add_argument("--presence_loss_weight", type=float, default=0.1)
         parser.add_argument("--ret_feat", type=int, default=0)
         parser.add_argument("--linear_probe", type=int, default=0)
 

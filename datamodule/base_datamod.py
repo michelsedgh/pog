@@ -195,6 +195,8 @@ class BaseDataModule(pl.LightningDataModule):
         # loss_weights = self.train_dataset.calc_class_weights()
         # weight_sample = torch.tensor([loss_weights[i] for i in self.train_dataset.y])
         # sampler = torch.utils.data.sampler.WeightedRandomSampler(weight_sample, len(self.train_dataset))
+        if getattr(self.hparams, "actor_prompt", 0) and self.hparams.mixup:
+            raise ValueError("actor_prompt training does not support mixup/cutmix")
         if self.hparams.mixup:
             mixup_fn = Mixup(
                 mixup_alpha=0.8,

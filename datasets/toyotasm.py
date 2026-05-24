@@ -5,7 +5,7 @@ import os
 import pandas as pd
 import numpy as np
 import torchvision
-from mmpose.codecs import UDPHeatmap
+import torch.nn.functional as F
 from argparse import ArgumentParser
 import json
 import re
@@ -13,6 +13,11 @@ import shutil
 import tempfile
 import zipfile
 from utils.ntu import frame_utils as utils
+
+try:
+    from mmpose.codecs import UDPHeatmap
+except ImportError:
+    UDPHeatmap = None
 
 CS_DICT = {
     "Cook.Cleandishes": 1,
@@ -94,6 +99,57 @@ class ToyotaSMDataset(Dataset):
         self.n_frames_stride = kwargs.get("n_frames_stride", 1)
         self.n_landmarks = kwargs["n_landmarks"]
         self.heatmap_agg = kwargs["heatmap_agg"]
+        self.actor_prompt = bool(kwargs.get("actor_prompt", 0))
+        self.num_actor_tokens = int(kwargs.get("num_actor_tokens", 8))
+        if self.num_actor_tokens <= 0:
+            raise ValueError("num_actor_tokens must be positive")
+        self.toyota_actor_box_expand = float(kwargs.get("toyota_actor_box_expand", 1.15))
+        if self.toyota_actor_box_expand <= 0:
+            raise ValueError("toyota_actor_box_expand must be positive")
+        self.toyota_actor_box_jitter_prob = float(
+            kwargs.get("toyota_actor_box_jitter_prob", 0.8)
+        )
+        self.toyota_actor_box_center_jitter = float(
+            kwargs.get("toyota_actor_box_center_jitter", 0.08)
+        )
+        self.toyota_actor_box_scale_min = float(
+            kwargs.get("toyota_actor_box_scale_min", 0.9)
+        )
+        self.toyota_actor_box_scale_max = float(
+            kwargs.get("toyota_actor_box_scale_max", 1.3)
+        )
+        if self.toyota_actor_box_scale_min <= 0:
+            raise ValueError("toyota_actor_box_scale_min must be positive")
+        if self.toyota_actor_box_scale_max < self.toyota_actor_box_scale_min:
+            raise ValueError(
+                "toyota_actor_box_scale_max must be greater than or equal to min"
+            )
+        self.current_epoch = int(kwargs.get("toyota_current_epoch", 0))
+        self.synthetic_warmup_epochs = int(
+            kwargs.get("toyota_synthetic_warmup_epochs", 3)
+        )
+        self.synthetic_two_actor_prob = float(
+            kwargs.get("toyota_synthetic_two_actor_prob", 0.0)
+        )
+        self.synthetic_three_actor_prob = float(
+            kwargs.get("toyota_synthetic_three_actor_prob", 0.0)
+        )
+        self.synthetic_same_class_prob = float(
+            kwargs.get("toyota_synthetic_same_class_prob", 0.3)
+        )
+        total_synthetic_prob = (
+            self.synthetic_two_actor_prob + self.synthetic_three_actor_prob
+        )
+        if total_synthetic_prob > 1.0:
+            raise ValueError("Toyota synthetic actor probabilities must sum to <= 1")
+        if self.synthetic_three_actor_prob > 0 and self.num_actor_tokens < 3:
+            raise ValueError("3-person synthetic samples require at least 3 actor slots")
+        self.pose_landmarks = int(kwargs.get("toyota_pose_landmarks", 13))
+        if self.n_landmarks > 0 and self.pose_landmarks != self.n_landmarks:
+            raise ValueError(
+                "Toyota heatmap generation requires toyota_pose_landmarks to match "
+                f"n_landmarks, got {self.pose_landmarks} and {self.n_landmarks}"
+            )
         self.jitter_scales_min = kwargs["jitter_scales_min"]
         self.jitter_scales_max = kwargs["jitter_scales_max"]
         self.test_num_crop = test_num_crop
@@ -124,7 +180,10 @@ class ToyotaSMDataset(Dataset):
         # self.mean = torch.tensor([1,1,1])
         # self.std = torch.tensor([1,1,1])
         self._num_retries = 5
+        self.needs_skeleton = self.n_landmarks > 0 or self.actor_prompt
         if self.n_landmarks:
+            if UDPHeatmap is None:
+                raise ImportError("mmpose is required when n_landmarks is greater than 0")
             self.heatmap_size = (56, 56)
             self.heatmap_generator = UDPHeatmap(
                 input_size=(224, 224), heatmap_size=self.heatmap_size, sigma=1.5
@@ -137,6 +196,10 @@ class ToyotaSMDataset(Dataset):
             self.data_df = self.data_df.head(self.toyota_max_samples).copy()
         self.data_df["label"] -= 1
         self.y = torch.tensor(self.data_df.label.values, dtype=torch.long)
+        self.class_to_indices = {
+            int(label): np.flatnonzero(self.y.numpy() == int(label))
+            for label in torch.unique(self.y).tolist()
+        }
 
         self.length = len(self.data_df)
         print(
@@ -152,7 +215,7 @@ class ToyotaSMDataset(Dataset):
 
     def setup(self, stage=None):
         print(f"Setting up ToyotaSMDataset for {self.set_type}...")
-        if self.n_landmarks:
+        if self.needs_skeleton:
             self.landmark_list = []
             # read landmarks into memory
             file_folder = "skeleton"
@@ -180,10 +243,12 @@ class ToyotaSMDataset(Dataset):
                             print(frame, row.file_id)
                             raise ValueError("More than one person in frame")
                         if len(frame) == 0:
-                            landmarks_file.append(torch.zeros((self.n_landmarks, 2)))
+                            landmarks_file.append(torch.zeros((self.pose_landmarks, 2)))
                             continue
-                        landmarks_x = frame[0]["pose2d"][:13]
-                        landmarks_y = frame[0]["pose2d"][13:]
+                        landmarks_x = frame[0]["pose2d"][: self.pose_landmarks]
+                        landmarks_y = frame[0]["pose2d"][
+                            self.pose_landmarks : self.pose_landmarks * 2
+                        ]
                         landmarks = list(zip(landmarks_x, landmarks_y))
                         landmarks = torch.tensor(landmarks)
                         landmarks = torch.round(landmarks).to(torch.int)
@@ -233,6 +298,17 @@ class ToyotaSMDataset(Dataset):
         parser.add_argument("--toyota_mp4_zip", type=str, default=None)
         parser.add_argument("--toyota_video_cache_dir", type=str, default=None)
         parser.add_argument("--toyota_frame_count_cache", type=str, default=None)
+        parser.add_argument("--toyota_actor_box_expand", type=float, default=1.15)
+        parser.add_argument("--toyota_actor_box_jitter_prob", type=float, default=0.8)
+        parser.add_argument("--toyota_actor_box_center_jitter", type=float, default=0.08)
+        parser.add_argument("--toyota_actor_box_scale_min", type=float, default=0.9)
+        parser.add_argument("--toyota_actor_box_scale_max", type=float, default=1.3)
+        parser.add_argument("--toyota_pose_landmarks", type=int, default=13)
+        parser.add_argument("--toyota_current_epoch", type=int, default=0)
+        parser.add_argument("--toyota_synthetic_warmup_epochs", type=int, default=3)
+        parser.add_argument("--toyota_synthetic_two_actor_prob", type=float, default=0.0)
+        parser.add_argument("--toyota_synthetic_three_actor_prob", type=float, default=0.0)
+        parser.add_argument("--toyota_synthetic_same_class_prob", type=float, default=0.3)
 
         return parser
 
@@ -242,6 +318,27 @@ class ToyotaSMDataset(Dataset):
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
             idx = idx.tolist()
+        synthetic_actor_count = self._synthetic_actor_count()
+        if synthetic_actor_count > 1:
+            return self._getitem_synthetic(idx, synthetic_actor_count)
+        return self._getitem_single(idx)
+
+    def set_epoch(self, epoch):
+        self.current_epoch = int(epoch)
+
+    def _synthetic_actor_count(self):
+        if not self.actor_prompt or self.set_type != "train":
+            return 1
+        if self.current_epoch < self.synthetic_warmup_epochs:
+            return 1
+        draw = np.random.random()
+        if draw < self.synthetic_three_actor_prob:
+            return 3
+        if draw < self.synthetic_three_actor_prob + self.synthetic_two_actor_prob:
+            return 2
+        return 1
+
+    def _getitem_single(self, idx, actor_slot=None):
         if self.set_type in ["train", "val"]:
             # -1 indicates random sampling.
             temporal_sample_index = -1
@@ -298,7 +395,7 @@ class ToyotaSMDataset(Dataset):
             # frames = frames[frames_idx]
             # convert frames from T, C, H, W to T H W C
             frames = frames.permute(0, 2, 3, 1)
-            if self.n_landmarks:
+            if self.needs_skeleton:
                 keypoints = torch.stack(self.landmark_list[idx]).numpy()
                 frames_idx_clamped = np.clip(frames_idx, 0, len(keypoints) - 1)
                 keypoints = [keypoints[frames_idx_clamped]]
@@ -318,6 +415,19 @@ class ToyotaSMDataset(Dataset):
                 keypoints=keypoints,
             )
             frames = frames.permute(1, 0, 2, 3)
+            actor_target = None
+            if self.actor_prompt:
+                actor_target = self._build_actor_target(
+                    keypoints,
+                    label,
+                    height=frames.shape[2],
+                    width=frames.shape[3],
+                    slot=actor_slot,
+                )
+                if not actor_target["valid"].any():
+                    if i_try < self._num_retries - 1:
+                        continue
+                    raise ValueError(f"No valid actor box found for {file_id}")
             if self.n_landmarks:
                 lnd_heatmap = torch.zeros(
                     frames.shape[0], self.n_landmarks, *self.heatmap_size
@@ -364,6 +474,16 @@ class ToyotaSMDataset(Dataset):
                     lnd_heatmap = torch.mean(lnd_heatmap, dim=0)
                 # kp_vis = torch.ones_like(lnd_heatmap)
                 if self.set_type == "test":
+                    if self.actor_prompt:
+                        actor_target["heatmap"] = lnd_heatmap
+                        actor_target["kp_vis"] = kp_vis
+                        return (
+                            frames,
+                            actor_target,
+                            self.data_df.iloc[idx].file_id,
+                            temporal_sample_index,
+                            spatial_sample_index,
+                        )
                     return (
                         frames,
                         label,
@@ -372,7 +492,21 @@ class ToyotaSMDataset(Dataset):
                         spatial_sample_index,
                         lnd_heatmap,
                     )
+                if self.actor_prompt:
+                    actor_target["heatmap"] = lnd_heatmap
+                    actor_target["kp_vis"] = kp_vis
+                    return frames, actor_target
                 return frames, [label, lnd_heatmap, kp_vis]
+            if self.actor_prompt:
+                if self.set_type == "test":
+                    return (
+                        frames,
+                        actor_target,
+                        self.data_df.iloc[idx].file_id,
+                        temporal_sample_index,
+                        spatial_sample_index,
+                    )
+                return frames, actor_target
             if self.set_type == "test":
                 return (
                     frames,
@@ -380,8 +514,259 @@ class ToyotaSMDataset(Dataset):
                     self.data_df.iloc[idx].file_id,
                     temporal_sample_index,
                     spatial_sample_index,
-                )
+            )
             return frames, label
+
+    def _getitem_synthetic(self, idx, actor_count):
+        if actor_count not in (2, 3):
+            raise ValueError(f"Unsupported synthetic actor count: {actor_count}")
+
+        indices = self._sample_synthetic_indices(idx, actor_count)
+        slots = np.random.choice(self.num_actor_tokens, actor_count, replace=False)
+        samples = [
+            self._getitem_single(int(sample_idx), actor_slot=int(slots[i]))
+            for i, sample_idx in enumerate(indices)
+        ]
+
+        frames = self._compose_synthetic_frames([sample[0] for sample in samples])
+        target = self._compose_synthetic_actor_target(
+            [sample[1] for sample in samples],
+            slots,
+            actor_count,
+        )
+        return frames, target
+
+    def _sample_synthetic_indices(self, idx, actor_count):
+        base_label = int(self.y[idx])
+        indices = [int(idx)]
+        if actor_count == 2:
+            if np.random.random() < self.synthetic_same_class_prob:
+                indices.append(self._sample_same_class_index(base_label, exclude=indices))
+            else:
+                indices.append(
+                    self._sample_different_class_index(base_label, exclude=indices)
+                )
+            return indices
+
+        while len(indices) < actor_count:
+            if np.random.random() < self.synthetic_same_class_prob:
+                labels = [int(self.y[i]) for i in indices]
+                same_label = labels[np.random.randint(0, len(labels))]
+                indices.append(
+                    self._sample_same_class_index(same_label, exclude=indices)
+                )
+            else:
+                labels = {int(self.y[i]) for i in indices}
+                indices.append(self._sample_label_outside(labels, exclude=indices))
+        return indices
+
+    def _sample_same_class_index(self, label, exclude):
+        candidates = [
+            int(i)
+            for i in self.class_to_indices.get(int(label), [])
+            if int(i) not in set(exclude)
+        ]
+        if not candidates:
+            raise RuntimeError(
+                f"Cannot create same-class synthetic sample for class {label}"
+            )
+        return candidates[int(np.random.randint(0, len(candidates)))]
+
+    def _sample_different_class_index(self, label, exclude):
+        return self._sample_label_outside({int(label)}, exclude)
+
+    def _sample_label_outside(self, labels, exclude):
+        excluded = set(exclude)
+        candidates = [
+            int(i)
+            for i, sample_label in enumerate(self.y.tolist())
+            if int(sample_label) not in labels and i not in excluded
+        ]
+        if not candidates:
+            raise RuntimeError(
+                "Cannot create different-class synthetic Toyota sample from this split"
+            )
+        return candidates[int(np.random.randint(0, len(candidates)))]
+
+    def _panel_bounds(self, actor_count, width):
+        if actor_count == 2:
+            return [(0, width // 2), (width // 2, width)]
+        left = width // 3
+        middle = (2 * width) // 3
+        return [(0, left), (left, middle), (middle, width)]
+
+    def _compose_synthetic_frames(self, frames_list):
+        actor_count = len(frames_list)
+        _, _, height, width = frames_list[0].shape
+        canvas = torch.zeros_like(frames_list[0])
+        for frames, (x0, x1) in zip(frames_list, self._panel_bounds(actor_count, width)):
+            panel = F.interpolate(
+                frames,
+                size=(height, x1 - x0),
+                mode="bilinear",
+                align_corners=False,
+            )
+            canvas[:, :, :, x0:x1] = panel
+        return canvas
+
+    def _compose_synthetic_actor_target(self, targets, slots, actor_count):
+        boxes = torch.zeros((self.num_actor_tokens, 4), dtype=torch.float32)
+        valid = torch.zeros(self.num_actor_tokens, dtype=torch.bool)
+        actions = torch.full((self.num_actor_tokens,), -100, dtype=torch.long)
+
+        for target, slot, (x0, x1) in zip(
+            targets, slots, self._panel_bounds(actor_count, 224)
+        ):
+            slot = int(slot)
+            src_box = target["boxes"][slot]
+            panel_x0 = x0 / 224.0
+            panel_w = (x1 - x0) / 224.0
+            boxes[slot] = torch.tensor(
+                [
+                    panel_x0 + src_box[0] * panel_w,
+                    src_box[1],
+                    panel_x0 + src_box[2] * panel_w,
+                    src_box[3],
+                ],
+                dtype=torch.float32,
+            ).clamp_(0.0, 1.0)
+            valid[slot] = True
+            actions[slot] = target["actions"][slot]
+
+        output = {"actions": actions, "boxes": boxes, "valid": valid}
+        if self.n_landmarks > 0:
+            output["heatmap"] = self._compose_synthetic_heatmaps(
+                [target["heatmap"] for target in targets]
+            )
+            output["kp_vis"] = self._compose_synthetic_heatmaps(
+                [target["kp_vis"] for target in targets],
+                nearest=True,
+            ).clamp_(0, 1)
+        return output
+
+    def _compose_synthetic_heatmaps(self, heatmaps, nearest=False):
+        actor_count = len(heatmaps)
+        channels, height, width = heatmaps[0].shape
+        canvas = torch.zeros((channels, height, width), dtype=heatmaps[0].dtype)
+        for heatmap, (x0, x1) in zip(
+            heatmaps, self._panel_bounds(actor_count, width)
+        ):
+            mode = "nearest" if nearest else "bilinear"
+            kwargs = {} if nearest else {"align_corners": False}
+            panel = F.interpolate(
+                heatmap.unsqueeze(0),
+                size=(height, x1 - x0),
+                mode=mode,
+                **kwargs,
+            ).squeeze(0)
+            canvas[:, :, x0:x1] += panel
+        return canvas
+
+    def _build_actor_target(self, keypoints, label, height, width, slot=None):
+        if keypoints is None:
+            raise ValueError("Toyota actor_prompt requires skeleton keypoints")
+
+        boxes = torch.zeros((self.num_actor_tokens, 4), dtype=torch.float32)
+        valid = torch.zeros(self.num_actor_tokens, dtype=torch.bool)
+        actions = torch.full((self.num_actor_tokens,), -100, dtype=torch.long)
+
+        person_keypoints = np.asarray(keypoints[0], dtype=np.float32)
+        finite = np.isfinite(person_keypoints).all(axis=-1)
+        non_zero = ~np.all(person_keypoints == 0, axis=-1)
+        in_frame = (
+            (person_keypoints[..., 0] >= 0)
+            & (person_keypoints[..., 0] < width)
+            & (person_keypoints[..., 1] >= 0)
+            & (person_keypoints[..., 1] < height)
+        )
+        visible = finite & non_zero & in_frame
+        if not visible.any():
+            return {
+                "actions": actions,
+                "boxes": boxes,
+                "valid": valid,
+                "label": label,
+            }
+
+        points = person_keypoints[visible]
+        x1 = float(points[:, 0].min())
+        y1 = float(points[:, 1].min())
+        x2 = float(points[:, 0].max())
+        y2 = float(points[:, 1].max())
+
+        cx = (x1 + x2) * 0.5
+        cy = (y1 + y2) * 0.5
+        bw = max(x2 - x1, 1.0) * self.toyota_actor_box_expand
+        bh = max(y2 - y1, 1.0) * self.toyota_actor_box_expand
+        x1 = max(0.0, cx - bw * 0.5)
+        y1 = max(0.0, cy - bh * 0.5)
+        x2 = min(float(width), cx + bw * 0.5)
+        y2 = min(float(height), cy + bh * 0.5)
+
+        slot = self._actor_slot(slot)
+        box = torch.tensor(
+            [x1 / width, y1 / height, x2 / width, y2 / height],
+            dtype=torch.float32,
+        ).clamp_(0.0, 1.0)
+        if self.set_type == "train":
+            box = self._jitter_actor_box(box)
+        boxes[slot] = box
+        valid[slot] = True
+        actions[slot] = label.long() if torch.is_tensor(label) else int(label)
+        return {
+            "actions": actions,
+            "boxes": boxes,
+            "valid": valid,
+            "label": label,
+        }
+
+    def _actor_slot(self, slot):
+        if slot is not None:
+            slot = int(slot)
+            if slot < 0 or slot >= self.num_actor_tokens:
+                raise ValueError(f"actor slot {slot} is outside K={self.num_actor_tokens}")
+            return slot
+        if self.set_type == "train":
+            return int(np.random.randint(0, self.num_actor_tokens))
+        return 0
+
+    def _jitter_actor_box(self, box):
+        if self.toyota_actor_box_jitter_prob <= 0:
+            return box
+        if np.random.random() >= self.toyota_actor_box_jitter_prob:
+            return box
+
+        x1, y1, x2, y2 = [float(v) for v in box.tolist()]
+        bw = max(x2 - x1, 1e-4)
+        bh = max(y2 - y1, 1e-4)
+        cx = (x1 + x2) * 0.5
+        cy = (y1 + y2) * 0.5
+        cx += np.random.uniform(
+            -self.toyota_actor_box_center_jitter,
+            self.toyota_actor_box_center_jitter,
+        ) * bw
+        cy += np.random.uniform(
+            -self.toyota_actor_box_center_jitter,
+            self.toyota_actor_box_center_jitter,
+        ) * bh
+        scale = np.random.uniform(
+            self.toyota_actor_box_scale_min,
+            self.toyota_actor_box_scale_max,
+        )
+        bw *= scale
+        bh *= scale
+        jittered = torch.tensor(
+            [
+                max(0.0, cx - bw * 0.5),
+                max(0.0, cy - bh * 0.5),
+                min(1.0, cx + bw * 0.5),
+                min(1.0, cy + bh * 0.5),
+            ],
+            dtype=torch.float32,
+        )
+        if jittered[2] <= jittered[0] or jittered[3] <= jittered[1]:
+            return box
+        return jittered
 
     def _resolve_frame_source(self):
         if self.frame_source != "auto":

@@ -3,13 +3,22 @@ import torch.optim as optim
 import pytorch_lightning as pl
 import torchmetrics
 import torch
+import torch.nn.functional as F
 import pandas as pd
 import os
 from losses.softtarget import SoftTargetCrossEntropy
 from losses.heatmap_loss import KeypointMSELoss
-from grad_weights.nash_mtl import NashMTL
 import pickle
-from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+try:
+    from grad_weights.nash_mtl import NashMTL
+except ImportError:
+    NashMTL = None
+
+try:
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+except ImportError:
+    DeepSpeedCPUAdam = None
 
 
 class HeatmapModule(pl.LightningModule):
@@ -26,6 +35,7 @@ class HeatmapModule(pl.LightningModule):
         self.model = model(**vars(hparams)) if hparams is not None else model(**kwargs)
 
         hparams = self.model.hparams
+        self.actor_prompt = bool(hparams.get("actor_prompt", 0))
         self.num_classes = hparams.num_classes
         self.dataset_name = hparams.dataset_artifact
 
@@ -40,7 +50,11 @@ class HeatmapModule(pl.LightningModule):
         # self.lr_patch_embed = hparams.lr_patch_embed
         # self.weight_decay_patch_embed = hparams.weight_decay_patch_embed
         # Create loss module
-        if hparams.label_smoothing and hparams.mixup:
+        if self.actor_prompt:
+            self.train_loss = nn.CrossEntropyLoss(
+                label_smoothing=float(hparams.label_smoothing or 0.0)
+            )
+        elif hparams.label_smoothing and hparams.mixup:
             # handled by mixup
             self.train_loss = SoftTargetCrossEntropy()
         else:
@@ -94,17 +108,59 @@ class HeatmapModule(pl.LightningModule):
         )
         self.validation_step_outputs = {"preds": [], "labels": []}
 
-    def forward(self, x):
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        result = super().load_state_dict(state_dict, strict=strict, assign=assign)
+        if self.actor_prompt and not strict:
+            allowed_missing = (
+                "model.net.actor_tokens",
+                "model.net.bbox_mlp",
+                "model.actor_head",
+                "model.presence_head",
+            )
+            red_flag_missing = (
+                "model.net.patch_embed",
+                "model.net.blocks",
+                "model.net.norm",
+                "model.net.fc_norm",
+                "model.net.heatmap_tokens",
+                "model.net.heatmap_head",
+                "model.head",
+            )
+            unexpected_missing = [
+                key
+                for key in result.missing_keys
+                if not key.startswith(allowed_missing)
+            ]
+            backbone_missing = [
+                key
+                for key in result.missing_keys
+                if key.startswith(red_flag_missing)
+            ]
+            if unexpected_missing or backbone_missing:
+                raise RuntimeError(
+                    "Actor-prompt checkpoint load is missing non-actor weights: "
+                    f"{unexpected_missing or backbone_missing}"
+                )
+        return result
+
+    def forward(self, x, boxes=None, valid=None):
         # Forward function that is run when visualizing the graph
-        return self.model(x)
+        return self.model(x, boxes=boxes, valid=valid)
 
     def configure_optimizers(self):
         # We will support Adam or SGD as optimizers.
         if self.model.hparams.freeze_backbone:
+            head_params = (
+                list(self.model.actor_head.parameters())
+                if self.actor_prompt
+                else list(self.model.head.parameters())
+            )
+            if self.actor_prompt and self.model.presence_head is not None:
+                head_params += list(self.model.presence_head.parameters())
             optimizer = optim.AdamW(
                 [
                     {
-                        "params": self.model.head.parameters(),
+                        "params": head_params,
                         "lr": self.lr_head,
                         "weight_decay": self.weight_decay_head,
                     },
@@ -116,6 +172,13 @@ class HeatmapModule(pl.LightningModule):
                 and self.model.hparams.lr_head_hm
             ):
                 # Python
+                head_params = (
+                    list(self.model.actor_head.parameters())
+                    if self.actor_prompt
+                    else list(self.model.head.parameters())
+                )
+                if self.actor_prompt and self.model.presence_head is not None:
+                    head_params += list(self.model.presence_head.parameters())
                 params = [
                     {
                         "params": [
@@ -127,7 +190,7 @@ class HeatmapModule(pl.LightningModule):
                         "weight_decay": self.weight_decay,
                     },
                     {
-                        "params": self.model.head.parameters(),
+                        "params": head_params,
                         "lr": self.lr_head,
                         "weight_decay": self.weight_decay_head,
                     },
@@ -140,6 +203,13 @@ class HeatmapModule(pl.LightningModule):
                     },
                 )
             else:
+                head_params = (
+                    list(self.model.actor_head.parameters())
+                    if self.actor_prompt
+                    else list(self.model.head.parameters())
+                )
+                if self.actor_prompt and self.model.presence_head is not None:
+                    head_params += list(self.model.presence_head.parameters())
                 params = [
                     {
                         "params": self.model.net.parameters(),
@@ -147,7 +217,7 @@ class HeatmapModule(pl.LightningModule):
                         "weight_decay": self.weight_decay,
                     },
                     {
-                        "params": self.model.head.parameters(),
+                        "params": head_params,
                         "lr": self.lr_head,
                         "weight_decay": self.weight_decay_head,
                     },
@@ -163,6 +233,8 @@ class HeatmapModule(pl.LightningModule):
                 )
 
             if self.model.hparams.grad_weights and self.model.hparams.n_landmarks > 0:
+                if NashMTL is None:
+                    raise ImportError("cvxpy is required when grad_weights is enabled")
                 self.grad_weight = NashMTL(
                     n_tasks=2,
                     update_weights_every=20,
@@ -176,6 +248,10 @@ class HeatmapModule(pl.LightningModule):
                     },
                 )
             if self.model.hparams.deepspeed_optim:
+                if DeepSpeedCPUAdam is None:
+                    raise ImportError(
+                        "deepspeed is required when deepspeed_optim is enabled"
+                    )
                 optimizer = DeepSpeedCPUAdam(params)
             else:
                 optimizer = optim.AdamW(params)
@@ -195,8 +271,13 @@ class HeatmapModule(pl.LightningModule):
     def backward(self, loss):
         if self.model.hparams.grad_weights and self.model.hparams.n_landmarks > 0:
             losses = [loss[0], loss[1]]
+            action_head_params = (
+                self.model.actor_head.parameters()
+                if self.actor_prompt
+                else self.model.head.parameters()
+            )
             lst = [
-                self.model.head.parameters(),
+                action_head_params,
                 self.model.net.heatmap_head.parameters(),
             ]
             self.grad_weight.backward(
@@ -211,10 +292,96 @@ class HeatmapModule(pl.LightningModule):
         else:
             loss.backward()
 
+    def _actor_step(self, imgs, target, loss_fn, stage):
+        actions = target["actions"].long()
+        boxes = target["boxes"].float()
+        valid = target["valid"].bool()
+        if not valid.any():
+            raise ValueError(f"{stage} actor batch has no valid actor slots")
+
+        data = self.model(imgs, boxes=boxes, valid=valid)
+        if len(data) == 3:
+            preds, hm_preds, presence_logits = data
+        else:
+            preds, hm_preds = data
+            presence_logits = None
+
+        valid_preds = preds[valid]
+        valid_labels = actions[valid]
+        loss = loss_fn(valid_preds, valid_labels)
+
+        if presence_logits is not None:
+            loss_presence = F.binary_cross_entropy_with_logits(
+                presence_logits, valid.float()
+            )
+            loss = loss + loss_presence * self.model.hparams.get(
+                "presence_loss_weight", 0.1
+            )
+            self.log(
+                f"{stage}_loss_presence",
+                loss_presence,
+                on_step=stage == "train",
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+
+        loss_kp = None
+        if self.model.hparams.n_landmarks > 0:
+            labels_kp = target["heatmap"]
+            kp_vis = target["kp_vis"]
+            if stage == "train" and self.model.hparams.target_kp_loss_weight:
+                target_weights = self.target_weights.expand(labels_kp.shape[0], -1).to(
+                    labels_kp.device
+                )
+                loss_kp = self.kp_loss(
+                    hm_preds, labels_kp, mask=kp_vis, target_weights=target_weights
+                )
+            else:
+                loss_kp = self.kp_loss(hm_preds, labels_kp, mask=kp_vis)
+
+            if stage == "train" and self.model.hparams.log_kp_loss_weight:
+                loss_kp = torch.log(loss_kp + 1e-6)
+            if self.model.hparams.get("kp_only", False):
+                loss = loss * 1e-6 + loss_kp * self.model.hparams.kp_loss_weight
+            elif stage == "train" and self.model.hparams.grad_weights:
+                loss = torch.stack([loss, loss_kp * self.model.hparams.kp_loss_weight])
+            else:
+                loss = loss + loss_kp * self.model.hparams.kp_loss_weight
+
+        return loss, valid_preds, valid_labels, hm_preds, loss_kp
+
     def training_step(self, batch, batch_idx):
         # "batch" is the output of the training data loader.
         if isinstance(batch, torch._utils.ExceptionWrapper):
             batch.reraise()
+        if self.actor_prompt:
+            imgs, target = batch
+            loss, _, _, _, loss_kp = self._actor_step(
+                imgs, target, self.train_loss, "train"
+            )
+            loss_to_log = loss.sum() if loss.ndim > 0 else loss
+            self.log(
+                "train_loss",
+                loss_to_log,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
+            if loss_kp is not None:
+                self.log(
+                    "train_loss_kp",
+                    loss_kp,
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    sync_dist=True,
+                )
+            return loss
         imgs, labels = batch
         if self.model.hparams.get("linear_probe", False):
             filename = "tmp/y_{}_train.pickle"
@@ -282,6 +449,74 @@ class HeatmapModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         if isinstance(batch, torch._utils.ExceptionWrapper):
             batch.reraise()
+        if self.actor_prompt:
+            imgs, target = batch
+            loss, preds, labels, hm, loss_kp = self._actor_step(
+                imgs, target, self.val_loss, "val"
+            )
+            if loss_kp is not None:
+                self.val_mae(hm.contiguous(), target["heatmap"].contiguous())
+                self.log(
+                    "val_loss_kp",
+                    loss_kp,
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    sync_dist=True,
+                )
+                self.log(
+                    "val_mae",
+                    self.val_mae,
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    sync_dist=True,
+                )
+
+            self.val_acc_micro(preds, labels)
+            self.val_acc_macro(preds, labels)
+            self.val_f1(preds, labels)
+            self.validation_step_outputs["preds"].append(preds)
+            self.validation_step_outputs["labels"].append(labels)
+            self.log(
+                "val_loss",
+                loss,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
+            self.log(
+                "val_acc_micro",
+                self.val_acc_micro,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
+            self.log(
+                "val_acc_macro",
+                self.val_acc_macro,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
+            self.log(
+                "val_f1",
+                self.val_f1,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
+            return
         imgs, labels = batch
 
         if self.model.hparams.get("linear_probe", False):
@@ -460,6 +695,63 @@ class HeatmapModule(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         imgs, labels = batch[0], batch[1]
+        if self.actor_prompt:
+            target = labels
+            actions = target["actions"].long()
+            boxes = target["boxes"].float()
+            valid = target["valid"].bool()
+            data = self.model(imgs, boxes=boxes, valid=valid)
+            if len(data) == 3:
+                preds, hm, _ = data
+            else:
+                preds, hm = data
+            preds = preds.float()
+
+            if self.model.hparams.n_landmarks > 0 and "heatmap" in target:
+                labels_kp = target["heatmap"]
+                self.test_mae(hm.contiguous(), labels_kp.contiguous())
+                self.log(
+                    "test_mae",
+                    self.test_mae,
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    sync_dist=True,
+                )
+
+            ids = batch[2]
+            chunk_nb = batch[3]
+            split_nb = batch[4]
+            final_result = []
+            for i in range(preds.size(0)):
+                valid_slots = valid[i].nonzero(as_tuple=False).flatten()
+                for slot in valid_slots.tolist():
+                    final_result.append(
+                        {
+                            "id": f"{ids[i]}:actor{slot}",
+                            "preds": preds.data[i, slot].cpu().numpy().tolist(),
+                            "labels": int(actions[i, slot].cpu().numpy()),
+                            "chunk_nb": int(chunk_nb[i].cpu().numpy()),
+                            "split_nb": int(split_nb[i].cpu().numpy()),
+                            "actor_slot": int(slot),
+                            "box": boxes[i, slot].cpu().numpy().tolist(),
+                        }
+                    )
+
+            df = pd.DataFrame(final_result)
+            dest_path = os.path.join(
+                self.trainer.default_root_dir, self.trainer.logger.experiment.id
+            )
+            if not os.path.exists(dest_path):
+                os.makedirs(dest_path)
+            csv_file = os.path.join(dest_path, "test_results.csv")
+            if not os.path.isfile(csv_file):
+                print(csv_file)
+                df.to_csv(csv_file, index=False)
+            else:
+                df.to_csv(csv_file, mode="a", header=False, index=False)
+            return
         if self.model.hparams.get("linear_probe", False):
             filename = "tmp/y_{}_test.pickle"
             # create the directory if it does not exist

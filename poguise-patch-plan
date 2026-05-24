@@ -1,0 +1,87 @@
+PO-GUISE Live Actor-Prompt Plan v2
+Locked decisions: K=8 target, Toyota-Smarthome 31 actions, bbox inputs allowed, official released PO-GUISE checkpoint
+Prepared for implementation planning - May 24, 2026
+1. Executive decision
+Use a bbox-prompted actor-token PO-GUISE model for the main path. This keeps the full-scene video input, accepts fixed K person boxes at inference, and outputs one action vector per box. It avoids crop-per-person batching, avoids ROIAlign/TensorRT dynamic ROI problems, and still reuses the official PO-GUISE checkpoint.
+Recommended K: K=8 unless latency or memory says no. Actor tokens are cheap compared with video tokens. K=6 is the fallback.
+Action classes: Start with the exact 31 Toyota-Smarthome class mapping used by the checkpoint/repo. Do not manually reorder the list.
+BBox inputs: Yes. The detector/tracker remains outside the model and provides normalized xyxy boxes for up to K people.
+Checkpoint: Load the official PO-GUISE checkpoint with strict=False; fail loudly if backbone keys are missing.
+Streaming: Make runtime streaming now with rolling clips. Do not attempt a causal/cache transformer rewrite in v1.
+
+
+2. What Other / Idle / Unknown means
+Toyota-style training clips are trimmed around known actions. A live camera is not. In real deployment, a person may be visible but not doing any of the 31 labeled Toyota actions. If the model only has 31 labels, it is forced to guess one of them even when the correct answer is “nothing clear.”
+
+
+Recommendation: Stage 1 keeps 31 classes to preserve checkpoint compatibility. Stage 2 expands to 32 classes only after you collect real live windows: 31 Toyota actions + Other/Idle. Keep Unknown as a runtime confidence state, not necessarily a trained class.
+3. Architecture to build
+Current PO-GUISE acts like this:
+video_clip -> one class token -> one clip-level action
+The target model acts like this:
+video_clip + boxes[B,K,4] + valid[B,K] -> actor_tokens[K] -> action_logits[B,K,31 or 32]
+Each actor token is a learnable token plus a bbox embedding. The bbox tells that token which person it is responsible for. All actor tokens still attend to the full scene, so the model can use table, cup, phone, pills, chair, and surrounding context.
+[class token] [actor token 0 + bbox embedding 0] [actor token 1 + bbox embedding 1] ... [actor token K-1 + bbox embedding K-1] [heatmap tokens] [video tokens]
+
+
+4. Loss functions: what to choose
+Because boxes are provided, do not start with DETR/Hungarian matching. The input slot already defines identity: slot 0 is this box, slot 1 is that box.
+valid_logits  = action_logits[valid == 1] valid_labels  = actions[valid == 1] L_action      = cross_entropy(valid_logits, valid_labels, label_smoothing=0.1) L_heatmap     = existing_PO_GUISE_heatmap_loss L_presence    = BCEWithLogits(presence_logits, valid)  # optional L_total       = L_action + w_hm * L_heatmap + w_pres * L_presence
+
+
+5. Training plan that fits your data reality
+You do not have a real multi-person dataset right now. That is exactly why bbox-prompting is the right first architecture.
+
+
+5.1 Stage 1 Toyota format
+For each Toyota clip, derive or detect one person bbox, expand it, then randomly assign it to one of K slots every epoch.
+{   "video": "full_scene_clip",   "boxes": [[0,0,0,0], [x1,y1,x2,y2], ...],   "valid": [0,1,0,0,0,0,0,0],   "actions": [-1, Drink_FromCup, -1, -1, -1, -1, -1, -1],   "heatmaps": "existing or pseudo pose/motion heatmaps" }
+5.2 Stage 2 live-data labeling
+Collect short windows from your exact runtime pipeline. A small clean dataset is better than a large sloppy one.
+Run detector/tracker offline on recorded home clips.
+Save 4-second windows or the same window length your live system uses.
+For each active track, save normalized expanded bbox and the action label.
+Label obvious Toyota actions first: Drink, Eat, UseTelephone, TakePills, Walk, SitDown/GetUp, WatchTV, ReadBook, UseLaptop/Tablet.
+Label unclear/non-action windows as Other/Idle for Stage 2.
+Start with 500-1000 windows if possible; even 200 clean windows can expose the biggest distribution-shift errors.
+6. Streaming-native plan
+Make the product live by using a rolling clip buffer, not by rewriting the transformer into a causal model. PO-GUISE/VideoMAE-style models are clip transformers: they look at a fixed set of frames together. That is still usable for live inference if you run sliding windows.
+
+
+6.1 Live pipeline
+camera frames -> rolling frame buffer detector/tracker -> active tracks + boxes pack up to K=8 tracks -> boxes[B,K,4], valid[B,K] sample 16 frames from rolling window -> video[B,16,3,224,224] TensorRT engine -> action_logits[B,K,num_classes] per-track temporal smoothing -> publish action per track_id
+
+
+7. K=6 vs K=8 and GPU usage
+Crop-per-track batching scales the expensive video backbone with the number of people. The actor-prompt plan runs the backbone once for the full scene and adds only K actor tokens. That is the point: K=8 should be much cheaper than running eight separate PO-GUISE crops.
+
+
+Recommendation: implement/export K=8 first. If TensorRT memory fails or latency is too high, re-export K=6. Do not make K dynamic inside the model.
+8. Checkpoint loading rules
+state = torch.load(ckpt_path, map_location="cpu") missing, unexpected = model.load_state_dict(state_dict, strict=False)  # Expected missing keys: #   actor_tokens, bbox_mlp, actor_head, optional presence_head # Red flag missing keys: #   patch_embed, transformer blocks, attention, MLP, norm, heatmap tokens/head
+If num_classes remains 31 and the class order exactly matches the released checkpoint, copy/reuse the old class head where possible.
+If you add Other/Idle as class 32, initialize only the new output row from scratch; keep the first 31 rows if class order is identical.
+Do not silently load a checkpoint if major backbone keys are missing. That is how you accidentally train a broken model.
+9. Main risks and guardrails
+
+
+10. Implementation order
+Create branch: actor-prompt-streaming-poguise.
+Add POGUISEActorPrompt without deleting original PO-GUISE.
+Add inputs: boxes [B,K,4], valid [B,K].
+Add bbox_mlp and actor_tokens in the backbone.
+Protect class, actor, and heatmap tokens from pruning/merging.
+Return actor token features after the encoder.
+Add actor_head -> [B,K,31]. Add optional presence_head -> [B,K].
+Add dataset output arrays: boxes, valid, actions.
+Fine-tune Stage 1 on Toyota single-person actor-prompt samples.
+Export K=8 ONNX/TensorRT and validate fixed shapes.
+Build rolling-buffer live inference wrapper.
+Collect/live-label Stage 2 data and decide whether to expand to 32 classes with Other/Idle.
+11. Source notes
+This v2 plan is based on the PO-GUISE paper/repo notes, the PO-GUISE+ manuscript notes, Toyota-Smarthome dataset facts, and the previous planning document. Important source facts used:
+Toyota-Smarthome is described as 16K RGB+D clips across 31 activity classes, performed by seniors in a smarthome.
+PO-GUISE uses a clip-level class token and heatmap tokens; heatmaps guide pruning but do not by themselves provide per-person identity binding.
+PO-GUISE+ adds object heatmaps and is detector-free at inference, but still predicts a clip-level driver action plus heatmaps, not multiple per-person ADL actions.
+PO-GUISE/PO-GUISE+ edge results support efficient live deployment, but longer temporal context/time-action localization is identified as future work, not solved by the base architecture.
+Operational rule: in code, import/reuse the repo dataset label map for the 31 Toyota classes. Do not hand-type class order into a new file unless you are copying it exactly from the repo and adding a unit test.

@@ -8,10 +8,17 @@ import time
 from collections import defaultdict
 import cv2
 import torch
-from fvcore.common.file_io import PathManager
 from torch.utils.data.distributed import DistributedSampler
 
 from . import transform as transform_loc
+
+try:
+    from fvcore.common.file_io import PathManager
+except ImportError:
+    class PathManager:
+        @staticmethod
+        def open(path, mode="r", *args, **kwargs):
+            return open(path, mode, *args, **kwargs)
 
 logger = logging.getLogger(__name__)
 

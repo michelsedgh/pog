@@ -589,7 +589,7 @@ class Block(nn.Module):
 
             x = torch.cat([x_key, x_nonkey_keep], dim=1)
         elif self.keep_rate_merge < 1:
-            num_s_tokens = self.n_heatmap_tokens + 1
+            num_s_tokens = self.n_heatmap_tokens + self.n_key_tokens
             x_key = x[:, :num_s_tokens]
             x_nonkey_keep = x[:, num_s_tokens:]
             attn_merge = attn.clone()
@@ -775,6 +775,8 @@ class VisionTransformer(nn.Module):
         mode="train",
         hw_out_conv=14,
         n_registers=0,
+        actor_prompt=0,
+        num_actor_tokens=8,
         **kwargs,
     ):
         super().__init__()
@@ -793,6 +795,10 @@ class VisionTransformer(nn.Module):
         num_patches = self.patch_embed.num_patches
         self.with_cp = with_cp
         self.n_registers = n_registers
+        self.actor_prompt = bool(actor_prompt)
+        self.n_actor_tokens = int(num_actor_tokens) if self.actor_prompt else 0
+        if self.n_actor_tokens < 0:
+            raise ValueError("num_actor_tokens must be non-negative")
         self.HW_OUT_CONV = (hw_out_conv, hw_out_conv)
         self.n_heatmap_tokens = self.HW_OUT_CONV[0] * self.HW_OUT_CONV[1]
         self.n_landmarks = n_landmarks
@@ -800,7 +806,8 @@ class VisionTransformer(nn.Module):
             self.n_heatmap_tokens = 0
         self.mode = mode
 
-        self.N_KEY_TOKENS = 1 + self.n_registers  # class token, register
+        # Tokens before heatmap/video tokens are protected from pruning.
+        self.N_KEY_TOKENS = 1 + self.n_actor_tokens + self.n_registers
 
         if use_learnable_pos_emb:
             self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
@@ -881,6 +888,15 @@ class VisionTransformer(nn.Module):
         self.head.weight.data.mul_(init_scale)
         self.head.bias.data.mul_(init_scale)
         self.class_token = nn.Parameter(torch.zeros(1, 1, self.num_features))
+        if self.n_actor_tokens > 0:
+            self.actor_tokens = nn.Parameter(
+                torch.randn(1, self.n_actor_tokens, self.num_features)
+            )
+            self.bbox_mlp = nn.Sequential(
+                nn.Linear(4, self.num_features),
+                nn.GELU(),
+                nn.Linear(self.num_features, self.num_features),
+            )
         if self.n_landmarks > 0:
             self.heatmap_tokens = nn.Parameter(
                 torch.randn(1, self.HW_OUT_CONV[0] * self.HW_OUT_CONV[1], embed_dim)
@@ -922,7 +938,7 @@ class VisionTransformer(nn.Module):
             nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
         )
 
-    def forward(self, x):
+    def forward(self, x, boxes=None, valid=None):
         # x_list, images_whwh = self.preprocess_image(x_list)
 
         x = self.patch_embed(x)  # (B, C_e, t, h, w)
@@ -951,6 +967,28 @@ class VisionTransformer(nn.Module):
             x = torch.cat([self.heatmap_tokens.expand(B, -1, -1), x], dim=1)
         if self.n_registers > 0:
             x = torch.cat([self.register_tokens.expand(B, -1, -1), x], dim=1)
+        if self.n_actor_tokens > 0:
+            if boxes is None:
+                raise ValueError("boxes are required when actor_prompt is enabled")
+            if boxes.ndim != 3 or boxes.shape[1:] != (self.n_actor_tokens, 4):
+                raise ValueError(
+                    "boxes must have shape "
+                    f"[B,{self.n_actor_tokens},4], got {tuple(boxes.shape)}"
+                )
+            if boxes.shape[0] != B:
+                raise ValueError(
+                    f"boxes batch size {boxes.shape[0]} does not match video batch {B}"
+                )
+            boxes = boxes.to(device=x.device, dtype=x.dtype)
+            actor_tokens = self.actor_tokens.expand(B, -1, -1) + self.bbox_mlp(boxes)
+            if valid is None:
+                raise ValueError("valid is required when actor_prompt is enabled")
+            if valid.shape != boxes.shape[:2]:
+                raise ValueError(
+                    "valid must have shape "
+                    f"[B,{self.n_actor_tokens}], got {tuple(valid.shape)}"
+                )
+            x = torch.cat([actor_tokens, x], dim=1)
 
         # append class token to the beginning of the sequence
         x = torch.cat([self.class_token.expand(B, -1, -1), x], dim=1)
@@ -960,6 +998,8 @@ class VisionTransformer(nn.Module):
             blk = self.blocks[i]
             x, idx = blk(x, idx, ws)
 
+        if self.n_actor_tokens > 0:
+            x_actor = x[:, 1 : 1 + self.n_actor_tokens, :]
         if self.n_landmarks > 0:
             x_heatmap = x[
                 :,
@@ -969,16 +1009,26 @@ class VisionTransformer(nn.Module):
         x_class = x[:, 0, :]
         if self.fc_norm is not None:
             x_class = self.fc_norm(x_class)
+            if self.n_actor_tokens > 0:
+                x_actor = self.fc_norm(x_actor)
         else:
             x_class = self.norm(x_class)
+            if self.n_actor_tokens > 0:
+                x_actor = self.norm(x_actor)
         x_class = self.head_dropout(x_class)
         x_class = self.head(x_class)
+        if self.n_actor_tokens > 0:
+            x_actor = self.head_dropout(x_actor)
 
         if self.n_landmarks == 0:
+            if self.n_actor_tokens > 0:
+                return x_class, x_actor
             return x_class
         x_heatmap = x_heatmap.reshape(B, *self.HW_OUT_CONV, -1).permute(0, 3, 1, 2)
         x_heatmap = tuple([0, x_heatmap])
         x_heatmap = self.heatmap_head(x_heatmap)
+        if self.n_actor_tokens > 0:
+            return x_class, x_actor, x_heatmap
         return x_class, x_heatmap
 
 
