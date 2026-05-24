@@ -123,6 +123,7 @@ def spatial_sampling(
     inverse_uniform_sampling=False,
     keypoints=None,
     obj_keypoints=None,
+    keypoint_aware_crop=False,
 ):
     """
     Perform spatial sampling on the given video frames. If spatial_idx is
@@ -161,7 +162,11 @@ def spatial_sampling(
             obj_keypoints=obj_keypoints,
         )
         frames, _, keypoints, obj_keypoints = transform_loc.random_crop(
-            frames, crop_size, keypoints=keypoints, obj_keypoints=obj_keypoints
+            frames,
+            crop_size,
+            keypoints=keypoints,
+            obj_keypoints=obj_keypoints,
+            keypoint_aware=keypoint_aware_crop,
         )
         if random_horizontal_flip:
             frames, _, keypoints, obj_keypoints = transform_loc.horizontal_flip(

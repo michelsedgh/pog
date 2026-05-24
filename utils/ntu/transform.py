@@ -99,7 +99,51 @@ def crop_boxes(boxes, x_offset, y_offset):
     return cropped_boxes
 
 
-def random_crop(images, size, boxes=None, keypoints=None, obj_keypoints=None):
+def _keypoint_aware_crop_offset(length, size, coords):
+    max_offset = int(length - size)
+    if max_offset <= 0:
+        return 0
+
+    center = float(np.median(coords))
+    low = max(0, int(math.ceil(center - size + 1)))
+    high = min(max_offset, int(math.floor(center)))
+    if high >= low:
+        return int(np.random.randint(low, high + 1))
+    return int(np.clip(round(center - size * 0.5), 0, max_offset))
+
+
+def _visible_crop_keypoints(keypoints, width, height):
+    if keypoints is None:
+        return None
+
+    points = []
+    for kp in keypoints:
+        kp = np.asarray(kp)
+        finite = np.isfinite(kp).all(axis=-1)
+        non_zero = ~np.all(kp == 0, axis=-1)
+        in_frame = (
+            (kp[..., 0] >= 0)
+            & (kp[..., 0] < width)
+            & (kp[..., 1] >= 0)
+            & (kp[..., 1] < height)
+        )
+        valid = finite & non_zero & in_frame
+        if valid.any():
+            points.append(kp[valid])
+
+    if not points:
+        return None
+    return np.concatenate(points, axis=0)
+
+
+def random_crop(
+    images,
+    size,
+    boxes=None,
+    keypoints=None,
+    obj_keypoints=None,
+    keypoint_aware=False,
+):
     """
     Perform random spatial crop on the given images and corresponding boxes.
     Args:
@@ -122,12 +166,24 @@ def random_crop(images, size, boxes=None, keypoints=None, obj_keypoints=None):
         return images, None, keypoints, obj_keypoints
     height = images.shape[2]
     width = images.shape[3]
-    y_offset = 0
-    if height > size:
-        y_offset = int(np.random.randint(0, height - size))
-    x_offset = 0
-    if width > size:
-        x_offset = int(np.random.randint(0, width - size))
+    crop_points = None
+    if keypoint_aware:
+        crop_points = _visible_crop_keypoints(
+            keypoints,
+            width=width,
+            height=height,
+        )
+
+    if crop_points is not None:
+        x_offset = _keypoint_aware_crop_offset(width, size, crop_points[:, 0])
+        y_offset = _keypoint_aware_crop_offset(height, size, crop_points[:, 1])
+    else:
+        y_offset = 0
+        if height > size:
+            y_offset = int(np.random.randint(0, height - size))
+        x_offset = 0
+        if width > size:
+            x_offset = int(np.random.randint(0, width - size))
     cropped = images[:, :, y_offset : y_offset + size, x_offset : x_offset + size]
 
     cropped_boxes = crop_boxes(boxes, x_offset, y_offset) if boxes is not None else None

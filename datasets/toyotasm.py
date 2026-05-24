@@ -548,6 +548,7 @@ class ToyotaSMDataset(Dataset):
                 random_horizontal_flip=True if self.set_type == "train" else False,
                 inverse_uniform_sampling=False,
                 keypoints=keypoints,
+                keypoint_aware_crop=self.actor_prompt and self.set_type == "train",
             )
             frames = frames.permute(1, 0, 2, 3)
             actor_target = None
