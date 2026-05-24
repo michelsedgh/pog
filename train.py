@@ -1,5 +1,7 @@
 import argparse
+import __main__
 import os
+import pickle
 import sys
 from argparse import ArgumentParser
 
@@ -16,6 +18,39 @@ from modules.heatmap_module import HeatmapModule
 
 
 os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+
+
+def to_normalized_float_tensor(vid):
+    return vid.to(torch.float32) / 255
+
+
+class _LegacyCheckpointPlaceholder:
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+    def __call__(self, value):
+        return value
+
+
+class _LegacyCheckpointUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        try:
+            return super().find_class(module, name)
+        except (AttributeError, ModuleNotFoundError):
+            if module == "__main__" and name == "to_normalized_float_tensor":
+                return to_normalized_float_tensor
+            return _LegacyCheckpointPlaceholder
+
+
+class _LegacyCheckpointPickle:
+    Unpickler = _LegacyCheckpointUnpickler
+    Pickler = pickle.Pickler
+    dump = pickle.dump
+    dumps = pickle.dumps
+    load = pickle.load
+    loads = pickle.loads
+    HIGHEST_PROTOCOL = pickle.HIGHEST_PROTOCOL
 
 
 class DatasetEpochCallback(Callback):
@@ -56,7 +91,18 @@ def _explicit_cli_overrides(parser, args):
 def _load_checkpoint(path):
     if not path:
         return None
-    return torch.load(path, map_location="cpu", weights_only=False)
+    if not hasattr(__main__, "to_normalized_float_tensor"):
+        __main__.to_normalized_float_tensor = to_normalized_float_tensor
+    try:
+        return torch.load(path, map_location="cpu", weights_only=False)
+    except (AttributeError, ModuleNotFoundError) as exc:
+        print(f"Retrying checkpoint load with legacy pickle compatibility: {exc}")
+        return torch.load(
+            path,
+            map_location="cpu",
+            weights_only=False,
+            pickle_module=_LegacyCheckpointPickle,
+        )
 
 
 def _merged_hparams(args, cli_overrides, checkpoint):
