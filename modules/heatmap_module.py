@@ -410,6 +410,26 @@ class HeatmapModule(pl.LightningModule):
             batch_size=int(batch_size),
         )
 
+    def _logger_run_name(self):
+        logger = getattr(self.trainer, "logger", None)
+        if logger is None:
+            return "default"
+
+        experiment = getattr(logger, "experiment", None)
+        run_id = getattr(experiment, "id", None)
+        if isinstance(run_id, str) and run_id:
+            return run_id
+
+        version = getattr(logger, "version", None)
+        if version is not None:
+            return f"version_{version}"
+
+        name = getattr(logger, "name", None)
+        if isinstance(name, str) and name:
+            return name
+
+        return "default"
+
     def _log_actor_presence_diagnostics(self, presence_logits, valid):
         if presence_logits is None:
             return
@@ -965,9 +985,8 @@ class HeatmapModule(pl.LightningModule):
                 sync_dist=False,
                 rank_zero_only=True,
             )
-            if self.trainer.global_rank == 0 and isinstance(
-                self.trainer.logger.experiment.id, str
-            ):
+            if self.trainer.global_rank == 0:
+                run_name = self._logger_run_name()
                 if not os.path.exists(self.trainer.default_root_dir):
                     os.makedirs(self.trainer.default_root_dir)
                 # get class predictions
@@ -975,14 +994,14 @@ class HeatmapModule(pl.LightningModule):
                 pd.DataFrame(preds.cpu().numpy()).to_csv(
                     os.path.join(
                         self.trainer.default_root_dir,
-                        self.trainer.logger.experiment.id + "_preds.csv",
+                        run_name + "_preds.csv",
                     ),
                     index=False,
                 )
                 pd.DataFrame(labels.cpu().numpy()).to_csv(
                     os.path.join(
                         self.trainer.default_root_dir,
-                        self.trainer.logger.experiment.id + "_labels.csv",
+                        run_name + "_labels.csv",
                     ),
                     index=False,
                 )
@@ -1037,9 +1056,7 @@ class HeatmapModule(pl.LightningModule):
                     )
 
             df = pd.DataFrame(final_result)
-            dest_path = os.path.join(
-                self.trainer.default_root_dir, self.trainer.logger.experiment.id
-            )
+            dest_path = os.path.join(self.trainer.default_root_dir, self._logger_run_name())
             if not os.path.exists(dest_path):
                 os.makedirs(dest_path)
             csv_file = os.path.join(dest_path, "test_results.csv")
@@ -1100,9 +1117,7 @@ class HeatmapModule(pl.LightningModule):
 
         df = pd.DataFrame(final_result)
 
-        dest_path = os.path.join(
-            self.trainer.default_root_dir, self.trainer.logger.experiment.id
-        )
+        dest_path = os.path.join(self.trainer.default_root_dir, self._logger_run_name())
         if not os.path.exists(dest_path):
             os.makedirs(dest_path)
         csv_file = os.path.join(dest_path, "test_results.csv")
