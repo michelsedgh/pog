@@ -129,6 +129,12 @@ class ToyotaSMDataset(Dataset):
         )
         if not 0 <= self.toyota_actor_background_box_prob <= 1:
             raise ValueError("toyota_actor_background_box_prob must be in [0, 1]")
+        self.toyota_pose_guided_sampling = bool(
+            kwargs.get("toyota_pose_guided_sampling", 1)
+        )
+        self.toyota_min_pose_frames = int(kwargs.get("toyota_min_pose_frames", 1))
+        if self.toyota_min_pose_frames < 1:
+            raise ValueError("toyota_min_pose_frames must be >= 1")
         self.current_epoch = int(kwargs.get("toyota_current_epoch", 0))
         self.synthetic_warmup_epochs = int(
             kwargs.get("toyota_synthetic_warmup_epochs", 3)
@@ -311,6 +317,8 @@ class ToyotaSMDataset(Dataset):
         parser.add_argument("--toyota_actor_box_scale_min", type=float, default=0.9)
         parser.add_argument("--toyota_actor_box_scale_max", type=float, default=1.3)
         parser.add_argument("--toyota_actor_background_box_prob", type=float, default=0.5)
+        parser.add_argument("--toyota_pose_guided_sampling", type=int, default=1)
+        parser.add_argument("--toyota_min_pose_frames", type=int, default=1)
         parser.add_argument("--toyota_pose_landmarks", type=int, default=13)
         parser.add_argument("--toyota_current_epoch", type=int, default=0)
         parser.add_argument("--toyota_synthetic_warmup_epochs", type=int, default=3)
@@ -384,6 +392,53 @@ class ToyotaSMDataset(Dataset):
     def set_epoch(self, epoch):
         self.current_epoch = int(epoch)
 
+    def _pose_available_by_frame(self, idx, n_frames):
+        if not self.needs_skeleton or not hasattr(self, "landmark_list"):
+            return None
+        keypoints = torch.stack(self.landmark_list[idx]).numpy()[:n_frames]
+        if keypoints.ndim != 3 or keypoints.shape[0] == 0:
+            return None
+        finite = np.isfinite(keypoints).all(axis=-1)
+        non_zero = ~np.all(keypoints == 0, axis=-1)
+        return (finite & non_zero).any(axis=1)
+
+    def _sample_pose_guided_start(self, start_min, start_max, pose_available):
+        if pose_available is None or not pose_available.any():
+            return None
+
+        start_min = int(start_min)
+        start_max = int(start_max)
+        if start_max < start_min:
+            start_max = start_min
+
+        starts = np.arange(start_min, start_max + 1, dtype=int)
+        if starts.size == 0:
+            starts = np.array([start_min], dtype=int)
+
+        hits = np.zeros(starts.shape[0], dtype=int)
+        for start_idx, start in enumerate(starts):
+            end = min(start + 128, len(pose_available) - 1)
+            frame_idx = np.linspace(start, end, self.n_frames, dtype=int)
+            frame_idx = np.clip(frame_idx, 0, len(pose_available) - 1)
+            hits[start_idx] = int(pose_available[frame_idx].sum())
+
+        enough_pose = hits >= self.toyota_min_pose_frames
+        if enough_pose.any():
+            candidates = starts[enough_pose]
+            if self.set_type == "train":
+                return int(candidates[np.random.randint(0, len(candidates))])
+            center = (start_min + start_max) * 0.5
+            return int(candidates[np.argmin(np.abs(candidates - center))])
+
+        best_hit = int(hits.max())
+        if best_hit <= 0:
+            return None
+        best_starts = starts[hits == best_hit]
+        if self.set_type == "train":
+            return int(best_starts[np.random.randint(0, len(best_starts))])
+        center = (start_min + start_max) * 0.5
+        return int(best_starts[np.argmin(np.abs(best_starts - center))])
+
     def _synthetic_actor_count(self):
         if not self.actor_prompt or self.set_type != "train":
             return 1
@@ -426,19 +481,41 @@ class ToyotaSMDataset(Dataset):
             file_id = self.data_df.iloc[idx].file_id
             n_frames = self._num_frames(file_id)
             label = self.y[idx]
+            pose_available = None
+            if (
+                self.actor_prompt
+                and self.needs_skeleton
+                and self.toyota_pose_guided_sampling
+            ):
+                pose_available = self._pose_available_by_frame(idx, n_frames)
             if self.set_type == "test":
                 start_frame = self.data_df.iloc[idx].start
                 end_frame = self.data_df.iloc[idx].end
                 if end_frame < 0 or end_frame >= n_frames:
                     end_frame = n_frames - 1
             elif n_frames > 128:  # test has 128 frames segments
+                max_start = max(0, n_frames - 129)
                 if self.set_type == "train":
-                    start_frame = np.random.randint(0, n_frames - 128)
-                    end_frame = start_frame + 128
+                    start_frame = None
+                    if pose_available is not None:
+                        start_frame = self._sample_pose_guided_start(
+                            0, max_start, pose_available
+                        )
+                    if start_frame is None:
+                        start_frame = np.random.randint(0, n_frames - 128)
+                    end_frame = min(start_frame + 128, n_frames - 1)
                 else:
-                    # get the middle 128 frames
-                    start_frame = n_frames // 2 - 64
-                    end_frame = n_frames // 2 + 64
+                    start_frame = None
+                    if pose_available is not None:
+                        start_frame = self._sample_pose_guided_start(
+                            0, max_start, pose_available
+                        )
+                    if start_frame is None:
+                        # get the middle 128 frames
+                        start_frame = n_frames // 2 - 64
+                        end_frame = n_frames // 2 + 64
+                    else:
+                        end_frame = min(start_frame + 128, n_frames - 1)
             else:
                 start_frame = 0
                 end_frame = n_frames - 1
