@@ -3,6 +3,7 @@ import __main__
 import os
 import pickle
 import sys
+import warnings
 from argparse import ArgumentParser
 
 import torch
@@ -18,6 +19,11 @@ from modules.heatmap_module import HeatmapModule
 
 
 os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+warnings.filterwarnings(
+    "ignore",
+    message="The video decoding and encoding capabilities of torchvision are deprecated.*",
+    category=UserWarning,
+)
 
 
 def to_normalized_float_tensor(vid):

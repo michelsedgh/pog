@@ -15,6 +15,11 @@ import zipfile
 from utils.ntu import frame_utils as utils
 
 try:
+    import av
+except ImportError:
+    av = None
+
+try:
     from mmpose.codecs import UDPHeatmap
 except ImportError:
     UDPHeatmap = None
@@ -97,6 +102,7 @@ class ToyotaSMDataset(Dataset):
         self.task_type = kwargs["task_type"]
         self.n_frames = kwargs["n_frames"]
         self.n_frames_stride = kwargs.get("n_frames_stride", 1)
+        self.multi_thread_decode = bool(kwargs.get("multi_thread_decode", 1))
         self.n_landmarks = kwargs["n_landmarks"]
         self.heatmap_agg = kwargs["heatmap_agg"]
         self.actor_prompt = bool(kwargs.get("actor_prompt", 0))
@@ -287,7 +293,7 @@ class ToyotaSMDataset(Dataset):
         parser.add_argument("--vis", type=float, default=0.0)
         parser.add_argument("--jitter_scales_min", type=int, default=256)
         parser.add_argument("--jitter_scales_max", type=int, default=320)
-        parser.add_argument("--multi_thread_decode", type=int, default=0)
+        parser.add_argument("--multi_thread_decode", type=int, default=1)
         parser.add_argument("--uniform_sampling", type=int, default=1)
         parser.add_argument("--backend_video", type=str, default="torch")
         parser.add_argument("--task_type", type=str, default="CS")
@@ -1223,10 +1229,14 @@ class ToyotaSMDataset(Dataset):
                 return n_frames
         except Exception:
             pass
-        video, _, _ = torchvision.io.read_video(video_path, pts_unit="sec")
-        if video.shape[0] == 0:
-            raise RuntimeError(f"No frames decoded from {video_path}")
-        return int(video.shape[0])
+
+        if av is None:
+            raise ImportError("PyAV is required to count Toyota mp4 frames.")
+        with av.open(video_path) as container:
+            stream = container.streams.video[0]
+            if stream.frames:
+                return int(stream.frames)
+            return sum(1 for _ in container.decode(stream))
 
     def _read_sampled_frames(self, file_id, frames_idx):
         if self.frame_source == "frames":
@@ -1283,12 +1293,16 @@ class ToyotaSMDataset(Dataset):
         return cache_path
 
     def read_all_video_frames(self, video_path, frames_idx):
-        video, _, _ = torchvision.io.read_video(video_path, pts_unit="sec")
-        if video.shape[0] == 0:
-            raise RuntimeError(f"No frames decoded from {video_path}")
+        if av is None:
+            raise ImportError("PyAV is required for Toyota mp4 frame sampling.")
+
         frames_idx = np.asarray(frames_idx, dtype=np.int64)
-        frames_idx = np.clip(frames_idx, 0, video.shape[0] - 1)
-        frames = video[frames_idx].permute(0, 3, 1, 2)
+        if frames_idx.size == 0:
+            raise ValueError("frames_idx must contain at least one frame index")
+        frames_idx = np.maximum(frames_idx, 0)
+
+        frames_by_index = self._read_video_frames_pyav(video_path, frames_idx)
+        frames = torch.stack([frames_by_index[int(frame_idx)] for frame_idx in frames_idx])
         if len(frames) < self.n_frames:
             frames = torch.cat(
                 [
@@ -1299,6 +1313,87 @@ class ToyotaSMDataset(Dataset):
                 ]
             )
         return frames
+
+    def _read_video_frames_pyav(self, video_path, frames_idx):
+        unique_indices = np.unique(frames_idx.astype(np.int64))
+        min_target = int(unique_indices[0])
+        max_target = int(unique_indices[-1])
+        frames_by_index = {}
+
+        with av.open(video_path) as container:
+            stream = container.streams.video[0]
+            if self.multi_thread_decode:
+                stream.thread_type = "AUTO"
+            fps = self._video_stream_fps(stream)
+            self._seek_video_container(container, stream, fps, min_target)
+
+            target_pos = 0
+            last_frame = None
+            fallback_index = None
+            for frame in container.decode(stream):
+                decoded_index = self._frame_index_from_pts(frame, stream, fps)
+                if decoded_index is None:
+                    fallback_index = (
+                        max(min_target - 1, 0)
+                        if fallback_index is None
+                        else fallback_index + 1
+                    )
+                    decoded_index = fallback_index
+
+                if decoded_index < min_target:
+                    continue
+
+                if target_pos >= len(unique_indices):
+                    break
+
+                frame_tensor = None
+                while (
+                    target_pos < len(unique_indices)
+                    and int(unique_indices[target_pos]) <= decoded_index
+                ):
+                    if frame_tensor is None:
+                        frame_tensor = self._pyav_frame_to_tensor(frame)
+                        last_frame = frame_tensor
+                    frames_by_index[int(unique_indices[target_pos])] = frame_tensor
+                    target_pos += 1
+
+                if decoded_index >= max_target and target_pos >= len(unique_indices):
+                    break
+
+            if last_frame is not None and len(frames_by_index) < len(unique_indices):
+                for frame_idx in unique_indices:
+                    frames_by_index.setdefault(int(frame_idx), last_frame)
+
+        if len(frames_by_index) != len(unique_indices):
+            raise RuntimeError(f"No frames decoded from {video_path}")
+        return frames_by_index
+
+    def _video_stream_fps(self, stream):
+        rate = stream.average_rate or stream.base_rate or stream.guessed_rate
+        if rate is None:
+            return 30.0
+        return float(rate)
+
+    def _seek_video_container(self, container, stream, fps, min_target):
+        if min_target <= 0:
+            return
+        seek_frame = max(min_target - int(round(fps)), 0)
+        seek_seconds = seek_frame / fps
+        try:
+            seek_offset = int(seek_seconds / float(stream.time_base))
+            container.seek(seek_offset, any_frame=False, backward=True, stream=stream)
+        except Exception:
+            container.seek(0)
+
+    def _frame_index_from_pts(self, frame, stream, fps):
+        if frame.pts is None:
+            return None
+        start_time = stream.start_time or 0
+        return int(round((frame.pts - start_time) * float(stream.time_base) * fps))
+
+    def _pyav_frame_to_tensor(self, frame):
+        frame_array = frame.to_ndarray(format="rgb24")
+        return torch.from_numpy(frame_array).permute(2, 0, 1).contiguous()
 
     def read_all_frames(self, frame_folder, frames_idx=None):
         # read all frames in a folder
