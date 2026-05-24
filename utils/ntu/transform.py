@@ -99,7 +99,7 @@ def crop_boxes(boxes, x_offset, y_offset):
     return cropped_boxes
 
 
-def _keypoint_aware_crop_offset(length, size, coords):
+def _keypoint_aware_crop_offset(length, size, coords, randomize):
     max_offset = int(length - size)
     if max_offset <= 0:
         return 0
@@ -108,6 +108,8 @@ def _keypoint_aware_crop_offset(length, size, coords):
     low = max(0, int(math.ceil(center - size + 1)))
     high = min(max_offset, int(math.floor(center)))
     if high >= low:
+        if not randomize:
+            return int(round((low + high) * 0.5))
         return int(np.random.randint(low, high + 1))
     return int(np.clip(round(center - size * 0.5), 0, max_offset))
 
@@ -175,8 +177,12 @@ def random_crop(
         )
 
     if crop_points is not None:
-        x_offset = _keypoint_aware_crop_offset(width, size, crop_points[:, 0])
-        y_offset = _keypoint_aware_crop_offset(height, size, crop_points[:, 1])
+        x_offset = _keypoint_aware_crop_offset(
+            width, size, crop_points[:, 0], randomize=True
+        )
+        y_offset = _keypoint_aware_crop_offset(
+            height, size, crop_points[:, 1], randomize=True
+        )
     else:
         y_offset = 0
         if height > size:
@@ -247,7 +253,13 @@ def horizontal_flip(prob, images, boxes=None, keypoints=None, obj_keypoints=None
 
 
 def uniform_crop(
-    images, size, spatial_idx, boxes=None, keypoints=None, obj_keypoints=None
+    images,
+    size,
+    spatial_idx,
+    boxes=None,
+    keypoints=None,
+    obj_keypoints=None,
+    keypoint_aware=False,
 ):
     """
     Perform uniform spatial sampling on the images and corresponding boxes.
@@ -273,20 +285,35 @@ def uniform_crop(
     assert spatial_idx in [0, 1, 2]
     height = images.shape[2]
     width = images.shape[3]
+    crop_points = None
+    if keypoint_aware:
+        crop_points = _visible_crop_keypoints(
+            keypoints,
+            width=width,
+            height=height,
+        )
 
-    y_offset = int(math.ceil((height - size) / 2))
-    x_offset = int(math.ceil((width - size) / 2))
-
-    if height > width:
-        if spatial_idx == 0:
-            y_offset = 0
-        elif spatial_idx == 2:
-            y_offset = height - size
+    if crop_points is not None:
+        x_offset = _keypoint_aware_crop_offset(
+            width, size, crop_points[:, 0], randomize=False
+        )
+        y_offset = _keypoint_aware_crop_offset(
+            height, size, crop_points[:, 1], randomize=False
+        )
     else:
-        if spatial_idx == 0:
-            x_offset = 0
-        elif spatial_idx == 2:
-            x_offset = width - size
+        y_offset = int(math.ceil((height - size) / 2))
+        x_offset = int(math.ceil((width - size) / 2))
+
+        if height > width:
+            if spatial_idx == 0:
+                y_offset = 0
+            elif spatial_idx == 2:
+                y_offset = height - size
+        else:
+            if spatial_idx == 0:
+                x_offset = 0
+            elif spatial_idx == 2:
+                x_offset = width - size
     cropped = images[:, :, y_offset : y_offset + size, x_offset : x_offset + size]
 
     cropped_boxes = crop_boxes(boxes, x_offset, y_offset) if boxes is not None else None

@@ -189,6 +189,7 @@ def spatial_sampling(
             spatial_idx,
             keypoints=keypoints,
             obj_keypoints=obj_keypoints,
+            keypoint_aware=keypoint_aware_crop,
         )
     if obj_keypoints is not None:
         return frames, keypoints, obj_keypoints

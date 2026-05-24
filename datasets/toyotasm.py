@@ -205,6 +205,8 @@ class ToyotaSMDataset(Dataset):
         self.data_df = self._load_split()
         if self.toyota_max_samples > 0:
             self.data_df = self._limit_samples(self.data_df, self.toyota_max_samples)
+        if self.actor_prompt and self.needs_skeleton:
+            self.data_df = self._filter_actor_pose_samples(self.data_df)
         self.data_df["label"] -= 1
         self.y = torch.tensor(self.data_df.label.values, dtype=torch.long)
         self.class_to_indices = {
@@ -378,6 +380,57 @@ class ToyotaSMDataset(Dataset):
         )
         return limited
 
+    def _filter_actor_pose_samples(self, data_df):
+        file_folder = "skeleton"
+        skeleton_zip = None
+        if not os.path.isdir(os.path.join(self.data_dir, file_folder)):
+            if os.path.exists(self.skeleton_zip_path):
+                skeleton_zip = zipfile.ZipFile(self.skeleton_zip_path)
+            else:
+                raise FileNotFoundError(
+                    "Toyota skeleton labels were not found. Expected either "
+                    f"{os.path.join(self.data_dir, file_folder)} or "
+                    f"{self.skeleton_zip_path}."
+                )
+
+        try:
+            keep = []
+            for row in data_df.itertuples(index=False):
+                file_name = f"{row.file_id}_pose3d.json"
+                data = self._read_skeleton_json(file_folder, file_name, skeleton_zip)
+                keep.append(self._skeleton_has_pose(data, row.file_id))
+        finally:
+            if skeleton_zip is not None:
+                skeleton_zip.close()
+
+        filtered = data_df.loc[keep].copy().reset_index(drop=True)
+        dropped = len(data_df) - len(filtered)
+        if dropped > 0:
+            print(
+                f"Filtered Toyota {self.set_type} actor split: dropped "
+                f"{dropped}/{len(data_df)} clips with no usable skeleton pose."
+            )
+        if len(filtered) == 0:
+            raise RuntimeError("No Toyota actor samples have usable skeleton pose.")
+        return filtered
+
+    def _skeleton_has_pose(self, data, file_id):
+        for frame in data["frames"]:
+            if len(frame) > 1:
+                print(frame, file_id)
+                raise ValueError("More than one person in frame")
+            if len(frame) == 0:
+                continue
+            pose2d = frame[0]["pose2d"]
+            landmarks_x = pose2d[: self.pose_landmarks]
+            landmarks_y = pose2d[self.pose_landmarks : self.pose_landmarks * 2]
+            landmarks = np.asarray(list(zip(landmarks_x, landmarks_y)), dtype=np.float32)
+            finite = np.isfinite(landmarks).all(axis=-1)
+            non_zero = ~np.all(landmarks == 0, axis=-1)
+            if (finite & non_zero).any():
+                return True
+        return False
+
     def __len__(self):
         return self.length
 
@@ -548,7 +601,7 @@ class ToyotaSMDataset(Dataset):
                 random_horizontal_flip=True if self.set_type == "train" else False,
                 inverse_uniform_sampling=False,
                 keypoints=keypoints,
-                keypoint_aware_crop=self.actor_prompt and self.set_type == "train",
+                keypoint_aware_crop=self.actor_prompt,
             )
             frames = frames.permute(1, 0, 2, 3)
             actor_target = None
