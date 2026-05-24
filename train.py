@@ -257,6 +257,8 @@ def main():
 
     if hparams.actor_prompt and hparams.mixup:
         raise ValueError("actor_prompt training requires --mixup 0")
+    if hparams.actor_prompt and hparams.grad_weights:
+        raise ValueError("actor_prompt training requires --grad_weights 0")
 
     seed_everything(hparams.seed)
     dataset = _dataset_class(hparams.dataset)
