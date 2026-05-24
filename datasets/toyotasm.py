@@ -198,7 +198,7 @@ class ToyotaSMDataset(Dataset):
             self._load_frame_count_cache()
         self.data_df = self._load_split()
         if self.toyota_max_samples > 0:
-            self.data_df = self.data_df.head(self.toyota_max_samples).copy()
+            self.data_df = self._limit_samples(self.data_df, self.toyota_max_samples)
         self.data_df["label"] -= 1
         self.y = torch.tensor(self.data_df.label.values, dtype=torch.long)
         self.class_to_indices = {
@@ -319,6 +319,56 @@ class ToyotaSMDataset(Dataset):
         parser.add_argument("--toyota_synthetic_same_class_prob", type=float, default=0.3)
 
         return parser
+
+    def _limit_samples(self, data_df, max_samples):
+        if max_samples <= 0 or len(data_df) <= max_samples:
+            return data_df.copy().reset_index(drop=True)
+
+        split_offsets = {"train": 0, "val": 1, "test": 2}
+        rng = np.random.default_rng(
+            self.toyota_seed + split_offsets.get(self.set_type, 3)
+        )
+        labels = sorted(data_df["label"].unique().tolist())
+        rng.shuffle(labels)
+
+        buckets = {}
+        pointers = {}
+        selected = []
+        for label in labels:
+            indices = data_df.index[data_df["label"] == label].to_numpy()
+            rng.shuffle(indices)
+            buckets[label] = indices.tolist()
+            pointers[label] = 0
+
+        if max_samples >= 2:
+            for label in labels:
+                if len(selected) + 2 > max_samples:
+                    break
+                if len(buckets[label]) < 2:
+                    continue
+                selected.extend(buckets[label][:2])
+                pointers[label] = 2
+
+        while len(selected) < max_samples:
+            progressed = False
+            for label in labels:
+                pointer = pointers[label]
+                if pointer >= len(buckets[label]):
+                    continue
+                selected.append(buckets[label][pointer])
+                pointers[label] = pointer + 1
+                progressed = True
+                if len(selected) >= max_samples:
+                    break
+            if not progressed:
+                break
+
+        limited = data_df.loc[selected].copy().reset_index(drop=True)
+        print(
+            f"Limited Toyota {self.set_type} split to {len(limited)} "
+            f"class-balanced samples across {limited.label.nunique()} classes."
+        )
+        return limited
 
     def __len__(self):
         return self.length
