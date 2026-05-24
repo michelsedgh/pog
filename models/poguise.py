@@ -143,12 +143,18 @@ class POGUISE(pl.LightningModule):
         self.save_hyperparameters()
         self.mode = self.hparams.get("mode", "train")
         self.actor_prompt = bool(self.hparams.get("actor_prompt", 0))
+        self.use_register_tokens = bool(self.hparams.get("use_register_tokens", 0))
         self._create_network()
         # freeze backbone if specified
         if self.hparams.freeze_backbone:
             self._freeze_backbone()
 
     def _create_network(self):
+        n_registers = (
+            int(self.hparams.get("n_registers", 0) or 0)
+            if self.use_register_tokens
+            else 0
+        )
         if self.hparams.pretrained == "small":
             self.net = vit_small_patch16_224(
                 drop_rate=self.hparams.drop_rate,
@@ -166,6 +172,7 @@ class POGUISE(pl.LightningModule):
                 merge_type=self.hparams.merge_type,
                 mode=self.mode,
                 hw_out_conv=self.hparams.hw_out_conv,
+                n_registers=n_registers,
                 actor_prompt=self.actor_prompt,
                 num_actor_tokens=self.hparams.get("num_actor_tokens", 8),
             )
@@ -186,6 +193,7 @@ class POGUISE(pl.LightningModule):
                 merge_type=self.hparams.merge_type,
                 mode=self.mode,
                 hw_out_conv=self.hparams.hw_out_conv,
+                n_registers=n_registers,
                 actor_prompt=self.actor_prompt,
                 num_actor_tokens=self.hparams.get("num_actor_tokens", 8),
             )
@@ -240,6 +248,11 @@ class POGUISE(pl.LightningModule):
         if self.actor_prompt:
             for param in self.actor_head.parameters():
                 param.requires_grad = True
+            if hasattr(self.net, "actor_tokens"):
+                self.net.actor_tokens.requires_grad = True
+            if hasattr(self.net, "bbox_mlp"):
+                for param in self.net.bbox_mlp.parameters():
+                    param.requires_grad = True
             if self.presence_head is not None:
                 for param in self.presence_head.parameters():
                     param.requires_grad = True
@@ -322,7 +335,8 @@ class POGUISE(pl.LightningModule):
         )  # sim :poguise, tome :tome
         # parser.add_argument("--enhanced_weight_class_obj", type=float, default=1)
         parser.add_argument("--hw_out_conv", type=int, default=8)
-        parser.add_argument("--n_registers", type=int, default=4)
+        parser.add_argument("--use_register_tokens", type=int, default=0)
+        parser.add_argument("--n_registers", type=int, default=0)
         parser.add_argument("--actor_prompt", type=int, default=0)
         parser.add_argument("--num_actor_tokens", type=int, default=8)
         parser.add_argument("--actor_presence_head", type=int, default=0)

@@ -111,12 +111,14 @@ class HeatmapModule(pl.LightningModule):
     def load_state_dict(self, state_dict, strict=True, assign=False):
         result = super().load_state_dict(state_dict, strict=strict, assign=assign)
         if self.actor_prompt and not strict:
-            allowed_missing = (
+            allowed_missing = [
                 "model.net.actor_tokens",
                 "model.net.bbox_mlp",
                 "model.actor_head",
                 "model.presence_head",
-            )
+            ]
+            if self.model.hparams.get("use_register_tokens", 0):
+                allowed_missing.append("model.net.register_tokens")
             red_flag_missing = (
                 "model.net.patch_embed",
                 "model.net.blocks",
@@ -129,7 +131,7 @@ class HeatmapModule(pl.LightningModule):
             unexpected_missing = [
                 key
                 for key in result.missing_keys
-                if not key.startswith(allowed_missing)
+                if not key.startswith(tuple(allowed_missing))
             ]
             backbone_missing = [
                 key
