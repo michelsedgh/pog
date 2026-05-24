@@ -360,6 +360,8 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--actor_bbox_prior_expand", type=float, default=1.75)
         parser.add_argument("--actor_presence_head", type=int, default=0)
         parser.add_argument("--presence_loss_weight", type=float, default=0.05)
+        parser.add_argument("--actor_val_diagnostics", type=int, default=1)
+        parser.add_argument("--actor_val_diagnostic_max_pairs", type=int, default=8)
         parser.add_argument("--ret_feat", type=int, default=0)
         parser.add_argument("--linear_probe", type=int, default=0)
 

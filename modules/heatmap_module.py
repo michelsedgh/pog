@@ -107,6 +107,10 @@ class HeatmapModule(pl.LightningModule):
             num_classes=hparams.num_classes, average="macro", task="multiclass"
         )
         self.validation_step_outputs = {"preds": [], "labels": []}
+        self.actor_val_diagnostics = bool(hparams.get("actor_val_diagnostics", 1))
+        self.actor_val_diagnostic_max_pairs = int(
+            hparams.get("actor_val_diagnostic_max_pairs", 8)
+        )
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
         result = super().load_state_dict(state_dict, strict=strict, assign=assign)
@@ -364,7 +368,285 @@ class HeatmapModule(pl.LightningModule):
             else:
                 loss = loss + loss_kp * self.model.hparams.kp_loss_weight
 
-        return loss, valid_preds, valid_labels, hm_preds, loss_kp
+        return (
+            loss,
+            valid_preds,
+            valid_labels,
+            hm_preds,
+            loss_kp,
+            preds,
+            presence_logits,
+        )
+
+    def _unpack_model_data(self, data):
+        if len(data) == 3:
+            preds, hm_preds, presence_logits = data
+        else:
+            preds, hm_preds = data
+            presence_logits = None
+        return preds, hm_preds, presence_logits
+
+    def _first_actor_targets(self, imgs, target):
+        valid = target["valid"].bool()
+        has_actor = valid.any(dim=1)
+        if not has_actor.any():
+            return None
+
+        sample_idx = torch.nonzero(has_actor, as_tuple=False).flatten()
+        slot_idx = valid.long().argmax(dim=1)[sample_idx]
+        boxes = target["boxes"].float()[sample_idx, slot_idx]
+        labels = target["actions"].long()[sample_idx, slot_idx]
+        return imgs[sample_idx], boxes, labels
+
+    def _log_scalar(self, name, value, batch_size, prog_bar=False):
+        self.log(
+            name,
+            value,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=prog_bar,
+            logger=True,
+            sync_dist=True,
+            batch_size=int(batch_size),
+        )
+
+    def _log_actor_presence_diagnostics(self, presence_logits, valid):
+        if presence_logits is None:
+            return
+        probs = torch.sigmoid(presence_logits.float())
+        presence_pred = probs >= 0.5
+        self._log_scalar(
+            "val_actor_presence_acc",
+            (presence_pred == valid).float().mean(),
+            valid.numel(),
+        )
+        if valid.any():
+            self._log_scalar(
+                "val_actor_presence_pos",
+                probs[valid].mean(),
+                valid.sum().item(),
+            )
+        invalid = ~valid
+        if invalid.any():
+            self._log_scalar(
+                "val_actor_presence_empty",
+                probs[invalid].mean(),
+                invalid.sum().item(),
+            )
+
+    def _fixed_background_boxes(self, batch_size, num_actor_tokens, device, dtype):
+        base = torch.tensor(
+            [
+                [0.02, 0.02, 0.34, 0.34],
+                [0.66, 0.02, 0.98, 0.34],
+                [0.02, 0.66, 0.34, 0.98],
+                [0.66, 0.66, 0.98, 0.98],
+                [0.25, 0.25, 0.75, 0.75],
+                [0.00, 0.20, 0.30, 0.80],
+                [0.70, 0.20, 1.00, 0.80],
+                [0.20, 0.00, 0.80, 0.30],
+            ],
+            device=device,
+            dtype=dtype,
+        )
+        if num_actor_tokens > base.shape[0]:
+            repeats = (num_actor_tokens + base.shape[0] - 1) // base.shape[0]
+            base = base.repeat(repeats, 1)
+        base = base[:num_actor_tokens]
+        return base.unsqueeze(0).expand(batch_size, -1, -1).clone()
+
+    def _log_actor_background_presence(self, imgs, boxes):
+        if getattr(self.model, "presence_head", None) is None:
+            return
+        batch_size = imgs.shape[0]
+        num_actor_tokens = int(self.model.hparams.get("num_actor_tokens", 8))
+        if batch_size == 0 or num_actor_tokens < 2:
+            return
+
+        diag_boxes = self._fixed_background_boxes(
+            batch_size, num_actor_tokens, boxes.device, boxes.dtype
+        )
+        diag_valid = torch.zeros(
+            batch_size, num_actor_tokens, device=boxes.device, dtype=torch.bool
+        )
+        diag_boxes[:, 0] = boxes
+        diag_valid[:, 0] = True
+        data = self.model(imgs, boxes=diag_boxes, valid=diag_valid)
+        _, _, presence_logits = self._unpack_model_data(data)
+        if presence_logits is None:
+            return
+        probs = torch.sigmoid(presence_logits.float())
+        bg_probs = probs[:, 1:]
+        self._log_scalar(
+            "val_actor_presence_bg",
+            bg_probs.mean(),
+            bg_probs.numel(),
+        )
+        self._log_scalar(
+            "val_actor_presence_bg_acc",
+            (bg_probs < 0.5).float().mean(),
+            bg_probs.numel(),
+        )
+
+    def _log_actor_all_slot_diagnostics(self, imgs, boxes, labels):
+        batch_size = imgs.shape[0]
+        num_actor_tokens = int(self.model.hparams.get("num_actor_tokens", 8))
+        if batch_size == 0 or num_actor_tokens <= 0:
+            return
+
+        diag_boxes = boxes[:, None, :].expand(-1, num_actor_tokens, -1).clone()
+        diag_valid = torch.ones(
+            batch_size, num_actor_tokens, device=boxes.device, dtype=torch.bool
+        )
+        data = self.model(imgs, boxes=diag_boxes, valid=diag_valid)
+        preds, _, _ = self._unpack_model_data(data)
+        pred_labels = preds.argmax(dim=-1)
+        expanded_labels = labels[:, None].expand(-1, num_actor_tokens)
+        slot_correct = (pred_labels == expanded_labels).float()
+
+        self._log_scalar(
+            "val_actor_all_slot_acc",
+            slot_correct.mean(),
+            slot_correct.numel(),
+            prog_bar=True,
+        )
+        slot_consistency = (pred_labels == pred_labels[:, :1]).float().mean()
+        self._log_scalar(
+            "val_actor_slot_consistency",
+            slot_consistency,
+            slot_correct.numel(),
+        )
+        for slot in range(num_actor_tokens):
+            self._log_scalar(
+                f"val_actor_slot{slot}_acc",
+                slot_correct[:, slot].mean(),
+                batch_size,
+            )
+
+    def _compose_pair_batch(self, imgs, boxes, labels, same_action=False, swap=False):
+        batch_size, n_frames, channels, height, width = imgs.shape
+        num_actor_tokens = int(self.model.hparams.get("num_actor_tokens", 8))
+        if batch_size == 0 or num_actor_tokens < 2:
+            return None
+
+        if same_action:
+            pair_count = min(batch_size, self.actor_val_diagnostic_max_pairs)
+            left_idx = torch.arange(pair_count, device=imgs.device)
+            right_idx = left_idx
+        else:
+            pair_count = min(batch_size // 2, self.actor_val_diagnostic_max_pairs)
+            if pair_count == 0:
+                return None
+            left_idx = torch.arange(pair_count, device=imgs.device)
+            right_idx = torch.arange(
+                batch_size - pair_count, batch_size, device=imgs.device
+            )
+
+        split = width // 2
+        left_frames = imgs[left_idx].reshape(
+            pair_count * n_frames, channels, height, width
+        )
+        right_frames = imgs[right_idx].reshape(
+            pair_count * n_frames, channels, height, width
+        )
+        left_panel = F.interpolate(
+            left_frames,
+            size=(height, split),
+            mode="bilinear",
+            align_corners=False,
+        ).reshape(pair_count, n_frames, channels, height, split)
+        right_panel = F.interpolate(
+            right_frames,
+            size=(height, width - split),
+            mode="bilinear",
+            align_corners=False,
+        ).reshape(pair_count, n_frames, channels, height, width - split)
+
+        canvas = torch.zeros(
+            pair_count,
+            n_frames,
+            channels,
+            height,
+            width,
+            device=imgs.device,
+            dtype=imgs.dtype,
+        )
+        canvas[:, :, :, :, :split] = left_panel
+        canvas[:, :, :, :, split:] = right_panel
+
+        left_boxes = boxes[left_idx].clone()
+        right_boxes = boxes[right_idx].clone()
+        left_boxes[:, [0, 2]] *= split / float(width)
+        right_boxes[:, [0, 2]] = split / float(width) + right_boxes[:, [0, 2]] * (
+            (width - split) / float(width)
+        )
+
+        diag_boxes = torch.zeros(
+            pair_count,
+            num_actor_tokens,
+            4,
+            device=imgs.device,
+            dtype=boxes.dtype,
+        )
+        diag_valid = torch.zeros(
+            pair_count, num_actor_tokens, device=imgs.device, dtype=torch.bool
+        )
+        diag_labels = torch.stack([labels[left_idx], labels[right_idx]], dim=1)
+        if swap:
+            diag_boxes[:, 0] = right_boxes
+            diag_boxes[:, 1] = left_boxes
+            diag_labels = diag_labels.flip(dims=[1])
+        else:
+            diag_boxes[:, 0] = left_boxes
+            diag_boxes[:, 1] = right_boxes
+        diag_valid[:, :2] = True
+        return canvas, diag_boxes, diag_valid, diag_labels
+
+    def _log_actor_pair_diagnostics(self, imgs, boxes, labels):
+        for name, same_action, swap in (
+            ("val_actor_pair_acc", False, False),
+            ("val_actor_pair_swap_acc", False, True),
+            ("val_actor_pair_same_acc", True, False),
+        ):
+            batch = self._compose_pair_batch(
+                imgs, boxes, labels, same_action=same_action, swap=swap
+            )
+            if batch is None:
+                continue
+            pair_imgs, pair_boxes, pair_valid, pair_labels = batch
+            data = self.model(pair_imgs, boxes=pair_boxes, valid=pair_valid)
+            preds, _, _ = self._unpack_model_data(data)
+            pair_preds = preds[:, :2].argmax(dim=-1)
+            correct = (pair_preds == pair_labels).float()
+            self._log_scalar(
+                name,
+                correct.mean(),
+                correct.numel(),
+                prog_bar=name.endswith("acc"),
+            )
+
+            if name == "val_actor_pair_acc":
+                diff_mask = pair_labels[:, 0] != pair_labels[:, 1]
+                if diff_mask.any():
+                    self._log_scalar(
+                        "val_actor_pair_diff_acc",
+                        correct[diff_mask].mean(),
+                        correct[diff_mask].numel(),
+                    )
+
+    def _log_actor_val_diagnostics(self, imgs, target, full_presence_logits):
+        if not self.actor_val_diagnostics:
+            return
+        valid = target["valid"].bool()
+        self._log_actor_presence_diagnostics(full_presence_logits, valid)
+
+        first_targets = self._first_actor_targets(imgs, target)
+        if first_targets is None:
+            return
+        diag_imgs, diag_boxes, diag_labels = first_targets
+        self._log_actor_all_slot_diagnostics(diag_imgs, diag_boxes, diag_labels)
+        self._log_actor_pair_diagnostics(diag_imgs, diag_boxes, diag_labels)
+        self._log_actor_background_presence(diag_imgs, diag_boxes)
 
     def training_step(self, batch, batch_idx):
         # "batch" is the output of the training data loader.
@@ -372,7 +654,7 @@ class HeatmapModule(pl.LightningModule):
             batch.reraise()
         if self.actor_prompt:
             imgs, target = batch
-            loss, _, _, _, loss_kp = self._actor_step(
+            loss, _, _, _, loss_kp, _, _ = self._actor_step(
                 imgs, target, self.train_loss, "train"
             )
             loss_to_log = loss.sum() if loss.ndim > 0 else loss
@@ -465,9 +747,10 @@ class HeatmapModule(pl.LightningModule):
             batch.reraise()
         if self.actor_prompt:
             imgs, target = batch
-            loss, preds, labels, hm, loss_kp = self._actor_step(
+            loss, preds, labels, hm, loss_kp, _, presence_logits = self._actor_step(
                 imgs, target, self.val_loss, "val"
             )
+            self._log_actor_val_diagnostics(imgs, target, presence_logits)
             if loss_kp is not None:
                 self.val_mae(hm.contiguous(), target["heatmap"].contiguous())
                 self.log(
