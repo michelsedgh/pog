@@ -1140,8 +1140,10 @@ class ToyotaSMDataset(Dataset):
         n_test = int(round(n_subjects * self.toyota_test_fraction))
         n_val = int(round((n_subjects - n_test) * self.toyota_val_fraction))
         if n_subjects >= 3:
-            n_test = max(1, n_test)
-            n_val = max(1, n_val)
+            if self.toyota_test_fraction > 0:
+                n_test = max(1, n_test)
+            if self.toyota_val_fraction > 0:
+                n_val = max(1, n_val)
         test_subjects = set(subjects[:n_test])
         val_subjects = set(subjects[n_test : n_test + n_val])
 
