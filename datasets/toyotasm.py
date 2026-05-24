@@ -1463,16 +1463,23 @@ class ToyotaSMDataset(Dataset):
         return torch.from_numpy(frame_array).permute(2, 0, 1).contiguous()
 
     def read_all_frames(self, frame_folder, frames_idx=None):
-        # read all frames in a folder
-        frame_indices = range(1, 1 + len(os.listdir(frame_folder)))
+        frame_files = sorted(
+            name
+            for name in os.listdir(frame_folder)
+            if name.lower().endswith((".jpg", ".jpeg", ".png"))
+        )
+        if not frame_files:
+            raise RuntimeError(f"No image frames found in {frame_folder}")
+
+        if frames_idx is None:
+            frame_indices = np.arange(len(frame_files), dtype=np.int64)
+        else:
+            frame_indices = np.asarray(frames_idx, dtype=np.int64)
+            frame_indices = np.clip(frame_indices, 0, len(frame_files) - 1)
+
         frames = []
-        for i in frame_indices:
-            if frames_idx is not None and i not in frames_idx:
-                continue
-            frame_path = os.path.join(frame_folder, f"img_{i:05d}.png")
-            if not os.path.exists(frame_path):
-                frame_path = os.path.join(frame_folder, f"img_{i:05d}.jpg")
-            # use torchvision to read image
+        for frame_idx in frame_indices:
+            frame_path = os.path.join(frame_folder, frame_files[int(frame_idx)])
             frame = torchvision.io.read_image(frame_path)
             frames.append(frame)
         frames = torch.stack(frames)
