@@ -124,6 +124,11 @@ class ToyotaSMDataset(Dataset):
             raise ValueError(
                 "toyota_actor_box_scale_max must be greater than or equal to min"
             )
+        self.toyota_actor_background_box_prob = float(
+            kwargs.get("toyota_actor_background_box_prob", 0.5)
+        )
+        if not 0 <= self.toyota_actor_background_box_prob <= 1:
+            raise ValueError("toyota_actor_background_box_prob must be in [0, 1]")
         self.current_epoch = int(kwargs.get("toyota_current_epoch", 0))
         self.synthetic_warmup_epochs = int(
             kwargs.get("toyota_synthetic_warmup_epochs", 3)
@@ -268,6 +273,8 @@ class ToyotaSMDataset(Dataset):
         parser.add_argument("--data_dir", type=str, default="/datasets/toyotasm")
         parser.add_argument("--heatmap_agg", type=int, default=1)
         parser.add_argument("--num_classes", type=int, default=31)
+        parser.add_argument("--n_frames", type=int, default=16)
+        parser.add_argument("--n_frames_stride", type=int, default=1)
         parser.add_argument("--n_landmarks", type=int, default=13)
         parser.add_argument("--vis", type=float, default=0.0)
         parser.add_argument("--jitter_scales_min", type=int, default=256)
@@ -303,6 +310,7 @@ class ToyotaSMDataset(Dataset):
         parser.add_argument("--toyota_actor_box_center_jitter", type=float, default=0.08)
         parser.add_argument("--toyota_actor_box_scale_min", type=float, default=0.9)
         parser.add_argument("--toyota_actor_box_scale_max", type=float, default=1.3)
+        parser.add_argument("--toyota_actor_background_box_prob", type=float, default=0.5)
         parser.add_argument("--toyota_pose_landmarks", type=int, default=13)
         parser.add_argument("--toyota_current_epoch", type=int, default=0)
         parser.add_argument("--toyota_synthetic_warmup_epochs", type=int, default=3)
@@ -523,16 +531,24 @@ class ToyotaSMDataset(Dataset):
 
         indices = self._sample_synthetic_indices(idx, actor_count)
         slots = np.random.choice(self.num_actor_tokens, actor_count, replace=False)
+        order = np.random.permutation(actor_count)
+        indices = [indices[int(i)] for i in order]
+        slots = slots[order]
         samples = [
             self._getitem_single(int(sample_idx), actor_slot=int(slots[i]))
             for i, sample_idx in enumerate(indices)
         ]
 
-        frames = self._compose_synthetic_frames([sample[0] for sample in samples])
+        canvas_width = samples[0][0].shape[-1]
+        bounds = self._sample_panel_bounds(actor_count, canvas_width)
+        frames = self._compose_synthetic_frames(
+            [sample[0] for sample in samples], bounds
+        )
         target = self._compose_synthetic_actor_target(
             [sample[1] for sample in samples],
             slots,
-            actor_count,
+            bounds,
+            canvas_width,
         )
         return frames, target
 
@@ -588,18 +604,37 @@ class ToyotaSMDataset(Dataset):
             )
         return candidates[int(np.random.randint(0, len(candidates)))]
 
-    def _panel_bounds(self, actor_count, width):
+    def _sample_panel_bounds(self, actor_count, width):
         if actor_count == 2:
-            return [(0, width // 2), (width // 2, width)]
-        left = width // 3
-        middle = (2 * width) // 3
+            split = int(round(width * np.random.uniform(0.45, 0.55)))
+            split = int(np.clip(split, int(width * 0.42), int(width * 0.58)))
+            return [(0, split), (split, width)]
+        left = int(round(width * np.random.uniform(0.30, 0.36)))
+        middle = int(round(width * np.random.uniform(0.64, 0.70)))
+        left = int(np.clip(left, int(width * 0.28), int(width * 0.38)))
+        middle = int(np.clip(middle, int(width * 0.62), int(width * 0.72)))
+        if middle <= left:
+            left = width // 3
+            middle = (2 * width) // 3
         return [(0, left), (left, middle), (middle, width)]
 
-    def _compose_synthetic_frames(self, frames_list):
-        actor_count = len(frames_list)
+    def _scale_panel_bounds(self, bounds, source_width, target_width):
+        scaled = []
+        for x0, x1 in bounds:
+            sx0 = int(round(x0 * target_width / source_width))
+            sx1 = int(round(x1 * target_width / source_width))
+            scaled.append((sx0, sx1))
+        scaled[0] = (0, scaled[0][1])
+        scaled[-1] = (scaled[-1][0], target_width)
+        for idx in range(1, len(scaled)):
+            prev_end = scaled[idx - 1][1]
+            scaled[idx] = (prev_end, scaled[idx][1])
+        return scaled
+
+    def _compose_synthetic_frames(self, frames_list, bounds):
         _, _, height, width = frames_list[0].shape
         canvas = torch.zeros_like(frames_list[0])
-        for frames, (x0, x1) in zip(frames_list, self._panel_bounds(actor_count, width)):
+        for frames, (x0, x1) in zip(frames_list, bounds):
             panel = F.interpolate(
                 frames,
                 size=(height, x1 - x0),
@@ -609,18 +644,16 @@ class ToyotaSMDataset(Dataset):
             canvas[:, :, :, x0:x1] = panel
         return canvas
 
-    def _compose_synthetic_actor_target(self, targets, slots, actor_count):
+    def _compose_synthetic_actor_target(self, targets, slots, bounds, canvas_width):
         boxes = torch.zeros((self.num_actor_tokens, 4), dtype=torch.float32)
         valid = torch.zeros(self.num_actor_tokens, dtype=torch.bool)
         actions = torch.full((self.num_actor_tokens,), -100, dtype=torch.long)
 
-        for target, slot, (x0, x1) in zip(
-            targets, slots, self._panel_bounds(actor_count, 224)
-        ):
+        for target, slot, (x0, x1) in zip(targets, slots, bounds):
             slot = int(slot)
             src_box = target["boxes"][slot]
-            panel_x0 = x0 / 224.0
-            panel_w = (x1 - x0) / 224.0
+            panel_x0 = x0 / float(canvas_width)
+            panel_w = (x1 - x0) / float(canvas_width)
             boxes[slot] = torch.tensor(
                 [
                     panel_x0 + src_box[0] * panel_w,
@@ -633,24 +666,28 @@ class ToyotaSMDataset(Dataset):
             valid[slot] = True
             actions[slot] = target["actions"][slot]
 
+        self._fill_invalid_actor_boxes(boxes, valid)
         output = {"actions": actions, "boxes": boxes, "valid": valid}
         if self.n_landmarks > 0:
+            heatmap_width = targets[0]["heatmap"].shape[-1]
+            heatmap_bounds = self._scale_panel_bounds(
+                bounds, source_width=canvas_width, target_width=heatmap_width
+            )
             output["heatmap"] = self._compose_synthetic_heatmaps(
-                [target["heatmap"] for target in targets]
+                [target["heatmap"] for target in targets],
+                heatmap_bounds,
             )
             output["kp_vis"] = self._compose_synthetic_heatmaps(
                 [target["kp_vis"] for target in targets],
+                heatmap_bounds,
                 nearest=True,
             ).clamp_(0, 1)
         return output
 
-    def _compose_synthetic_heatmaps(self, heatmaps, nearest=False):
-        actor_count = len(heatmaps)
+    def _compose_synthetic_heatmaps(self, heatmaps, bounds, nearest=False):
         channels, height, width = heatmaps[0].shape
         canvas = torch.zeros((channels, height, width), dtype=heatmaps[0].dtype)
-        for heatmap, (x0, x1) in zip(
-            heatmaps, self._panel_bounds(actor_count, width)
-        ):
+        for heatmap, (x0, x1) in zip(heatmaps, bounds):
             mode = "nearest" if nearest else "bilinear"
             kwargs = {} if nearest else {"align_corners": False}
             panel = F.interpolate(
@@ -713,6 +750,7 @@ class ToyotaSMDataset(Dataset):
         boxes[slot] = box
         valid[slot] = True
         actions[slot] = label.long() if torch.is_tensor(label) else int(label)
+        self._fill_invalid_actor_boxes(boxes, valid)
         return {
             "actions": actions,
             "boxes": boxes,
@@ -767,6 +805,54 @@ class ToyotaSMDataset(Dataset):
         if jittered[2] <= jittered[0] or jittered[3] <= jittered[1]:
             return box
         return jittered
+
+    def _fill_invalid_actor_boxes(self, boxes, valid):
+        if self.set_type != "train" or self.toyota_actor_background_box_prob <= 0:
+            return
+        invalid_slots = torch.nonzero(~valid, as_tuple=False).flatten().tolist()
+        if not invalid_slots:
+            return
+        valid_slots = torch.nonzero(valid, as_tuple=False).flatten().tolist()
+        for slot in invalid_slots:
+            if np.random.random() > self.toyota_actor_background_box_prob:
+                continue
+            if valid_slots and np.random.random() < 0.5:
+                src_slot = valid_slots[int(np.random.randint(0, len(valid_slots)))]
+                boxes[slot] = self._shift_actor_box_negative(boxes[src_slot])
+            else:
+                boxes[slot] = self._random_actor_box()
+
+    def _random_actor_box(self):
+        width = float(np.random.uniform(0.08, 0.45))
+        height = float(np.random.uniform(0.10, 0.65))
+        x1 = float(np.random.uniform(0.0, 1.0 - width))
+        y1 = float(np.random.uniform(0.0, 1.0 - height))
+        return torch.tensor([x1, y1, x1 + width, y1 + height], dtype=torch.float32)
+
+    def _shift_actor_box_negative(self, box):
+        x1, y1, x2, y2 = [float(v) for v in box.tolist()]
+        bw = max(x2 - x1, 1e-4)
+        bh = max(y2 - y1, 1e-4)
+        cx = (x1 + x2) * 0.5
+        cy = (y1 + y2) * 0.5
+        cx += np.random.choice([-1.0, 1.0]) * np.random.uniform(0.65, 1.35) * bw
+        cy += np.random.uniform(-0.75, 0.75) * bh
+        scale_w = np.random.uniform(0.6, 1.6)
+        scale_h = np.random.uniform(0.6, 1.6)
+        bw *= scale_w
+        bh *= scale_h
+        shifted = torch.tensor(
+            [
+                max(0.0, cx - bw * 0.5),
+                max(0.0, cy - bh * 0.5),
+                min(1.0, cx + bw * 0.5),
+                min(1.0, cy + bh * 0.5),
+            ],
+            dtype=torch.float32,
+        )
+        if shifted[2] <= shifted[0] or shifted[3] <= shifted[1]:
+            return self._random_actor_box()
+        return shifted
 
     def _resolve_frame_source(self):
         if self.frame_source != "auto":

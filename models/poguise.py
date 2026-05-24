@@ -175,6 +175,12 @@ class POGUISE(pl.LightningModule):
                 n_registers=n_registers,
                 actor_prompt=self.actor_prompt,
                 num_actor_tokens=self.hparams.get("num_actor_tokens", 8),
+                actor_bbox_prior_weight=self.hparams.get(
+                    "actor_bbox_prior_weight", 0.1
+                ),
+                actor_bbox_prior_expand=self.hparams.get(
+                    "actor_bbox_prior_expand", 1.75
+                ),
             )
         else:
             self.net = vit_base_patch16_224(
@@ -196,6 +202,12 @@ class POGUISE(pl.LightningModule):
                 n_registers=n_registers,
                 actor_prompt=self.actor_prompt,
                 num_actor_tokens=self.hparams.get("num_actor_tokens", 8),
+                actor_bbox_prior_weight=self.hparams.get(
+                    "actor_bbox_prior_weight", 0.1
+                ),
+                actor_bbox_prior_expand=self.hparams.get(
+                    "actor_bbox_prior_expand", 1.75
+                ),
             )
         if self.hparams.pretrained == "DEFAULT":
             if os.path.exists("vit_b_k710_dl_from_giant.pth"):
@@ -248,8 +260,13 @@ class POGUISE(pl.LightningModule):
         if self.actor_prompt:
             for param in self.actor_head.parameters():
                 param.requires_grad = True
-            if hasattr(self.net, "actor_tokens"):
-                self.net.actor_tokens.requires_grad = True
+            if hasattr(self.net, "actor_token"):
+                self.net.actor_token.requires_grad = True
+            if hasattr(self.net, "actor_slot_embed"):
+                self.net.actor_slot_embed.requires_grad = True
+            if hasattr(self.net, "valid_embed"):
+                for param in self.net.valid_embed.parameters():
+                    param.requires_grad = True
             if hasattr(self.net, "bbox_mlp"):
                 for param in self.net.bbox_mlp.parameters():
                     param.requires_grad = True
@@ -339,8 +356,10 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--n_registers", type=int, default=0)
         parser.add_argument("--actor_prompt", type=int, default=0)
         parser.add_argument("--num_actor_tokens", type=int, default=8)
+        parser.add_argument("--actor_bbox_prior_weight", type=float, default=0.1)
+        parser.add_argument("--actor_bbox_prior_expand", type=float, default=1.75)
         parser.add_argument("--actor_presence_head", type=int, default=0)
-        parser.add_argument("--presence_loss_weight", type=float, default=0.1)
+        parser.add_argument("--presence_loss_weight", type=float, default=0.05)
         parser.add_argument("--ret_feat", type=int, default=0)
         parser.add_argument("--linear_probe", type=int, default=0)
 

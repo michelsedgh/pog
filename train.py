@@ -83,18 +83,68 @@ def _dataset_class(name):
     raise ValueError(f"Unsupported dataset: {name}")
 
 
-def _copy_clip_head_to_actor_head(module):
+def _checkpoint_has_key(checkpoint, key):
+    if checkpoint is None:
+        return False
+    return key in checkpoint.get("state_dict", {})
+
+
+def _initialize_actor_prompt_from_checkpoint(module, checkpoint):
     model = module.model
     if not getattr(model, "actor_prompt", False):
         return
-    if not hasattr(model, "actor_head") or not hasattr(model, "head"):
-        return
-    if model.actor_head.weight.shape != model.head.weight.shape:
-        return
+
+    initialized = []
     with torch.no_grad():
-        model.actor_head.weight.copy_(model.head.weight)
-        model.actor_head.bias.copy_(model.head.bias)
-    print("Initialized actor_head from checkpoint class head.")
+        if (
+            hasattr(model, "actor_head")
+            and hasattr(model, "head")
+            and model.actor_head.weight.shape == model.head.weight.shape
+            and not _checkpoint_has_key(checkpoint, "model.actor_head.weight")
+        ):
+            model.actor_head.weight.copy_(model.head.weight)
+            model.actor_head.bias.copy_(model.head.bias)
+            initialized.append("actor_head")
+
+        net = getattr(model, "net", None)
+        if net is None:
+            return
+
+        if (
+            hasattr(net, "actor_token")
+            and hasattr(net, "class_token")
+            and net.actor_token.shape == net.class_token.shape
+            and not _checkpoint_has_key(checkpoint, "model.net.actor_token")
+        ):
+            net.actor_token.copy_(net.class_token)
+            initialized.append("actor_token")
+
+        if hasattr(net, "actor_slot_embed") and not _checkpoint_has_key(
+            checkpoint, "model.net.actor_slot_embed"
+        ):
+            net.actor_slot_embed.zero_()
+            initialized.append("actor_slot_embed")
+
+        if hasattr(net, "valid_embed") and not _checkpoint_has_key(
+            checkpoint, "model.net.valid_embed.weight"
+        ):
+            net.valid_embed.weight.zero_()
+            initialized.append("valid_embed")
+
+        if hasattr(net, "bbox_mlp") and not _checkpoint_has_key(
+            checkpoint, "model.net.bbox_mlp.2.weight"
+        ):
+            last = net.bbox_mlp[-1]
+            if isinstance(last, torch.nn.Linear):
+                torch.nn.init.zeros_(last.weight)
+                torch.nn.init.zeros_(last.bias)
+                initialized.append("bbox_mlp_final")
+
+    if initialized:
+        print(
+            "Initialized actor-prompt modules from current class path: "
+            + ", ".join(initialized)
+        )
 
 
 def build_parser():
@@ -118,6 +168,7 @@ def build_parser():
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--persistent_workers", type=int, default=1)
     parser.add_argument("--prefetch_factor", type=int, default=None)
+    parser.add_argument("--class_balanced_sampler", type=int, default=0)
     parser.add_argument("--max_epochs", type=int, default=None)
     parser.add_argument("--max_nb_epochs", type=int, default=200)
     parser.add_argument("--accum_grad_batches", type=int, default=2)
@@ -173,10 +224,12 @@ def main():
         )
         result = module.load_state_dict(checkpoint["state_dict"], strict=strict)
         if hparams.actor_prompt:
-            _copy_clip_head_to_actor_head(module)
+            _initialize_actor_prompt_from_checkpoint(module, checkpoint)
         if not strict:
             print("Missing keys:", result.missing_keys)
             print("Unexpected keys:", result.unexpected_keys)
+    elif hparams.actor_prompt:
+        _initialize_actor_prompt_from_checkpoint(module, None)
 
     datamodule_params = vars(hparams).copy()
     datamodule_params.pop("dataset", None)

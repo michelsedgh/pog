@@ -1,5 +1,6 @@
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
+from torch.utils.data import WeightedRandomSampler
 from torch.utils.data import default_collate
 from datamodule.mixup import Mixup
 import torch
@@ -190,6 +191,25 @@ class BaseDataModule(pl.LightningDataModule):
                 kwargs["prefetch_factor"] = int(prefetch_factor)
         return kwargs
 
+    def _class_balanced_train_sampler(self):
+        if not getattr(self.hparams, "class_balanced_sampler", 0):
+            return None
+        labels = getattr(self.train_dataset, "y", None)
+        if labels is None:
+            raise ValueError(
+                "class_balanced_sampler requires the training dataset to expose y labels"
+            )
+        labels = torch.as_tensor(labels, dtype=torch.long)
+        if labels.numel() == 0:
+            raise ValueError("class_balanced_sampler received an empty training dataset")
+        class_counts = torch.bincount(labels)
+        if torch.any(class_counts[labels] == 0):
+            raise ValueError("class_balanced_sampler found a label with zero count")
+        weights = 1.0 / class_counts[labels].float()
+        return WeightedRandomSampler(
+            weights.double(), num_samples=len(weights), replacement=True
+        )
+
     def train_dataloader(self):
         # # Balanced batch sampler
         # loss_weights = self.train_dataset.calc_class_weights()
@@ -197,6 +217,7 @@ class BaseDataModule(pl.LightningDataModule):
         # sampler = torch.utils.data.sampler.WeightedRandomSampler(weight_sample, len(self.train_dataset))
         if getattr(self.hparams, "actor_prompt", 0) and self.hparams.mixup:
             raise ValueError("actor_prompt training does not support mixup/cutmix")
+        sampler = self._class_balanced_train_sampler()
         if self.hparams.mixup:
             mixup_fn = Mixup(
                 mixup_alpha=0.8,
@@ -227,11 +248,11 @@ class BaseDataModule(pl.LightningDataModule):
             return DataLoader(
                 self.train_dataset,
                 batch_size=self.hparams.batch_size,
-                shuffle=True,
+                shuffle=sampler is None,
+                sampler=sampler,
                 **self._loader_worker_kwargs(),
                 collate_fn=collate_fn,
                 drop_last=True,
-                # sampler=sampler,
                 # worker_init_fn=dataload_init
             )
         else:
@@ -239,7 +260,8 @@ class BaseDataModule(pl.LightningDataModule):
                 return DataLoader(
                     self.train_dataset,
                     batch_size=self.hparams.batch_size,
-                    shuffle=True,
+                    shuffle=sampler is None,
+                    sampler=sampler,
                     **self._loader_worker_kwargs(),
                     collate_fn=thumos_collate_fn,
                     drop_last=True,
@@ -248,7 +270,8 @@ class BaseDataModule(pl.LightningDataModule):
                 return DataLoader(
                     self.train_dataset,
                     batch_size=self.hparams.batch_size,
-                    shuffle=True,
+                    shuffle=sampler is None,
+                    sampler=sampler,
                     **self._loader_worker_kwargs(),
                     drop_last=True,
                 )

@@ -112,7 +112,9 @@ class HeatmapModule(pl.LightningModule):
         result = super().load_state_dict(state_dict, strict=strict, assign=assign)
         if self.actor_prompt and not strict:
             allowed_missing = [
-                "model.net.actor_tokens",
+                "model.net.actor_token",
+                "model.net.actor_slot_embed",
+                "model.net.valid_embed",
                 "model.net.bbox_mlp",
                 "model.actor_head",
                 "model.presence_head",
@@ -149,16 +151,42 @@ class HeatmapModule(pl.LightningModule):
         # Forward function that is run when visualizing the graph
         return self.model(x, boxes=boxes, valid=valid)
 
+    def _actor_prompt_param_name(self, name):
+        return name.startswith(
+            (
+                "actor_token",
+                "actor_slot_embed",
+                "valid_embed",
+                "bbox_mlp",
+            )
+        )
+
+    def _head_params(self):
+        if not self.actor_prompt:
+            return list(self.model.head.parameters())
+
+        params = list(self.model.actor_head.parameters())
+        if self.model.presence_head is not None:
+            params += list(self.model.presence_head.parameters())
+        for name, param in self.model.net.named_parameters():
+            if self._actor_prompt_param_name(name):
+                params.append(param)
+        return params
+
+    def _backbone_params(self, include_heatmap_head=True):
+        params = []
+        for name, param in self.model.net.named_parameters():
+            if self.actor_prompt and self._actor_prompt_param_name(name):
+                continue
+            if not include_heatmap_head and "heatmap_head" in name:
+                continue
+            params.append(param)
+        return params
+
     def configure_optimizers(self):
         # We will support Adam or SGD as optimizers.
         if self.model.hparams.freeze_backbone:
-            head_params = (
-                list(self.model.actor_head.parameters())
-                if self.actor_prompt
-                else list(self.model.head.parameters())
-            )
-            if self.actor_prompt and self.model.presence_head is not None:
-                head_params += list(self.model.presence_head.parameters())
+            head_params = self._head_params()
             optimizer = optim.AdamW(
                 [
                     {
@@ -174,20 +202,10 @@ class HeatmapModule(pl.LightningModule):
                 and self.model.hparams.lr_head_hm
             ):
                 # Python
-                head_params = (
-                    list(self.model.actor_head.parameters())
-                    if self.actor_prompt
-                    else list(self.model.head.parameters())
-                )
-                if self.actor_prompt and self.model.presence_head is not None:
-                    head_params += list(self.model.presence_head.parameters())
+                head_params = self._head_params()
                 params = [
                     {
-                        "params": [
-                            param
-                            for name, param in self.model.net.named_parameters()
-                            if "heatmap_head" not in name
-                        ],
+                        "params": self._backbone_params(include_heatmap_head=False),
                         "lr": self.lr,
                         "weight_decay": self.weight_decay,
                     },
@@ -205,16 +223,10 @@ class HeatmapModule(pl.LightningModule):
                     },
                 )
             else:
-                head_params = (
-                    list(self.model.actor_head.parameters())
-                    if self.actor_prompt
-                    else list(self.model.head.parameters())
-                )
-                if self.actor_prompt and self.model.presence_head is not None:
-                    head_params += list(self.model.presence_head.parameters())
+                head_params = self._head_params()
                 params = [
                     {
-                        "params": self.model.net.parameters(),
+                        "params": self._backbone_params(include_heatmap_head=True),
                         "lr": self.lr,
                         "weight_decay": self.weight_decay,
                     },
@@ -317,7 +329,7 @@ class HeatmapModule(pl.LightningModule):
                 presence_logits, valid.float()
             )
             loss = loss + loss_presence * self.model.hparams.get(
-                "presence_loss_weight", 0.1
+                "presence_loss_weight", 0.05
             )
             self.log(
                 f"{stage}_loss_presence",

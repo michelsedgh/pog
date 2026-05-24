@@ -301,6 +301,8 @@ class KTPAttention(Attention):
         sim_metric=0,
         topk_type=0,
         n_key_tokens=1,
+        bbox_prior_weight=0.0,
+        needs_full_attention=False,
     ):
         super(KTPAttention, self).__init__(
             dim, num_heads, qkv_bias, qk_scale, attn_drop, proj_drop, attn_head_dim
@@ -317,6 +319,8 @@ class KTPAttention(Attention):
         self.topk_type = topk_type  # 0: all, 1: cls_hm
         self.sim_metric = sim_metric  # 0: k, 1: attn
         self.n_key_tokens = n_key_tokens
+        self.bbox_prior_weight = float(bbox_prior_weight)
+        self.needs_full_attention = bool(needs_full_attention)
 
     def forward_part1(self, x, size=None):
         B, N, C = x.shape
@@ -338,7 +342,7 @@ class KTPAttention(Attention):
             qkv[2],
         )  # make torchscript happy (cannot use tensor as tuple)
 
-        if self.keep_rate >= 1:
+        if self.keep_rate >= 1 and not self.needs_full_attention:
             # use flash attention
             x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop.p)
             x = x.transpose(1, 2).reshape(B, N, -1)
@@ -362,13 +366,13 @@ class KTPAttention(Attention):
             sim_feat = v
         return x, attn, sim_feat
 
-    def forward(self, x, last_idx=None, ws=None, size=None):
+    def forward(self, x, last_idx=None, ws=None, size=None, bbox_token_prior=None):
         B, N, C = x.shape
         if self.keep_rate < 1:
             x, attn, feature = self.forward_part1(x, size)
         else:
-            x, attn, _ = self.forward_part1(x, size)
-            return x, last_idx, attn
+            x, attn, feature = self.forward_part1(x, size)
+            return x, last_idx, attn if self.sim_metric == 1 else feature
 
         # get top-k tokens and the corresponding indexes
         if self.keep_rate < 1:
@@ -402,6 +406,13 @@ class KTPAttention(Attention):
                 attn_topk = attn_topk[
                     :, num_s_tokens:
                 ]  # remove class token and heatmap tokens
+                if bbox_token_prior is not None and self.bbox_prior_weight > 0:
+                    bbox_prior = torch.gather(
+                        bbox_token_prior.to(dtype=attn_topk.dtype),
+                        dim=1,
+                        index=last_idx,
+                    )
+                    attn_topk = attn_topk + self.bbox_prior_weight * bbox_prior
                 # average on all queries and num_heads
                 _, idx_evad = torch.topk(
                     attn_topk,
@@ -462,6 +473,8 @@ class Block(nn.Module):
             n_heatmap_tokens=n_heatmap_tokens,
             sim_metric=sim_metric,
             n_key_tokens=n_key_tokens,
+            bbox_prior_weight=kwargs.pop("bbox_prior_weight", 0.0),
+            needs_full_attention=keep_rate_merge < 1,
             **kwargs,
         )
 
@@ -487,11 +500,15 @@ class Block(nn.Module):
         else:
             self.gamma_1, self.gamma_2 = None, None
 
-    def forward_KTPpart1(self, x, last_idx, window_size):
+    def forward_KTPpart1(self, x, last_idx, window_size, bbox_token_prior=None):
         # check if self._size_attn shape matches with x
         if self.gamma_1 is None:
             tmp, idx, attn = self.attn(
-                self.norm1(x), last_idx, window_size, self._size_attn
+                self.norm1(x),
+                last_idx,
+                window_size,
+                self._size_attn,
+                bbox_token_prior=bbox_token_prior,
             )
             return self.drop_path(tmp), idx, attn
         else:
@@ -504,9 +521,11 @@ class Block(nn.Module):
         else:
             return self.drop_path(self.gamma_2 * self.mlp(self.norm2(x)))
 
-    def forward(self, x, last_idx, window_size):
+    def forward(self, x, last_idx, window_size, bbox_token_prior=None):
         # attn
-        tmp, idx, attn = self.forward_KTPpart1(x, last_idx, window_size)
+        tmp, idx, attn = self.forward_KTPpart1(
+            x, last_idx, window_size, bbox_token_prior=bbox_token_prior
+        )
         x = x + tmp
 
         # class token heatmap -centric token pruning
@@ -777,6 +796,8 @@ class VisionTransformer(nn.Module):
         n_registers=0,
         actor_prompt=0,
         num_actor_tokens=8,
+        actor_bbox_prior_weight=0.1,
+        actor_bbox_prior_expand=1.75,
         **kwargs,
     ):
         super().__init__()
@@ -799,6 +820,12 @@ class VisionTransformer(nn.Module):
         self.n_actor_tokens = int(num_actor_tokens) if self.actor_prompt else 0
         if self.n_actor_tokens < 0:
             raise ValueError("num_actor_tokens must be non-negative")
+        self.actor_bbox_prior_weight = float(actor_bbox_prior_weight)
+        self.actor_bbox_prior_expand = float(actor_bbox_prior_expand)
+        if self.actor_bbox_prior_weight < 0:
+            raise ValueError("actor_bbox_prior_weight must be non-negative")
+        if self.actor_bbox_prior_expand <= 0:
+            raise ValueError("actor_bbox_prior_expand must be positive")
         self.HW_OUT_CONV = (hw_out_conv, hw_out_conv)
         self.n_heatmap_tokens = self.HW_OUT_CONV[0] * self.HW_OUT_CONV[1]
         self.n_landmarks = n_landmarks
@@ -868,6 +895,7 @@ class VisionTransformer(nn.Module):
                     keep_rate_merge=keep_rate_merge[i],
                     n_heatmap_tokens=self.n_heatmap_tokens,
                     n_key_tokens=self.N_KEY_TOKENS,
+                    bbox_prior_weight=self.actor_bbox_prior_weight,
                     **kwargs,
                 )
                 for i in range(depth)
@@ -889,14 +917,21 @@ class VisionTransformer(nn.Module):
         self.head.bias.data.mul_(init_scale)
         self.class_token = nn.Parameter(torch.zeros(1, 1, self.num_features))
         if self.n_actor_tokens > 0:
-            self.actor_tokens = nn.Parameter(
-                torch.randn(1, self.n_actor_tokens, self.num_features)
+            self.actor_token = nn.Parameter(torch.zeros(1, 1, self.num_features))
+            self.actor_slot_embed = nn.Parameter(
+                torch.zeros(1, self.n_actor_tokens, self.num_features)
             )
+            self.valid_embed = nn.Embedding(2, self.num_features)
             self.bbox_mlp = nn.Sequential(
                 nn.Linear(4, self.num_features),
                 nn.GELU(),
                 nn.Linear(self.num_features, self.num_features),
             )
+            trunc_normal_(self.actor_token, std=0.02)
+            nn.init.zeros_(self.actor_slot_embed)
+            nn.init.zeros_(self.valid_embed.weight)
+            nn.init.zeros_(self.bbox_mlp[-1].weight)
+            nn.init.zeros_(self.bbox_mlp[-1].bias)
         if self.n_landmarks > 0:
             self.heatmap_tokens = nn.Parameter(
                 torch.randn(1, self.HW_OUT_CONV[0] * self.HW_OUT_CONV[1], embed_dim)
@@ -938,6 +973,44 @@ class VisionTransformer(nn.Module):
             nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
         )
 
+    def _bbox_token_prior(self, boxes, valid, window_size):
+        if self.actor_bbox_prior_weight <= 0:
+            return None
+
+        frames, height, width = [int(v) for v in window_size]
+        if height <= 0 or width <= 0:
+            return None
+
+        boxes = boxes.clamp(0.0, 1.0)
+        valid = valid.bool()
+        center = (boxes[..., :2] + boxes[..., 2:]) * 0.5
+        size = (boxes[..., 2:] - boxes[..., :2]).clamp_min(1e-4)
+        expanded = size * self.actor_bbox_prior_expand
+        mins = (center - expanded * 0.5).clamp(0.0, 1.0)
+        maxs = (center + expanded * 0.5).clamp(0.0, 1.0)
+
+        y_centers = (
+            torch.arange(height, device=boxes.device, dtype=boxes.dtype) + 0.5
+        ) / height
+        x_centers = (
+            torch.arange(width, device=boxes.device, dtype=boxes.dtype) + 0.5
+        ) / width
+        grid_y, grid_x = torch.meshgrid(y_centers, x_centers, indexing="ij")
+        grid_x = grid_x.reshape(1, 1, -1)
+        grid_y = grid_y.reshape(1, 1, -1)
+
+        inside = (
+            (grid_x >= mins[..., 0:1])
+            & (grid_x <= maxs[..., 0:1])
+            & (grid_y >= mins[..., 1:2])
+            & (grid_y <= maxs[..., 1:2])
+            & valid.unsqueeze(-1)
+        )
+        spatial_prior = inside.any(dim=1).to(dtype=boxes.dtype)
+        return spatial_prior.unsqueeze(1).expand(-1, frames, -1).reshape(
+            boxes.shape[0], frames * height * width
+        )
+
     def forward(self, x, boxes=None, valid=None):
         # x_list, images_whwh = self.preprocess_image(x_list)
 
@@ -967,6 +1040,7 @@ class VisionTransformer(nn.Module):
             x = torch.cat([self.heatmap_tokens.expand(B, -1, -1), x], dim=1)
         if self.n_registers > 0:
             x = torch.cat([self.register_tokens.expand(B, -1, -1), x], dim=1)
+        bbox_token_prior = None
         if self.n_actor_tokens > 0:
             if boxes is None:
                 raise ValueError("boxes are required when actor_prompt is enabled")
@@ -980,7 +1054,6 @@ class VisionTransformer(nn.Module):
                     f"boxes batch size {boxes.shape[0]} does not match video batch {B}"
                 )
             boxes = boxes.to(device=x.device, dtype=x.dtype)
-            actor_tokens = self.actor_tokens.expand(B, -1, -1) + self.bbox_mlp(boxes)
             if valid is None:
                 raise ValueError("valid is required when actor_prompt is enabled")
             if valid.shape != boxes.shape[:2]:
@@ -988,6 +1061,14 @@ class VisionTransformer(nn.Module):
                     "valid must have shape "
                     f"[B,{self.n_actor_tokens}], got {tuple(valid.shape)}"
                 )
+            valid = valid.to(device=x.device, dtype=torch.bool)
+            actor_tokens = (
+                self.actor_token.expand(B, self.n_actor_tokens, -1)
+                + self.actor_slot_embed.expand(B, -1, -1)
+                + self.bbox_mlp(boxes)
+                + self.valid_embed(valid.long()).to(dtype=x.dtype)
+            )
+            bbox_token_prior = self._bbox_token_prior(boxes, valid, ws)
             x = torch.cat([actor_tokens, x], dim=1)
 
         # append class token to the beginning of the sequence
@@ -996,7 +1077,7 @@ class VisionTransformer(nn.Module):
         idx = torch.arange(0, N, device=x.device).unsqueeze(0).repeat(B, 1)
         for i in range(self.depth):
             blk = self.blocks[i]
-            x, idx = blk(x, idx, ws)
+            x, idx = blk(x, idx, ws, bbox_token_prior=bbox_token_prior)
 
         if self.n_actor_tokens > 0:
             x_actor = x[:, 1 : 1 + self.n_actor_tokens, :]
