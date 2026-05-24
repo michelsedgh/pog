@@ -197,6 +197,7 @@ class ToyotaSMDataset(Dataset):
         # self.mean = torch.tensor([1,1,1])
         # self.std = torch.tensor([1,1,1])
         self._num_retries = 5
+        self._video_size_cache = {}
         self.needs_skeleton = self.n_landmarks > 0 or self.actor_prompt
         if self.n_landmarks:
             if UDPHeatmap is None:
@@ -404,7 +405,8 @@ class ToyotaSMDataset(Dataset):
             for row in data_df.itertuples(index=False):
                 file_name = f"{row.file_id}_pose3d.json"
                 data = self._read_skeleton_json(file_folder, file_name, skeleton_zip)
-                keep.append(self._skeleton_has_pose(data, row.file_id))
+                height, width = self._video_size(row.file_id)
+                keep.append(self._skeleton_has_pose(data, row.file_id, height, width))
         finally:
             if skeleton_zip is not None:
                 skeleton_zip.close()
@@ -420,7 +422,7 @@ class ToyotaSMDataset(Dataset):
             raise RuntimeError("No Toyota actor samples have usable skeleton pose.")
         return filtered
 
-    def _skeleton_has_pose(self, data, file_id):
+    def _skeleton_has_pose(self, data, file_id, height, width):
         for frame in data["frames"]:
             if len(frame) > 1:
                 print(frame, file_id)
@@ -433,7 +435,13 @@ class ToyotaSMDataset(Dataset):
             landmarks = np.asarray(list(zip(landmarks_x, landmarks_y)), dtype=np.float32)
             finite = np.isfinite(landmarks).all(axis=-1)
             non_zero = ~np.all(landmarks == 0, axis=-1)
-            if (finite & non_zero).any():
+            in_frame = (
+                (landmarks[:, 0] >= 0)
+                & (landmarks[:, 0] < width)
+                & (landmarks[:, 1] >= 0)
+                & (landmarks[:, 1] < height)
+            )
+            if (finite & non_zero & in_frame).any():
                 return True
         return False
 
@@ -451,7 +459,7 @@ class ToyotaSMDataset(Dataset):
     def set_epoch(self, epoch):
         self.current_epoch = int(epoch)
 
-    def _pose_available_by_frame(self, idx, n_frames):
+    def _pose_available_by_frame(self, idx, n_frames, height, width):
         if not self.needs_skeleton or not hasattr(self, "landmark_list"):
             return None
         keypoints = torch.stack(self.landmark_list[idx]).numpy()[:n_frames]
@@ -459,7 +467,13 @@ class ToyotaSMDataset(Dataset):
             return None
         finite = np.isfinite(keypoints).all(axis=-1)
         non_zero = ~np.all(keypoints == 0, axis=-1)
-        return (finite & non_zero).any(axis=1)
+        in_frame = (
+            (keypoints[..., 0] >= 0)
+            & (keypoints[..., 0] < width)
+            & (keypoints[..., 1] >= 0)
+            & (keypoints[..., 1] < height)
+        )
+        return (finite & non_zero & in_frame).any(axis=1)
 
     def _sample_pose_guided_start(self, start_min, start_max, pose_available):
         if pose_available is None or not pose_available.any():
@@ -539,6 +553,7 @@ class ToyotaSMDataset(Dataset):
 
             file_id = self.data_df.iloc[idx].file_id
             n_frames = self._num_frames(file_id)
+            video_height, video_width = self._video_size(file_id)
             label = self.y[idx]
             pose_available = None
             if (
@@ -546,7 +561,9 @@ class ToyotaSMDataset(Dataset):
                 and self.needs_skeleton
                 and self.toyota_pose_guided_sampling
             ):
-                pose_available = self._pose_available_by_frame(idx, n_frames)
+                pose_available = self._pose_available_by_frame(
+                    idx, n_frames, video_height, video_width
+                )
             if self.set_type == "test":
                 start_frame = self.data_df.iloc[idx].start
                 end_frame = self.data_df.iloc[idx].end
@@ -1217,6 +1234,56 @@ class ToyotaSMDataset(Dataset):
         self._frame_count_cache[file_id] = int(n_frames)
         self._save_frame_count_cache()
         return n_frames
+
+    def _video_size(self, file_id):
+        if file_id in self._video_size_cache:
+            return self._video_size_cache[file_id]
+
+        if self.frame_source == "frames":
+            frame_folder = os.path.join(self.data_dir, "frames", file_id)
+            frame_names = sorted(
+                name
+                for name in os.listdir(frame_folder)
+                if name.lower().endswith((".jpg", ".jpeg", ".png"))
+            )
+            if not frame_names:
+                raise RuntimeError(f"No frames found in {frame_folder}")
+            frame = torchvision.io.read_image(os.path.join(frame_folder, frame_names[0]))
+            size = (int(frame.shape[1]), int(frame.shape[2]))
+            self._video_size_cache[file_id] = size
+            return size
+
+        video_path = self._video_path(file_id)
+        size = self._video_size_from_file(video_path)
+        self._video_size_cache[file_id] = size
+        return size
+
+    def _video_size_from_file(self, video_path):
+        try:
+            import cv2
+
+            cap = cv2.VideoCapture(video_path)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()
+            if width > 0 and height > 0:
+                return height, width
+        except Exception:
+            pass
+
+        if av is None:
+            raise ImportError("PyAV is required to inspect Toyota mp4 size.")
+        with av.open(video_path) as container:
+            stream = container.streams.video[0]
+            width = int(stream.codec_context.width or stream.width or 0)
+            height = int(stream.codec_context.height or stream.height or 0)
+            if width <= 0 or height <= 0:
+                frame = next(container.decode(stream), None)
+                if frame is None:
+                    raise RuntimeError(f"No frames decoded from {video_path}")
+                width = int(frame.width)
+                height = int(frame.height)
+            return height, width
 
     def _count_video_frames(self, video_path):
         try:
