@@ -225,6 +225,13 @@ def build_parser():
     parser.add_argument("--model_name", type=str, default="poguise_actor_prompt")
     parser.add_argument("--default_root_dir", type=str, default="./checkpoints")
     parser.add_argument("--save_top_k", type=int, default=3)
+    parser.add_argument("--checkpoint_monitor", type=str, default="val_loss")
+    parser.add_argument("--checkpoint_mode", type=str, default="min")
+    parser.add_argument(
+        "--checkpoint_filename",
+        type=str,
+        default="{epoch:03d}-{val_loss:.4f}",
+    )
     parser.add_argument("--reload_dataloaders_every_n_epochs", type=int, default=None)
 
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -294,11 +301,11 @@ def main():
     root_dir = os.path.join(hparams.default_root_dir, hparams.model_name)
     logger = CSVLogger(save_dir=hparams.default_root_dir, name=hparams.model_name)
     checkpoint_callback = ModelCheckpoint(
-        monitor="val_loss",
-        mode="min",
+        monitor=hparams.checkpoint_monitor,
+        mode=hparams.checkpoint_mode,
         save_top_k=hparams.save_top_k,
         save_last=True,
-        filename="{epoch:03d}-{val_loss:.4f}",
+        filename=hparams.checkpoint_filename,
     )
     callbacks = [checkpoint_callback, DatasetEpochCallback()]
     synthetic_curriculum = (
