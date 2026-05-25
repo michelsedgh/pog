@@ -99,19 +99,33 @@ def crop_boxes(boxes, x_offset, y_offset):
     return cropped_boxes
 
 
-def _keypoint_aware_crop_offset(length, size, coords, randomize):
+def _keypoint_aware_axis_offset(length, size, coord, randomize):
     max_offset = int(length - size)
     if max_offset <= 0:
         return 0
 
-    center = float(np.median(coords))
-    low = max(0, int(math.ceil(center - size + 1)))
-    high = min(max_offset, int(math.floor(center)))
+    coord = float(coord)
+    low = max(0, int(math.ceil(coord - size + 1)))
+    high = min(max_offset, int(math.floor(coord)))
     if high >= low:
         if not randomize:
             return int(round((low + high) * 0.5))
         return int(np.random.randint(low, high + 1))
-    return int(np.clip(round(center - size * 0.5), 0, max_offset))
+    return int(np.clip(round(coord - size * 0.5), 0, max_offset))
+
+
+def _keypoint_aware_crop_offsets(width, height, size, crop_points, randomize):
+    crop_points = np.asarray(crop_points, dtype=np.float32)
+    if randomize:
+        anchor = crop_points[int(np.random.randint(0, len(crop_points)))]
+    else:
+        center = np.median(crop_points, axis=0)
+        anchor = crop_points[
+            int(np.argmin(np.linalg.norm(crop_points - center, axis=1)))
+        ]
+    x_offset = _keypoint_aware_axis_offset(width, size, anchor[0], randomize)
+    y_offset = _keypoint_aware_axis_offset(height, size, anchor[1], randomize)
+    return x_offset, y_offset
 
 
 def _visible_crop_keypoints(keypoints, width, height):
@@ -177,11 +191,8 @@ def random_crop(
         )
 
     if crop_points is not None:
-        x_offset = _keypoint_aware_crop_offset(
-            width, size, crop_points[:, 0], randomize=True
-        )
-        y_offset = _keypoint_aware_crop_offset(
-            height, size, crop_points[:, 1], randomize=True
+        x_offset, y_offset = _keypoint_aware_crop_offsets(
+            width, height, size, crop_points, randomize=True
         )
     else:
         y_offset = 0
@@ -294,11 +305,8 @@ def uniform_crop(
         )
 
     if crop_points is not None:
-        x_offset = _keypoint_aware_crop_offset(
-            width, size, crop_points[:, 0], randomize=False
-        )
-        y_offset = _keypoint_aware_crop_offset(
-            height, size, crop_points[:, 1], randomize=False
+        x_offset, y_offset = _keypoint_aware_crop_offsets(
+            width, height, size, crop_points, randomize=False
         )
     else:
         y_offset = int(math.ceil((height - size) / 2))

@@ -495,17 +495,26 @@ class ToyotaSMDataset(Dataset):
             keypoints[frames_idx], height, width
         )
 
-    def _keypoint_aware_crop_offset(self, length, size, coords):
+    def _keypoint_aware_axis_offset(self, length, size, coord):
         max_offset = int(length - size)
         if max_offset <= 0:
             return 0
 
-        center = float(np.median(coords))
-        low = max(0, int(math.ceil(center - size + 1)))
-        high = min(max_offset, int(math.floor(center)))
+        coord = float(coord)
+        low = max(0, int(math.ceil(coord - size + 1)))
+        high = min(max_offset, int(math.floor(coord)))
         if high >= low:
             return int(round((low + high) * 0.5))
-        return int(np.clip(round(center - size * 0.5), 0, max_offset))
+        return int(np.clip(round(coord - size * 0.5), 0, max_offset))
+
+    def _keypoint_aware_eval_crop_offsets(self, width, height, size, crop_points):
+        center = np.median(crop_points, axis=0)
+        anchor = crop_points[
+            int(np.argmin(np.linalg.norm(crop_points - center, axis=1)))
+        ]
+        x_offset = self._keypoint_aware_axis_offset(width, size, anchor[0])
+        y_offset = self._keypoint_aware_axis_offset(height, size, anchor[1])
+        return x_offset, y_offset
 
     def _sampled_keypoints_survive_eval_crop(self, keypoints, height, width):
         # Match the deterministic eval path in utils.ntu.transform without reading frames.
@@ -528,12 +537,8 @@ class ToyotaSMDataset(Dataset):
         if not visible.any():
             return False
 
-        crop_points = scaled[visible]
-        x_offset = self._keypoint_aware_crop_offset(
-            new_width, crop_size, crop_points[:, 0]
-        )
-        y_offset = self._keypoint_aware_crop_offset(
-            new_height, crop_size, crop_points[:, 1]
+        x_offset, y_offset = self._keypoint_aware_eval_crop_offsets(
+            new_width, new_height, crop_size, scaled[visible]
         )
         cropped = scaled - np.asarray([x_offset, y_offset], dtype=np.float32)
         return bool(self._visible_keypoints(cropped, crop_size, crop_size).any())
