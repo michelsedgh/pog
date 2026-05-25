@@ -162,6 +162,7 @@ class BaseDataModule(pl.LightningDataModule):
                 # lazy_load=self.lazy_load,
             )
             self.train_dataset.setup()
+        if stage in ("fit", "validate"):
             self.val_dataset = self.dataset(
                 set_type="val",
                 **self.hparams,

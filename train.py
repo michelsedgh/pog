@@ -231,6 +231,7 @@ def build_parser():
     parser.add_argument("--gradient_clip_val", type=float, default=1.5)
     parser.add_argument("--num_sanity_val_steps", type=int, default=2)
     parser.add_argument("--check_val_every_n_epoch", type=int, default=1)
+    parser.add_argument("--limit_val_batches", type=float, default=None)
 
     parser.add_argument("--project_folder", type=str, default="toyotaSM")
     parser.add_argument("--model_name", type=str, default="poguise_actor_prompt")
@@ -242,6 +243,13 @@ def build_parser():
         "--checkpoint_filename",
         type=str,
         default="{epoch:03d}-{val_loss:.4f}",
+    )
+    parser.add_argument("--save_every_epoch_checkpoints", type=int, default=0)
+    parser.add_argument("--epoch_checkpoint_dir", type=str, default=None)
+    parser.add_argument(
+        "--epoch_checkpoint_filename",
+        type=str,
+        default="epoch={epoch:03d}",
     )
     parser.add_argument("--reload_dataloaders_every_n_epochs", type=int, default=0)
 
@@ -311,14 +319,37 @@ def main():
 
     root_dir = os.path.join(hparams.default_root_dir, hparams.model_name)
     logger = CSVLogger(save_dir=hparams.default_root_dir, name=hparams.model_name)
+    validation_disabled = (
+        hparams.limit_val_batches is not None
+        and float(hparams.limit_val_batches) == 0.0
+    )
+    checkpoint_monitor = hparams.checkpoint_monitor
+    if checkpoint_monitor is not None and str(checkpoint_monitor).lower() == "none":
+        checkpoint_monitor = None
     checkpoint_callback = ModelCheckpoint(
-        monitor=hparams.checkpoint_monitor,
+        monitor=None if validation_disabled else checkpoint_monitor,
         mode=hparams.checkpoint_mode,
-        save_top_k=hparams.save_top_k,
+        save_top_k=0 if validation_disabled else hparams.save_top_k,
         save_last=True,
         filename=hparams.checkpoint_filename,
     )
     callbacks = [checkpoint_callback, DatasetEpochCallback()]
+    if hparams.save_every_epoch_checkpoints:
+        callbacks.append(
+            ModelCheckpoint(
+                dirpath=hparams.epoch_checkpoint_dir
+                or os.path.join(root_dir, "epoch_checkpoints"),
+                filename=hparams.epoch_checkpoint_filename,
+                monitor=None,
+                save_top_k=-1,
+                every_n_epochs=1,
+                save_on_train_epoch_end=True,
+                save_last=False,
+            )
+        )
+    trainer_kwargs = {}
+    if hparams.limit_val_batches is not None:
+        trainer_kwargs["limit_val_batches"] = hparams.limit_val_batches
     trainer = Trainer(
         accelerator=accelerator,
         devices=devices,
@@ -335,6 +366,7 @@ def main():
         check_val_every_n_epoch=hparams.check_val_every_n_epoch,
         reload_dataloaders_every_n_epochs=hparams.reload_dataloaders_every_n_epochs,
         benchmark=True,
+        **trainer_kwargs,
     )
     trainer.fit(
         module,
