@@ -84,6 +84,20 @@ def _metric_value(value):
     return str(value)
 
 
+def _load_module_checkpoint(module, ckpt_path):
+    checkpoint = _load_checkpoint(ckpt_path)
+    state_dict = checkpoint.get("state_dict")
+    if not state_dict:
+        raise RuntimeError(f"Checkpoint has no state_dict: {ckpt_path}")
+    result = module.load_state_dict(state_dict, strict=True)
+    if result.missing_keys or result.unexpected_keys:
+        raise RuntimeError(
+            "Checkpoint state_dict mismatch for "
+            f"{ckpt_path}. Missing={result.missing_keys}, "
+            f"unexpected={result.unexpected_keys}"
+        )
+
+
 def main():
     parser = _add_eval_args(build_parser())
     args = parser.parse_args()
@@ -140,10 +154,11 @@ def main():
 
         print(f"Evaluating epoch {epoch}: {ckpt_path}", flush=True)
         module = HeatmapModule(model=POGUISE, **vars(hparams))
+        _load_module_checkpoint(module, ckpt_path)
         metrics = trainer.validate(
             module,
             dataloaders=val_loader,
-            ckpt_path=str(ckpt_path),
+            ckpt_path=None,
             verbose=False,
         )[0]
         row = {
