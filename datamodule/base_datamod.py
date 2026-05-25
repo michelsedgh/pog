@@ -162,7 +162,9 @@ class BaseDataModule(pl.LightningDataModule):
                 # lazy_load=self.lazy_load,
             )
             self.train_dataset.setup()
-        if stage in ("fit", "validate"):
+        limit_val_batches = getattr(self.hparams, "limit_val_batches", None)
+        val_disabled = limit_val_batches is not None and float(limit_val_batches) == 0.0
+        if stage == "validate" or (stage == "fit" and not val_disabled):
             self.val_dataset = self.dataset(
                 set_type="val",
                 **self.hparams,
