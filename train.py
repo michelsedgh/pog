@@ -120,6 +120,10 @@ def _merged_hparams(args, cli_overrides, checkpoint):
 
     if merged.get("max_epochs") is not None:
         merged["max_nb_epochs"] = merged["max_epochs"]
+    if merged.get("reload_dataloaders_every_n_epochs") is None:
+        merged["reload_dataloaders_every_n_epochs"] = 0
+    if merged.get("check_val_every_n_epoch") is None:
+        merged["check_val_every_n_epoch"] = 1
     merged["mode"] = "train"
     merged["dataset_artifact"] = merged.get("dataset_artifact") or merged.get("dataset")
     return argparse.Namespace(**merged)
@@ -226,6 +230,7 @@ def build_parser():
     parser.add_argument("--accum_grad_batches", type=int, default=2)
     parser.add_argument("--gradient_clip_val", type=float, default=1.5)
     parser.add_argument("--num_sanity_val_steps", type=int, default=2)
+    parser.add_argument("--check_val_every_n_epoch", type=int, default=1)
 
     parser.add_argument("--project_folder", type=str, default="toyotaSM")
     parser.add_argument("--model_name", type=str, default="poguise_actor_prompt")
@@ -238,7 +243,7 @@ def build_parser():
         type=str,
         default="{epoch:03d}-{val_loss:.4f}",
     )
-    parser.add_argument("--reload_dataloaders_every_n_epochs", type=int, default=None)
+    parser.add_argument("--reload_dataloaders_every_n_epochs", type=int, default=0)
 
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--lr_head", type=float, default=6e-4)
@@ -314,19 +319,6 @@ def main():
         filename=hparams.checkpoint_filename,
     )
     callbacks = [checkpoint_callback, DatasetEpochCallback()]
-    synthetic_curriculum = (
-        hparams.actor_prompt
-        and hparams.toyota_synthetic_warmup_epochs > 0
-        and (
-            hparams.toyota_synthetic_two_actor_prob
-            + hparams.toyota_synthetic_three_actor_prob
-            > 0
-        )
-    )
-    reload_every = hparams.reload_dataloaders_every_n_epochs
-    if reload_every is None:
-        reload_every = 1 if synthetic_curriculum else 0
-
     trainer = Trainer(
         accelerator=accelerator,
         devices=devices,
@@ -340,7 +332,8 @@ def main():
         accumulate_grad_batches=hparams.accum_grad_batches,
         gradient_clip_val=hparams.gradient_clip_val,
         num_sanity_val_steps=hparams.num_sanity_val_steps,
-        reload_dataloaders_every_n_epochs=reload_every,
+        check_val_every_n_epoch=hparams.check_val_every_n_epoch,
+        reload_dataloaders_every_n_epochs=hparams.reload_dataloaders_every_n_epochs,
         benchmark=True,
     )
     trainer.fit(
