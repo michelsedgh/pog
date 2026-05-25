@@ -1126,15 +1126,27 @@ class ToyotaSMDataset(Dataset):
         return data_df
 
     def _build_auto_split(self):
+        frames_dir = os.path.join(self.data_dir, "frames")
         mp4_dir = os.path.join(self.data_dir, "mp4")
-        if self.frame_source == "mp4_zip":
+        if self.frame_source == "frames":
+            if not os.path.isdir(frames_dir):
+                raise FileNotFoundError(
+                    f"Automatic Toyota split creation needs frame folders in {frames_dir}."
+                )
+            names = [
+                name
+                for name in os.listdir(frames_dir)
+                if os.path.isdir(os.path.join(frames_dir, name))
+                and not name.startswith(".")
+            ]
+        elif self.frame_source == "mp4_zip":
             names = self._mp4_zip_index().keys()
         elif os.path.isdir(mp4_dir):
             names = [name[:-4] for name in os.listdir(mp4_dir) if name.endswith(".mp4")]
         else:
             raise FileNotFoundError(
-                f"Automatic Toyota split creation needs mp4 files in {mp4_dir} "
-                "or --toyota_mp4_zip."
+                f"Automatic Toyota split creation needs frame folders in {frames_dir}, "
+                f"mp4 files in {mp4_dir}, or --toyota_mp4_zip."
             )
         rows = []
         label_dict = self._label_dict()
