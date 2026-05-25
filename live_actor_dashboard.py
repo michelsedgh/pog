@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from utils.actor_model import load_actor_model
+from utils.actor_tensorrt import TensorRTActorEngine
 
 
 ACTION_CLASSES = [
@@ -59,6 +59,7 @@ def parse_args():
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "cpu"])
     parser.add_argument("--detector-device", type=str, default="cpu", choices=["cuda", "cpu"])
+    parser.add_argument("--engine", type=str, default=None)
     parser.add_argument("--det-threshold", type=float, default=0.35)
     parser.add_argument("--person-class-id", type=int, default=None)
     parser.add_argument("--max-actors", type=int, default=8)
@@ -228,25 +229,62 @@ def pack_actor_boxes(boxes_norm, valid_box_mask, max_actors, device):
     return boxes, valid
 
 
-def run_actor_smoke(args, model, device):
+class TorchActorBackend:
+    def __init__(self, checkpoint_path, device):
+        from utils.actor_model import load_actor_model
+
+        self.model, self.hparams = load_actor_model(checkpoint_path, device)
+        self.device = device
+        self.num_actor_tokens = int(self.hparams.get("num_actor_tokens", 0))
+        self.clip_frames = int(self.hparams.get("n_frames", 16))
+        self.input_size = 224
+        self.backend_name = "pytorch"
+
+    def __call__(self, clip, boxes, valid):
+        with torch.inference_mode():
+            logits, _heatmap, presence = self.model(clip, boxes=boxes, valid=valid)
+        return logits, presence
+
+
+class TensorRTActorBackend:
+    def __init__(self, engine_path):
+        self.engine = TensorRTActorEngine(engine_path)
+        self.device = self.engine.device
+        self.num_actor_tokens = self.engine.num_actor_tokens
+        self.clip_frames = self.engine.clip_frames
+        self.input_size = self.engine.input_size
+        self.backend_name = "tensorrt"
+
+    def __call__(self, clip, boxes, valid):
+        return self.engine(clip, boxes, valid)
+
+
+def load_actor_backend(args):
+    if args.engine:
+        return TensorRTActorBackend(args.engine)
+    return TorchActorBackend(args.checkpoint, resolve_device(args.device))
+
+
+def run_actor_smoke(args, actor):
     frames = [np.zeros((480, 640, 3), dtype=np.uint8) for _ in range(args.clip_frames)]
     boxes_xyxy = np.asarray([[160.0, 80.0, 480.0, 420.0]], dtype=np.float32)
     clip, transform = preprocess_clip(
         frames,
         args.short_side,
         args.input_size,
-        device,
+        actor.device,
     )
     boxes_norm, keep = transform_boxes_to_crop(boxes_xyxy, transform, args.input_size)
-    boxes, valid = pack_actor_boxes(boxes_norm, keep, args.max_actors, device)
-    with torch.inference_mode():
-        logits, _, presence = model(clip, boxes=boxes, valid=valid)
+    boxes, valid = pack_actor_boxes(boxes_norm, keep, args.max_actors, actor.device)
+    logits, presence = actor(clip, boxes, valid)
     probs = torch.softmax(logits[0, 0], dim=-1)
     print(
         "smoke ok:",
         {
             "checkpoint": args.checkpoint,
-            "device": str(device),
+            "engine": args.engine,
+            "backend": actor.backend_name,
+            "device": str(actor.device),
             "valid_slots": int(valid.sum().item()),
             "top_action": ACTION_CLASSES[int(probs.argmax().item())],
             "top_prob": float(probs.max().item()),
@@ -321,12 +359,19 @@ class LiveRunner:
     def __init__(self, args, state):
         self.args = args
         self.state = state
-        self.device = resolve_device(args.device)
-        self.model, self.hparams = load_actor_model(args.checkpoint, self.device)
-        checkpoint_tokens = int(self.hparams.get("num_actor_tokens", args.max_actors))
-        if checkpoint_tokens != args.max_actors:
+        self.actor = load_actor_backend(args)
+        self.device = self.actor.device
+        if self.actor.num_actor_tokens != args.max_actors:
             raise RuntimeError(
-                f"--max-actors must match checkpoint num_actor_tokens={checkpoint_tokens}"
+                f"--max-actors must match actor slots={self.actor.num_actor_tokens}"
+            )
+        if self.actor.clip_frames != args.clip_frames:
+            raise RuntimeError(
+                f"--clip-frames must match actor clip length={self.actor.clip_frames}"
+            )
+        if self.actor.input_size != args.input_size:
+            raise RuntimeError(
+                f"--input-size must match actor input size={self.actor.input_size}"
             )
         self.detector, self.person_ids = load_rfdetr(
             args.person_class_id,
@@ -339,7 +384,7 @@ class LiveRunner:
         self.last_actions = []
 
     def smoke(self):
-        run_actor_smoke(self.args, self.model, self.device)
+        run_actor_smoke(self.args, self.actor)
 
     def run(self):
         cap = cv2.VideoCapture(camera_source(self.args.camera))
@@ -403,12 +448,7 @@ class LiveRunner:
                         self.device,
                     )
                     if valid.any():
-                        with torch.inference_mode():
-                            logits, _, presence_logits = self.model(
-                                clip,
-                                boxes=boxes,
-                                valid=valid,
-                            )
+                        logits, presence_logits = self.actor(clip, boxes, valid)
                         action_probs = torch.softmax(logits[0], dim=-1).detach().cpu().numpy()
                         presence_probs = (
                             torch.sigmoid(presence_logits[0]).detach().cpu().numpy()
@@ -423,7 +463,10 @@ class LiveRunner:
                                     "presence": float(presence_probs[slot]),
                                 }
                             )
-                        message = f"actors={int(valid.sum().item())} frame={self.frame_count}"
+                        message = (
+                            f"{self.actor.backend_name} actors={int(valid.sum().item())} "
+                            f"frame={self.frame_count}"
+                        )
                     else:
                         message = "detections outside model crop"
                 elif len(self.last_boxes_xyxy) == 0:
@@ -518,14 +561,12 @@ setInterval(poll, 1000); poll();
 def main():
     args = parse_args()
     if args.smoke:
-        device = resolve_device(args.device)
-        model, hparams = load_actor_model(args.checkpoint, device)
-        checkpoint_tokens = int(hparams.get("num_actor_tokens", args.max_actors))
-        if checkpoint_tokens != args.max_actors:
+        actor = load_actor_backend(args)
+        if actor.num_actor_tokens != args.max_actors:
             raise RuntimeError(
-                f"--max-actors must match checkpoint num_actor_tokens={checkpoint_tokens}"
+                f"--max-actors must match actor slots={actor.num_actor_tokens}"
             )
-        run_actor_smoke(args, model, device)
+        run_actor_smoke(args, actor)
         return
 
     state = DashboardState()
