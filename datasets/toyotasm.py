@@ -8,6 +8,7 @@ import torchvision
 import torch.nn.functional as F
 from argparse import ArgumentParser
 import json
+import math
 import re
 import shutil
 import tempfile
@@ -406,7 +407,18 @@ class ToyotaSMDataset(Dataset):
                 file_name = f"{row.file_id}_pose3d.json"
                 data = self._read_skeleton_json(file_folder, file_name, skeleton_zip)
                 height, width = self._video_size(row.file_id)
-                keep.append(self._skeleton_has_pose(data, row.file_id, height, width))
+                if self.set_type == "train":
+                    keep.append(self._skeleton_has_pose(data, row.file_id, height, width))
+                else:
+                    keep.append(
+                        self._skeleton_has_sampled_actor_pose(
+                            data,
+                            row,
+                            self._num_frames(row.file_id),
+                            height,
+                            width,
+                        )
+                    )
         finally:
             if skeleton_zip is not None:
                 skeleton_zip.close()
@@ -422,28 +434,120 @@ class ToyotaSMDataset(Dataset):
             raise RuntimeError("No Toyota actor samples have usable skeleton pose.")
         return filtered
 
-    def _skeleton_has_pose(self, data, file_id, height, width):
+    def _skeleton_keypoints_array(self, data, file_id):
+        keypoints = []
         for frame in data["frames"]:
             if len(frame) > 1:
                 print(frame, file_id)
                 raise ValueError("More than one person in frame")
             if len(frame) == 0:
+                keypoints.append(np.zeros((self.pose_landmarks, 2), dtype=np.float32))
                 continue
             pose2d = frame[0]["pose2d"]
             landmarks_x = pose2d[: self.pose_landmarks]
             landmarks_y = pose2d[self.pose_landmarks : self.pose_landmarks * 2]
             landmarks = np.asarray(list(zip(landmarks_x, landmarks_y)), dtype=np.float32)
-            finite = np.isfinite(landmarks).all(axis=-1)
-            non_zero = ~np.all(landmarks == 0, axis=-1)
-            in_frame = (
-                (landmarks[:, 0] >= 0)
-                & (landmarks[:, 0] < width)
-                & (landmarks[:, 1] >= 0)
-                & (landmarks[:, 1] < height)
-            )
-            if (finite & non_zero & in_frame).any():
-                return True
-        return False
+            keypoints.append(np.round(landmarks).astype(np.float32))
+        if not keypoints:
+            keypoints.append(np.zeros((self.pose_landmarks, 2), dtype=np.float32))
+        keypoints.append(keypoints[-1].copy())
+        return np.stack(keypoints, axis=0)
+
+    def _visible_pose_by_frame(self, keypoints, n_frames, height, width):
+        keypoints = np.asarray(keypoints, dtype=np.float32)[:n_frames]
+        if keypoints.ndim != 3 or keypoints.shape[0] == 0:
+            return None
+        return self._visible_keypoints(keypoints, height, width).any(axis=1)
+
+    def _skeleton_has_pose(self, data, file_id, height, width):
+        keypoints = self._skeleton_keypoints_array(data, file_id)
+        pose_available = self._visible_pose_by_frame(
+            keypoints, len(keypoints), height, width
+        )
+        return pose_available is not None and bool(pose_available.any())
+
+    def _skeleton_has_sampled_actor_pose(self, data, row, n_frames, height, width):
+        keypoints = self._skeleton_keypoints_array(data, row.file_id)
+        pose_available = self._visible_pose_by_frame(keypoints, n_frames, height, width)
+        if pose_available is None or not pose_available.any():
+            return False
+
+        if self.set_type == "test":
+            start_frame = int(getattr(row, "start", 0))
+            end_frame = int(getattr(row, "end", n_frames - 1))
+            if end_frame < 0 or end_frame >= n_frames:
+                end_frame = n_frames - 1
+        elif n_frames > 128:
+            max_start = max(0, n_frames - 129)
+            start_frame = self._sample_pose_guided_start(0, max_start, pose_available)
+            if start_frame is None:
+                start_frame = n_frames // 2 - 64
+                end_frame = n_frames // 2 + 64
+            else:
+                end_frame = min(start_frame + 128, n_frames - 1)
+        else:
+            start_frame = 0
+            end_frame = n_frames - 1
+
+        frames_idx = np.linspace(start_frame, end_frame, self.n_frames, dtype=int)
+        frames_idx = np.clip(frames_idx, 0, len(keypoints) - 1)
+        return self._sampled_keypoints_survive_eval_crop(
+            keypoints[frames_idx], height, width
+        )
+
+    def _keypoint_aware_crop_offset(self, length, size, coords):
+        max_offset = int(length - size)
+        if max_offset <= 0:
+            return 0
+
+        center = float(np.median(coords))
+        low = max(0, int(math.ceil(center - size + 1)))
+        high = min(max_offset, int(math.floor(center)))
+        if high >= low:
+            return int(round((low + high) * 0.5))
+        return int(np.clip(round(center - size * 0.5), 0, max_offset))
+
+    def _sampled_keypoints_survive_eval_crop(self, keypoints, height, width):
+        # Match the deterministic eval path in utils.ntu.transform without reading frames.
+        size = int(self.jitter_scales_min)
+        crop_size = 224
+
+        new_width = size
+        new_height = size
+        if width < height:
+            new_height = int(math.floor((float(height) / width) * size))
+        else:
+            new_width = int(math.floor((float(width) / height) * size))
+
+        scaled = np.asarray(keypoints, dtype=np.float32).copy()
+        scaled *= np.asarray(
+            [float(new_height) / height, float(new_width) / width],
+            dtype=np.float32,
+        )
+        visible = self._visible_keypoints(scaled, new_height, new_width)
+        if not visible.any():
+            return False
+
+        crop_points = scaled[visible]
+        x_offset = self._keypoint_aware_crop_offset(
+            new_width, crop_size, crop_points[:, 0]
+        )
+        y_offset = self._keypoint_aware_crop_offset(
+            new_height, crop_size, crop_points[:, 1]
+        )
+        cropped = scaled - np.asarray([x_offset, y_offset], dtype=np.float32)
+        return bool(self._visible_keypoints(cropped, crop_size, crop_size).any())
+
+    def _visible_keypoints(self, keypoints, height, width):
+        finite = np.isfinite(keypoints).all(axis=-1)
+        non_zero = ~np.all(keypoints == 0, axis=-1)
+        in_frame = (
+            (keypoints[..., 0] >= 0)
+            & (keypoints[..., 0] < width)
+            & (keypoints[..., 1] >= 0)
+            & (keypoints[..., 1] < height)
+        )
+        return finite & non_zero & in_frame
 
     def __len__(self):
         return self.length
@@ -463,17 +567,7 @@ class ToyotaSMDataset(Dataset):
         if not self.needs_skeleton or not hasattr(self, "landmark_list"):
             return None
         keypoints = torch.stack(self.landmark_list[idx]).numpy()[:n_frames]
-        if keypoints.ndim != 3 or keypoints.shape[0] == 0:
-            return None
-        finite = np.isfinite(keypoints).all(axis=-1)
-        non_zero = ~np.all(keypoints == 0, axis=-1)
-        in_frame = (
-            (keypoints[..., 0] >= 0)
-            & (keypoints[..., 0] < width)
-            & (keypoints[..., 1] >= 0)
-            & (keypoints[..., 1] < height)
-        )
-        return (finite & non_zero & in_frame).any(axis=1)
+        return self._visible_pose_by_frame(keypoints, n_frames, height, width)
 
     def _sample_pose_guided_start(self, start_min, start_max, pose_available):
         if pose_available is None or not pose_available.any():
@@ -1107,7 +1201,7 @@ class ToyotaSMDataset(Dataset):
             )
         print(
             f"Toyota split file not found: {split_path}. "
-            "Generating deterministic subject split from mp4 filenames."
+            "Generating deterministic subject split from available video ids."
         )
         return self._build_auto_split()
 
