@@ -489,7 +489,11 @@ class ToyotaSMDataset(Dataset):
             start_frame = 0
             end_frame = n_frames - 1
 
-        frames_idx = np.linspace(start_frame, end_frame, self.n_frames, dtype=int)
+        frames_idx = self._sample_frame_indices(
+            start_frame,
+            end_frame,
+            pose_available=pose_available,
+        )
         frames_idx = np.clip(frames_idx, 0, len(keypoints) - 1)
         return self._sampled_keypoints_survive_eval_crop(
             keypoints[frames_idx], height, width
@@ -574,6 +578,61 @@ class ToyotaSMDataset(Dataset):
         keypoints = torch.stack(self.landmark_list[idx]).numpy()[:n_frames]
         return self._visible_pose_by_frame(keypoints, n_frames, height, width)
 
+    def _sample_frame_indices(self, start_frame, end_frame, pose_available=None):
+        frames_idx = np.linspace(start_frame, end_frame, self.n_frames, dtype=int)
+        if (
+            self.actor_prompt
+            and self.needs_skeleton
+            and self.toyota_pose_guided_sampling
+            and pose_available is not None
+        ):
+            frames_idx = self._ensure_pose_frame_indices(frames_idx, pose_available)
+        return frames_idx
+
+    def _ensure_pose_frame_indices(self, frames_idx, pose_available):
+        pose_available = np.asarray(pose_available, dtype=bool)
+        if pose_available.size == 0 or not pose_available.any():
+            return frames_idx
+
+        frames_idx = np.asarray(frames_idx, dtype=int).copy()
+        clamped = np.clip(frames_idx, 0, pose_available.size - 1)
+        sampled_pose_count = int(pose_available[clamped].sum())
+        target_pose_count = min(
+            int(self.toyota_min_pose_frames),
+            int(pose_available.sum()),
+        )
+        if sampled_pose_count >= target_pose_count:
+            return frames_idx
+
+        pose_frames = np.flatnonzero(pose_available)
+        sampled = set(int(i) for i in clamped.tolist())
+        missing_pose_frames = np.asarray(
+            [int(i) for i in pose_frames.tolist() if int(i) not in sampled],
+            dtype=int,
+        )
+        if missing_pose_frames.size == 0:
+            return frames_idx
+
+        needed = target_pose_count - sampled_pose_count
+        if self.set_type == "train":
+            replace_frames = np.random.choice(
+                missing_pose_frames,
+                size=min(needed, missing_pose_frames.size),
+                replace=False,
+            )
+        else:
+            center = float((frames_idx[0] + frames_idx[-1]) * 0.5)
+            order = np.argsort(np.abs(missing_pose_frames - center))
+            replace_frames = missing_pose_frames[order[:needed]]
+
+        used_slots = set()
+        for pose_frame in replace_frames:
+            slot_order = np.argsort(np.abs(frames_idx - int(pose_frame)))
+            slot = next(int(i) for i in slot_order if int(i) not in used_slots)
+            used_slots.add(slot)
+            frames_idx[slot] = int(pose_frame)
+        return np.sort(frames_idx)
+
     def _sample_pose_guided_start(self, start_min, start_max, pose_available):
         if pose_available is None or not pose_available.any():
             return None
@@ -590,9 +649,7 @@ class ToyotaSMDataset(Dataset):
         hits = np.zeros(starts.shape[0], dtype=int)
         for start_idx, start in enumerate(starts):
             end = min(start + 128, len(pose_available) - 1)
-            frame_idx = np.linspace(start, end, self.n_frames, dtype=int)
-            frame_idx = np.clip(frame_idx, 0, len(pose_available) - 1)
-            hits[start_idx] = int(pose_available[frame_idx].sum())
+            hits[start_idx] = int(pose_available[start : end + 1].sum())
 
         enough_pose = hits >= self.toyota_min_pose_frames
         if enough_pose.any():
@@ -696,7 +753,11 @@ class ToyotaSMDataset(Dataset):
                 end_frame = n_frames - 1
             # evenly sample n frames from a list of frames
 
-            frames_idx = np.linspace(start_frame, end_frame, self.n_frames, dtype=int)
+            frames_idx = self._sample_frame_indices(
+                start_frame,
+                end_frame,
+                pose_available=pose_available,
+            )
             if len(frames_idx) < self.n_frames:
                 frames_idx = np.pad(
                     frames_idx, (0, self.n_frames - len(frames_idx)), "edge"
