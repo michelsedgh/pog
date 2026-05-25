@@ -60,6 +60,7 @@ def parse_args():
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "cpu"])
+    parser.add_argument("--detector-device", type=str, default="cpu", choices=["cuda", "cpu"])
     parser.add_argument("--det-threshold", type=float, default=0.35)
     parser.add_argument("--person-class-id", type=int, default=None)
     parser.add_argument("--max-actors", type=int, default=8)
@@ -147,10 +148,10 @@ def load_actor_model(checkpoint_path, device):
     return model, hparams
 
 
-def load_rfdetr(person_class_id):
+def load_rfdetr(person_class_id, detector_device):
     from rfdetr import RFDETRNano
 
-    detector = RFDETRNano()
+    detector = RFDETRNano(device=detector_device)
     person_ids = []
     if person_class_id is not None:
         person_ids = [int(person_class_id)]
@@ -361,7 +362,10 @@ class LiveRunner:
             raise RuntimeError(
                 f"--max-actors must match checkpoint num_actor_tokens={checkpoint_tokens}"
             )
-        self.detector, self.person_ids = load_rfdetr(args.person_class_id)
+        self.detector, self.person_ids = load_rfdetr(
+            args.person_class_id,
+            args.detector_device,
+        )
         self.buffer = deque(maxlen=args.buffer_frames)
         self.frame_count = 0
         self.last_boxes_xyxy = np.zeros((0, 4), dtype=np.float32)

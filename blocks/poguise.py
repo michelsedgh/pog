@@ -540,20 +540,20 @@ class Block(nn.Module):
             )  # (B, N_keep, C_e)
 
             if self.keep_rate_merge < 1:
-                idx_nonselected = (
-                    torch.arange(N - num_s_tokens, device=x.device)
-                    .unsqueeze(0)
-                    .repeat(B, 1)
+                selected = torch.zeros(
+                    B,
+                    N - num_s_tokens,
+                    dtype=x.dtype,
+                    device=x.device,
                 )
-                # Get a boolean mask where True indicates the indices of non-selected tokens
-                idx_non_list = []
-                for i in range(B):
-                    mask = torch.isin(
-                        idx_nonselected[i], idx[i], invert=True, assume_unique=True
-                    )
-                    # Get the indices of the non-selected tokens
-                    idx_non_list.append(idx_nonselected[i][mask])
-                idx_nonselected = torch.stack(idx_non_list)
+                selected.scatter_(1, idx.long(), 1.0)
+                num_nonselected = (N - num_s_tokens) - idx.shape[1]
+                idx_nonselected = torch.topk(
+                    1.0 - selected,
+                    num_nonselected,
+                    dim=1,
+                ).indices
+                idx_nonselected = torch.sort(idx_nonselected, dim=1).values
                 x_nonselected = torch.gather(
                     x[:, num_s_tokens:],
                     dim=1,
