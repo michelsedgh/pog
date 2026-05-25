@@ -249,7 +249,7 @@ def build_parser():
     parser.add_argument(
         "--epoch_checkpoint_filename",
         type=str,
-        default="epoch={epoch:03d}",
+        default="{epoch:03d}",
     )
     parser.add_argument("--reload_dataloaders_every_n_epochs", type=int, default=0)
 
