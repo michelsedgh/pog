@@ -1,9 +1,11 @@
 import argparse
 import html
 import json
+import os
 import socket
 import threading
 import time
+import warnings
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -58,7 +60,10 @@ def parse_args():
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "cpu"])
-    parser.add_argument("--detector-device", type=str, default="cpu", choices=["cuda", "cpu"])
+    parser.add_argument("--detector-device", type=str, default="cuda", choices=["cuda", "cpu"])
+    parser.add_argument("--detector-optimize", type=int, default=1, choices=[0, 1])
+    parser.add_argument("--detector-compile", type=int, default=1, choices=[0, 1])
+    parser.add_argument("--detector-fp16", type=int, default=0, choices=[0, 1])
     parser.add_argument("--engine", type=str, default=None)
     parser.add_argument("--det-threshold", type=float, default=0.35)
     parser.add_argument("--person-class-id", type=int, default=None)
@@ -115,10 +120,46 @@ def local_ip_addresses():
     return addresses
 
 
-def load_rfdetr(person_class_id, detector_device):
+def load_rfdetr(person_class_id, detector_device, optimize=True, compile_model=True, fp16=False):
+    if detector_device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("--detector-device cuda was requested, but CUDA is not available.")
+    if fp16 and detector_device != "cuda":
+        raise RuntimeError("--detector-fp16 1 requires --detector-device cuda.")
+
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
     from rfdetr import RFDETRNano
 
+    print(
+        "Loading RF-DETR Nano:",
+        {
+            "device": detector_device,
+            "optimize": bool(optimize),
+            "compile": bool(compile_model),
+            "fp16": bool(fp16),
+        },
+        flush=True,
+    )
     detector = RFDETRNano(device=detector_device)
+    if optimize:
+        dtype = torch.float16 if fp16 else torch.float32
+        started = time.perf_counter()
+        with warnings.catch_warnings():
+            tracer_warning = getattr(torch.jit, "TracerWarning", Warning)
+            warnings.filterwarnings("ignore", category=tracer_warning)
+            detector.optimize_for_inference(
+                compile=bool(compile_model),
+                batch_size=1,
+                dtype=dtype,
+            )
+        print(
+            "RF-DETR optimized:",
+            {
+                "seconds": round(time.perf_counter() - started, 2),
+                "dtype": str(dtype).replace("torch.", ""),
+            },
+            flush=True,
+        )
+
     person_ids = []
     if person_class_id is not None:
         person_ids = [int(person_class_id)]
@@ -303,6 +344,12 @@ class DashboardState:
             "message": "initializing",
             "frame": 0,
             "actors": [],
+            "actor_backend": None,
+            "actor_device": None,
+            "detector_device": None,
+            "detector_optimized": None,
+            "last_detector_ms": None,
+            "last_actor_ms": None,
         }
 
     def update(self, jpeg=None, **status):
@@ -376,12 +423,23 @@ class LiveRunner:
         self.detector, self.person_ids = load_rfdetr(
             args.person_class_id,
             args.detector_device,
+            optimize=bool(args.detector_optimize),
+            compile_model=bool(args.detector_compile),
+            fp16=bool(args.detector_fp16),
+        )
+        self.state.update(
+            actor_backend=self.actor.backend_name,
+            actor_device=str(self.actor.device),
+            detector_device=args.detector_device,
+            detector_optimized=bool(args.detector_optimize),
         )
         self.buffer = deque(maxlen=args.buffer_frames)
         self.frame_count = 0
         self.last_boxes_xyxy = np.zeros((0, 4), dtype=np.float32)
         self.last_det_conf = np.zeros((0,), dtype=np.float32)
         self.last_actions = []
+        self.last_detector_ms = None
+        self.last_actor_ms = None
 
     def smoke(self):
         run_actor_smoke(self.args, self.actor)
@@ -405,6 +463,8 @@ class LiveRunner:
                 self.buffer.append(frame_rgb)
 
                 if self.frame_count % self.args.detect_every == 0:
+                    previous_actions = self.last_actions
+                    started = time.perf_counter()
                     self.last_boxes_xyxy, self.last_det_conf = detections_to_people(
                         self.detector,
                         self.person_ids,
@@ -412,6 +472,11 @@ class LiveRunner:
                         self.args.det_threshold,
                         self.args.max_actors,
                     )
+                    self.last_detector_ms = (time.perf_counter() - started) * 1000.0
+                    self.last_actions = [
+                        previous_actions[index] if index < len(previous_actions) else {}
+                        for index in range(len(self.last_boxes_xyxy))
+                    ]
 
                 message = f"buffer {len(self.buffer)}/{self.args.buffer_frames}"
                 actors = [
@@ -422,6 +487,8 @@ class LiveRunner:
                     }
                     for box, conf in zip(self.last_boxes_xyxy, self.last_det_conf)
                 ]
+                for actor, last_action in zip(actors, self.last_actions):
+                    actor.update(last_action)
 
                 should_run_action = (
                     len(self.buffer) >= self.args.clip_frames
@@ -448,23 +515,32 @@ class LiveRunner:
                         self.device,
                     )
                     if valid.any():
+                        started = time.perf_counter()
                         logits, presence_logits = self.actor(clip, boxes, valid)
+                        self.last_actor_ms = (time.perf_counter() - started) * 1000.0
                         action_probs = torch.softmax(logits[0], dim=-1).detach().cpu().numpy()
                         presence_probs = (
                             torch.sigmoid(presence_logits[0]).detach().cpu().numpy()
                         )
                         kept_actor_idx = np.flatnonzero(keep)[: self.args.max_actors]
+                        next_actions = [
+                            self.last_actions[index] if index < len(self.last_actions) else {}
+                            for index in range(len(actors))
+                        ]
                         for slot, actor_idx in enumerate(kept_actor_idx):
                             action_id = int(action_probs[slot].argmax())
-                            actors[int(actor_idx)].update(
-                                {
-                                    "label": ACTION_CLASSES[action_id],
-                                    "action_conf": float(action_probs[slot, action_id]),
-                                    "presence": float(presence_probs[slot]),
-                                }
-                            )
+                            action_payload = {
+                                "label": ACTION_CLASSES[action_id],
+                                "action_conf": float(action_probs[slot, action_id]),
+                                "presence": float(presence_probs[slot]),
+                            }
+                            actors[int(actor_idx)].update(action_payload)
+                            next_actions[int(actor_idx)] = action_payload
+                        self.last_actions = next_actions
                         message = (
                             f"{self.actor.backend_name} actors={int(valid.sum().item())} "
+                            f"det={self.last_detector_ms:.0f}ms "
+                            f"actor={self.last_actor_ms:.0f}ms "
                             f"frame={self.frame_count}"
                         )
                     else:
@@ -485,6 +561,8 @@ class LiveRunner:
                         message=message,
                         frame=self.frame_count,
                         actors=actors,
+                        last_detector_ms=self.last_detector_ms,
+                        last_actor_ms=self.last_actor_ms,
                     )
         finally:
             cap.release()
