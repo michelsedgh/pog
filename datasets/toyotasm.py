@@ -1165,7 +1165,9 @@ class ToyotaSMDataset(Dataset):
 
     def _compose_synthetic_object_target(self, targets, slots, bounds, canvas_width):
         object_boxes = torch.zeros((self.num_object_tokens, 4), dtype=torch.float32)
-        object_cls = torch.zeros(self.num_object_tokens, dtype=torch.long)
+        object_cls = torch.full(
+            (self.num_object_tokens,), NONE_OBJECT_ID, dtype=torch.long
+        )
         object_conf = torch.zeros(self.num_object_tokens, dtype=torch.float32)
         object_valid = torch.zeros(self.num_object_tokens, dtype=torch.bool)
 
@@ -1338,7 +1340,9 @@ class ToyotaSMDataset(Dataset):
 
     def _pack_object_tokens(self, object_entries, label, height, width):
         object_boxes = torch.zeros((self.num_object_tokens, 4), dtype=torch.float32)
-        object_cls = torch.zeros(self.num_object_tokens, dtype=torch.long)
+        object_cls = torch.full(
+            (self.num_object_tokens,), NONE_OBJECT_ID, dtype=torch.long
+        )
         object_conf = torch.zeros(self.num_object_tokens, dtype=torch.float32)
         object_valid = torch.zeros(self.num_object_tokens, dtype=torch.bool)
         if not object_entries:

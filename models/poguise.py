@@ -355,7 +355,7 @@ class POGUISE(pl.LightningModule):
         self.actor_object_gate_logit = nn.Parameter(torch.tensor(-4.0))
         self.interaction_head = nn.Linear(dim, num_object_classes + 1)
 
-        nn.init.zeros_(self.object_cls_embed.weight)
+        nn.init.normal_(self.object_cls_embed.weight, std=0.02)
         nn.init.zeros_(self.object_valid_embed.weight)
         nn.init.zeros_(self.object_bbox_mlp[-1].weight)
         nn.init.zeros_(self.object_bbox_mlp[-1].bias)
