@@ -58,7 +58,11 @@ class TensorRTActorEngine:
             else:
                 raise RuntimeError(f"Unknown TensorRT tensor mode for {name}: {mode}")
 
-        expected_inputs = {"video", "boxes", "valid"}
+        base_inputs = {"video", "boxes", "valid"}
+        object_inputs = {"object_boxes", "object_cls", "object_conf", "object_valid"}
+        expected_inputs = base_inputs
+        if object_inputs.issubset(set(self.input_names)):
+            expected_inputs = base_inputs | object_inputs
         expected_outputs = {"logits", "presence"}
         if set(self.input_names) != expected_inputs:
             raise RuntimeError(
@@ -91,6 +95,26 @@ class TensorRTActorEngine:
         self.input_size = video_shape[3]
         self.num_actor_tokens = boxes_shape[1]
         self.num_classes = logits_shape[2]
+        self.object_prompt = object_inputs.issubset(set(self.input_names))
+        self.num_object_tokens = (
+            self.shapes["object_boxes"][1] if self.object_prompt else 0
+        )
+        if self.object_prompt:
+            object_boxes_shape = self.shapes["object_boxes"]
+            object_cls_shape = self.shapes["object_cls"]
+            object_conf_shape = self.shapes["object_conf"]
+            object_valid_shape = self.shapes["object_valid"]
+            if object_boxes_shape[:2] != object_cls_shape or object_boxes_shape[-1] != 4:
+                raise RuntimeError(
+                    "Inconsistent object input shapes: "
+                    f"object_boxes={object_boxes_shape}, object_cls={object_cls_shape}"
+                )
+            if object_conf_shape != object_cls_shape or object_valid_shape != object_cls_shape:
+                raise RuntimeError(
+                    "Inconsistent object input shapes: "
+                    f"object_conf={object_conf_shape}, object_valid={object_valid_shape}, "
+                    f"object_cls={object_cls_shape}"
+                )
         self.stream = torch.cuda.Stream()
 
     def _prepare_input(self, tensor, name):
@@ -104,10 +128,51 @@ class TensorRTActorEngine:
             tensor = tensor.to(device=self.device)
         return tensor.contiguous()
 
-    def __call__(self, video, boxes, valid):
+    def _empty_object_inputs(self):
+        object_boxes = torch.zeros(
+            self.shapes["object_boxes"],
+            dtype=self.dtypes["object_boxes"],
+            device=self.device,
+        )
+        object_cls = torch.zeros(
+            self.shapes["object_cls"],
+            dtype=self.dtypes["object_cls"],
+            device=self.device,
+        )
+        object_conf = torch.zeros(
+            self.shapes["object_conf"],
+            dtype=self.dtypes["object_conf"],
+            device=self.device,
+        )
+        object_valid = torch.zeros(
+            self.shapes["object_valid"],
+            dtype=self.dtypes["object_valid"],
+            device=self.device,
+        )
+        return object_boxes, object_cls, object_conf, object_valid
+
+    def __call__(
+        self,
+        video,
+        boxes,
+        valid,
+        object_boxes=None,
+        object_cls=None,
+        object_conf=None,
+        object_valid=None,
+    ):
         video = self._prepare_input(video, "video")
         boxes = self._prepare_input(boxes, "boxes")
         valid = self._prepare_input(valid, "valid")
+        if self.object_prompt:
+            if object_boxes is None:
+                object_boxes, object_cls, object_conf, object_valid = (
+                    self._empty_object_inputs()
+                )
+            object_boxes = self._prepare_input(object_boxes, "object_boxes")
+            object_cls = self._prepare_input(object_cls, "object_cls")
+            object_conf = self._prepare_input(object_conf, "object_conf")
+            object_valid = self._prepare_input(object_valid, "object_valid")
 
         logits = torch.empty(
             self.shapes["logits"],
@@ -127,6 +192,15 @@ class TensorRTActorEngine:
             "logits": logits,
             "presence": presence,
         }
+        if self.object_prompt:
+            tensors.update(
+                {
+                    "object_boxes": object_boxes,
+                    "object_cls": object_cls,
+                    "object_conf": object_conf,
+                    "object_valid": object_valid,
+                }
+            )
         current_stream = torch.cuda.current_stream()
         self.stream.wait_stream(current_stream)
         with torch.cuda.stream(self.stream):

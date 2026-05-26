@@ -143,6 +143,13 @@ class POGUISE(pl.LightningModule):
         self.save_hyperparameters()
         self.mode = self.hparams.get("mode", "train")
         self.actor_prompt = bool(self.hparams.get("actor_prompt", 0))
+        self.object_prompt = bool(self.hparams.get("object_prompt", 0))
+        if self.object_prompt and not self.actor_prompt:
+            raise ValueError("object_prompt requires actor_prompt")
+        for prob_name in ("object_dropout_prob", "object_token_dropout_prob"):
+            prob_value = float(self.hparams.get(prob_name, 0.0))
+            if not 0 <= prob_value <= 1:
+                raise ValueError(f"{prob_name} must be in [0, 1]")
         self.use_register_tokens = bool(self.hparams.get("use_register_tokens", 0))
         self._create_network()
         # freeze backbone if specified
@@ -181,6 +188,15 @@ class POGUISE(pl.LightningModule):
                 actor_bbox_prior_expand=self.hparams.get(
                     "actor_bbox_prior_expand", 1.75
                 ),
+                object_prompt=self.object_prompt,
+                num_object_tokens=self.hparams.get("num_object_tokens", 16),
+                num_object_classes=self.hparams.get("num_object_classes", 0),
+                object_bbox_prior_weight=self.hparams.get(
+                    "object_bbox_prior_weight", 0.0
+                ),
+                object_bbox_prior_expand=self.hparams.get(
+                    "object_bbox_prior_expand", 1.25
+                ),
             )
         else:
             self.net = vit_base_patch16_224(
@@ -207,6 +223,15 @@ class POGUISE(pl.LightningModule):
                 ),
                 actor_bbox_prior_expand=self.hparams.get(
                     "actor_bbox_prior_expand", 1.75
+                ),
+                object_prompt=self.object_prompt,
+                num_object_tokens=self.hparams.get("num_object_tokens", 16),
+                num_object_classes=self.hparams.get("num_object_classes", 0),
+                object_bbox_prior_weight=self.hparams.get(
+                    "object_bbox_prior_weight", 0.0
+                ),
+                object_bbox_prior_expand=self.hparams.get(
+                    "object_bbox_prior_expand", 1.25
                 ),
             )
         if self.hparams.pretrained == "DEFAULT":
@@ -238,6 +263,8 @@ class POGUISE(pl.LightningModule):
                 if self.hparams.get("actor_presence_head", 0)
                 else None
             )
+            if self.object_prompt:
+                self._create_object_prompt_modules()
         if self.hparams.get("linear_probe", 0):
             self._freeze_backbone()
             self.head = Classifier(
@@ -273,6 +300,19 @@ class POGUISE(pl.LightningModule):
             if self.presence_head is not None:
                 for param in self.presence_head.parameters():
                     param.requires_grad = True
+            if self.object_prompt:
+                for module in (
+                    self.object_cls_embed,
+                    self.object_bbox_mlp,
+                    self.object_conf_mlp,
+                    self.object_valid_embed,
+                    self.actor_object_attn,
+                    self.actor_object_norm,
+                    self.interaction_head,
+                ):
+                    for param in module.parameters():
+                        param.requires_grad = True
+                self.actor_object_gate_logit.requires_grad = True
 
     def _freeze_stages(self):
         if self.frozen_stages >= 0:
@@ -288,21 +328,170 @@ class POGUISE(pl.LightningModule):
                 for param in m.parameters():
                     param.requires_grad = False
 
-    def forward(self, x, boxes=None, valid=None):
+    def _create_object_prompt_modules(self):
+        num_object_classes = int(self.hparams.get("num_object_classes", 0))
+        if num_object_classes <= 0:
+            raise ValueError("object_prompt requires num_object_classes > 0")
+        dim = self.net.num_features
+        self.num_object_classes = num_object_classes
+        self.object_cls_embed = nn.Embedding(num_object_classes + 1, dim)
+        self.object_bbox_mlp = nn.Sequential(
+            nn.Linear(4, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim),
+        )
+        self.object_conf_mlp = nn.Sequential(
+            nn.Linear(1, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim),
+        )
+        self.object_valid_embed = nn.Embedding(2, dim)
+        self.actor_object_attn = nn.MultiheadAttention(
+            embed_dim=dim,
+            num_heads=8,
+            batch_first=True,
+        )
+        self.actor_object_norm = nn.LayerNorm(dim)
+        self.actor_object_gate_logit = nn.Parameter(torch.tensor(-4.0))
+        self.interaction_head = nn.Linear(dim, num_object_classes + 1)
+
+        nn.init.zeros_(self.object_cls_embed.weight)
+        nn.init.zeros_(self.object_valid_embed.weight)
+        nn.init.zeros_(self.object_bbox_mlp[-1].weight)
+        nn.init.zeros_(self.object_bbox_mlp[-1].bias)
+        nn.init.zeros_(self.object_conf_mlp[-1].weight)
+        nn.init.zeros_(self.object_conf_mlp[-1].bias)
+        nn.init.zeros_(self.interaction_head.weight)
+        nn.init.zeros_(self.interaction_head.bias)
+
+    def _apply_object_dropout(self, object_valid):
+        if object_valid is None or not self.training:
+            return object_valid
+        object_valid = object_valid.clone()
+        object_dropout_prob = float(self.hparams.get("object_dropout_prob", 0.0))
+        object_token_dropout_prob = float(
+            self.hparams.get("object_token_dropout_prob", 0.0)
+        )
+        if object_dropout_prob > 0:
+            if torch.rand((), device=object_valid.device) < object_dropout_prob:
+                object_valid.fill_(False)
+        if object_token_dropout_prob > 0:
+            drop_each = (
+                torch.rand(object_valid.shape, device=object_valid.device)
+                < object_token_dropout_prob
+            )
+            object_valid = object_valid & ~drop_each
+        return object_valid
+
+    def _object_context(
+        self,
+        actor_feat,
+        object_boxes=None,
+        object_cls=None,
+        object_conf=None,
+        object_valid=None,
+    ):
+        if object_boxes is None:
+            return actor_feat
+        if object_cls is None or object_conf is None or object_valid is None:
+            raise ValueError(
+                "object_boxes, object_cls, object_conf, and object_valid must be passed together"
+            )
+
+        object_valid = object_valid.bool()
+        has_objects = object_valid.any(dim=1)
+        if not has_objects.any():
+            return actor_feat
+
+        context = torch.zeros_like(actor_feat)
+        actor_subset = actor_feat[has_objects]
+        boxes_subset = object_boxes[has_objects].to(
+            device=actor_feat.device,
+            dtype=actor_feat.dtype,
+        )
+        cls_subset = object_cls[has_objects].to(device=actor_feat.device).long()
+        conf_subset = object_conf[has_objects].to(
+            device=actor_feat.device,
+            dtype=actor_feat.dtype,
+        )
+        valid_subset = object_valid[has_objects].to(device=actor_feat.device)
+
+        cls_subset = cls_subset.clamp(0, self.num_object_classes)
+        cls_subset = cls_subset.masked_fill(~valid_subset, self.num_object_classes)
+        obj_feat = (
+            self.object_cls_embed(cls_subset).to(dtype=actor_feat.dtype)
+            + self.object_bbox_mlp(boxes_subset)
+            + self.object_conf_mlp(conf_subset.unsqueeze(-1))
+            + self.object_valid_embed(valid_subset.long()).to(dtype=actor_feat.dtype)
+        )
+
+        attended, _ = self.actor_object_attn(
+            query=self.actor_object_norm(actor_subset),
+            key=obj_feat,
+            value=obj_feat,
+            key_padding_mask=~valid_subset,
+            need_weights=False,
+        )
+        context[has_objects] = attended
+        gate = torch.sigmoid(self.actor_object_gate_logit).to(dtype=actor_feat.dtype)
+        return actor_feat + gate * context
+
+    def forward(
+        self,
+        x,
+        boxes=None,
+        valid=None,
+        object_boxes=None,
+        object_cls=None,
+        object_conf=None,
+        object_valid=None,
+    ):
         # convert to b c t h w
         x = x.permute(0, 2, 1, 3, 4)
+        if self.object_prompt:
+            object_valid = self._apply_object_dropout(object_valid)
         if self.actor_prompt:
-            if self.hparams.n_landmarks > 0:
-                _, x_actor, x_heatmap = self.net(x, boxes=boxes, valid=valid)
+            if self.hparams.n_landmarks > 0 or self.object_prompt:
+                _, x_actor, x_heatmap = self.net(
+                    x,
+                    boxes=boxes,
+                    valid=valid,
+                    object_boxes=object_boxes,
+                    object_valid=object_valid,
+                    object_conf=object_conf,
+                )
             else:
-                _, x_actor = self.net(x, boxes=boxes, valid=valid)
+                data = self.net(
+                    x,
+                    boxes=boxes,
+                    valid=valid,
+                    object_boxes=object_boxes,
+                    object_valid=object_valid,
+                    object_conf=object_conf,
+                )
+                _, x_actor = data
                 x_heatmap = 0
             if self.hparams.ret_feat:
                 return x_actor
+            if self.object_prompt:
+                x_actor = self._object_context(
+                    x_actor,
+                    object_boxes=object_boxes,
+                    object_cls=object_cls,
+                    object_conf=object_conf,
+                    object_valid=object_valid,
+                )
             action_logits = self.actor_head(x_actor)
+            interaction_logits = (
+                self.interaction_head(x_actor) if self.object_prompt else None
+            )
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
+                if self.object_prompt:
+                    return action_logits, x_heatmap, presence_logits, interaction_logits
                 return action_logits, x_heatmap, presence_logits
+            if self.object_prompt:
+                return action_logits, x_heatmap, None, interaction_logits
             return action_logits, x_heatmap
         if self.hparams.n_landmarks > 0:
             x_class, x_heatmap = self.net(x)
@@ -362,6 +551,10 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--presence_loss_weight", type=float, default=0.05)
         parser.add_argument("--actor_val_diagnostics", type=int, default=1)
         parser.add_argument("--actor_val_diagnostic_max_pairs", type=int, default=8)
+        parser.add_argument("--object_bbox_prior_weight", type=float, default=0.0)
+        parser.add_argument("--object_bbox_prior_expand", type=float, default=1.25)
+        parser.add_argument("--object_dropout_prob", type=float, default=0.0)
+        parser.add_argument("--object_token_dropout_prob", type=float, default=0.0)
         parser.add_argument("--ret_feat", type=int, default=0)
         parser.add_argument("--linear_probe", type=int, default=0)
 
