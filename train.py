@@ -118,6 +118,11 @@ def _merged_hparams(args, cli_overrides, checkpoint):
         merged.update(checkpoint.get("datamodule_hyper_parameters", {}))
     merged.update(cli_overrides)
 
+    if "resume_from_checkpoint" not in cli_overrides:
+        merged["resume_from_checkpoint"] = None
+    elif not merged.get("resume_from_checkpoint"):
+        merged["resume_from_checkpoint"] = None
+
     if merged.get("max_epochs") is not None:
         merged["max_nb_epochs"] = merged["max_epochs"]
     if merged.get("reload_dataloaders_every_n_epochs") is None:
