@@ -84,6 +84,13 @@ def _metric_value(value):
     return str(value)
 
 
+def _write_results(path, dataframe):
+    if "epoch" in dataframe.columns:
+        dataframe = dataframe.sort_values(["epoch", "checkpoint"]).reset_index(drop=True)
+    dataframe.to_csv(path, index=False)
+    return dataframe
+
+
 def _load_module_checkpoint(module, ckpt_path):
     checkpoint = _load_checkpoint(ckpt_path)
     state_dict = checkpoint.get("state_dict")
@@ -146,7 +153,8 @@ def main():
         else set()
     )
 
-    rows = []
+    output = existing.copy()
+    wrote_count = 0
     for epoch, ckpt_path in _checkpoint_paths(hparams):
         if str(ckpt_path) in existing_checkpoints:
             print(f"Skipping already evaluated checkpoint: {ckpt_path}", flush=True)
@@ -166,7 +174,10 @@ def main():
             "checkpoint": str(ckpt_path),
         }
         row.update({key: _metric_value(value) for key, value in metrics.items()})
-        rows.append(row)
+        output = pd.concat([output, pd.DataFrame([row])], ignore_index=True)
+        output = _write_results(results_path, output)
+        existing_checkpoints.add(str(ckpt_path))
+        wrote_count += 1
 
         summary_keys = [
             "val_acc_macro",
@@ -181,19 +192,16 @@ def main():
             if isinstance(row.get(key), (int, float))
         )
         print(f"epoch {epoch}: {summary}", flush=True)
+        print(f"Updated checkpoint eval results: {results_path}", flush=True)
 
-    if not rows:
+    if not wrote_count:
         print(
             f"No new checkpoints to evaluate. Results file unchanged: {results_path}",
             flush=True,
         )
         return
 
-    output = pd.concat([existing, pd.DataFrame(rows)], ignore_index=True)
-    if "epoch" in output.columns:
-        output = output.sort_values(["epoch", "checkpoint"]).reset_index(drop=True)
-    output.to_csv(results_path, index=False)
-    print(f"Wrote checkpoint eval results: {results_path}", flush=True)
+    print(f"Wrote {wrote_count} checkpoint eval rows: {results_path}", flush=True)
 
 
 if __name__ == "__main__":
