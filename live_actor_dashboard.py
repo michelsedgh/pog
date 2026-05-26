@@ -74,9 +74,23 @@ def parse_args():
     parser.add_argument("--short-side", type=int, default=256)
     parser.add_argument("--detect-every", type=int, default=5)
     parser.add_argument("--action-every", type=int, default=10)
+    parser.add_argument("--action-smoothing-window", type=int, default=8)
+    parser.add_argument("--track-iou-threshold", type=float, default=0.30)
+    parser.add_argument("--track-hold-frames", type=int, default=30)
     parser.add_argument("--jpeg-quality", type=int, default=80)
     parser.add_argument("--smoke", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.detect_every < 1:
+        raise ValueError("--detect-every must be >= 1")
+    if args.action_every < 1:
+        raise ValueError("--action-every must be >= 1")
+    if args.action_smoothing_window < 1:
+        raise ValueError("--action-smoothing-window must be >= 1")
+    if args.track_hold_frames < 0:
+        raise ValueError("--track-hold-frames must be >= 0")
+    if not 0.0 <= args.track_iou_threshold <= 1.0:
+        raise ValueError("--track-iou-threshold must be in [0, 1]")
+    return args
 
 
 def camera_source(value):
@@ -270,6 +284,56 @@ def pack_actor_boxes(boxes_norm, valid_box_mask, max_actors, device):
     return boxes, valid
 
 
+def bbox_iou_xyxy(box_a, box_b):
+    ax1, ay1, ax2, ay2 = [float(value) for value in box_a]
+    bx1, by1, bx2, by2 = [float(value) for value in box_b]
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    inter_area = inter_w * inter_h
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    denom = area_a + area_b - inter_area
+    if denom <= 0.0:
+        return 0.0
+    return inter_area / denom
+
+
+class ActionTrack:
+    def __init__(self, track_id, bbox_xyxy, frame_index, smoothing_window):
+        self.track_id = int(track_id)
+        self.bbox_xyxy = np.asarray(bbox_xyxy, dtype=np.float32)
+        self.last_seen = int(frame_index)
+        self.action_probs = deque(maxlen=int(smoothing_window))
+        self.presence_probs = deque(maxlen=int(smoothing_window))
+
+    def update_detection(self, bbox_xyxy, frame_index):
+        self.bbox_xyxy = np.asarray(bbox_xyxy, dtype=np.float32)
+        self.last_seen = int(frame_index)
+
+    def update_action(self, probs, presence):
+        self.action_probs.append(np.asarray(probs, dtype=np.float32).copy())
+        self.presence_probs.append(float(presence))
+
+    def action_payload(self):
+        if not self.action_probs:
+            return {}
+        probs = np.mean(np.stack(tuple(self.action_probs), axis=0), axis=0)
+        action_id = int(probs.argmax())
+        payload = {
+            "track_id": self.track_id,
+            "label": ACTION_CLASSES[action_id],
+            "action_conf": float(probs[action_id]),
+            "smooth_count": len(self.action_probs),
+        }
+        if self.presence_probs:
+            payload["presence"] = float(np.mean(self.presence_probs))
+        return payload
+
+
 class TorchActorBackend:
     def __init__(self, checkpoint_path, device):
         from utils.actor_model import load_actor_model
@@ -350,6 +414,7 @@ class DashboardState:
             "detector_optimized": None,
             "last_detector_ms": None,
             "last_actor_ms": None,
+            "action_smoothing_window": None,
         }
 
     def update(self, jpeg=None, **status):
@@ -437,12 +502,65 @@ class LiveRunner:
         self.frame_count = 0
         self.last_boxes_xyxy = np.zeros((0, 4), dtype=np.float32)
         self.last_det_conf = np.zeros((0,), dtype=np.float32)
-        self.last_actions = []
         self.last_detector_ms = None
         self.last_actor_ms = None
+        self.next_track_id = 1
+        self.tracks = {}
+        self.current_track_ids = []
+        self.state.update(action_smoothing_window=args.action_smoothing_window)
 
     def smoke(self):
         run_actor_smoke(self.args, self.actor)
+
+    def _update_tracks(self, boxes_xyxy):
+        boxes = np.asarray(boxes_xyxy, dtype=np.float32)
+        if len(boxes) == 0:
+            self.current_track_ids = []
+            self._drop_stale_tracks()
+            return
+
+        candidates = []
+        for det_index, box in enumerate(boxes):
+            for track_id, track in self.tracks.items():
+                iou = bbox_iou_xyxy(box, track.bbox_xyxy)
+                if iou >= self.args.track_iou_threshold:
+                    candidates.append((iou, det_index, track_id))
+
+        matches = {}
+        used_tracks = set()
+        for _iou, det_index, track_id in sorted(candidates, reverse=True):
+            if det_index in matches or track_id in used_tracks:
+                continue
+            matches[det_index] = track_id
+            used_tracks.add(track_id)
+
+        track_ids = []
+        for det_index, box in enumerate(boxes):
+            track_id = matches.get(det_index)
+            if track_id is None:
+                track_id = self.next_track_id
+                self.next_track_id += 1
+                self.tracks[track_id] = ActionTrack(
+                    track_id,
+                    box,
+                    self.frame_count,
+                    self.args.action_smoothing_window,
+                )
+            else:
+                self.tracks[track_id].update_detection(box, self.frame_count)
+            track_ids.append(track_id)
+
+        self.current_track_ids = track_ids
+        self._drop_stale_tracks()
+
+    def _drop_stale_tracks(self):
+        stale = [
+            track_id
+            for track_id, track in self.tracks.items()
+            if self.frame_count - track.last_seen > self.args.track_hold_frames
+        ]
+        for track_id in stale:
+            del self.tracks[track_id]
 
     def run(self):
         cap = cv2.VideoCapture(camera_source(self.args.camera))
@@ -463,7 +581,6 @@ class LiveRunner:
                 self.buffer.append(frame_rgb)
 
                 if self.frame_count % self.args.detect_every == 0:
-                    previous_actions = self.last_actions
                     started = time.perf_counter()
                     self.last_boxes_xyxy, self.last_det_conf = detections_to_people(
                         self.detector,
@@ -473,10 +590,7 @@ class LiveRunner:
                         self.args.max_actors,
                     )
                     self.last_detector_ms = (time.perf_counter() - started) * 1000.0
-                    self.last_actions = [
-                        previous_actions[index] if index < len(previous_actions) else {}
-                        for index in range(len(self.last_boxes_xyxy))
-                    ]
+                    self._update_tracks(self.last_boxes_xyxy)
 
                 message = f"buffer {len(self.buffer)}/{self.args.buffer_frames}"
                 actors = [
@@ -484,11 +598,18 @@ class LiveRunner:
                         "xyxy": box.tolist(),
                         "det_conf": float(conf),
                         "label": "person",
+                        "track_id": int(track_id),
                     }
-                    for box, conf in zip(self.last_boxes_xyxy, self.last_det_conf)
+                    for box, conf, track_id in zip(
+                        self.last_boxes_xyxy,
+                        self.last_det_conf,
+                        self.current_track_ids,
+                    )
                 ]
-                for actor, last_action in zip(actors, self.last_actions):
-                    actor.update(last_action)
+                for actor in actors:
+                    track = self.tracks.get(actor["track_id"])
+                    if track is not None:
+                        actor.update(track.action_payload())
 
                 should_run_action = (
                     len(self.buffer) >= self.args.clip_frames
@@ -523,24 +644,35 @@ class LiveRunner:
                             torch.sigmoid(presence_logits[0]).detach().cpu().numpy()
                         )
                         kept_actor_idx = np.flatnonzero(keep)[: self.args.max_actors]
-                        next_actions = [
-                            self.last_actions[index] if index < len(self.last_actions) else {}
-                            for index in range(len(actors))
-                        ]
                         for slot, actor_idx in enumerate(kept_actor_idx):
+                            if actor_idx >= len(self.current_track_ids):
+                                continue
+                            track_id = self.current_track_ids[int(actor_idx)]
+                            track = self.tracks.get(track_id)
+                            if track is None:
+                                continue
+                            track.update_action(action_probs[slot], presence_probs[slot])
                             action_id = int(action_probs[slot].argmax())
-                            action_payload = {
-                                "label": ACTION_CLASSES[action_id],
-                                "action_conf": float(action_probs[slot, action_id]),
-                                "presence": float(presence_probs[slot]),
+                            raw_payload = {
+                                "raw_label": ACTION_CLASSES[action_id],
+                                "raw_action_conf": float(action_probs[slot, action_id]),
                             }
-                            actors[int(actor_idx)].update(action_payload)
-                            next_actions[int(actor_idx)] = action_payload
-                        self.last_actions = next_actions
+                            actors[int(actor_idx)].update(
+                                track.action_payload()
+                            )
+                            actors[int(actor_idx)].update(raw_payload)
+                        for actor in actors:
+                            track = self.tracks.get(actor["track_id"])
+                            if track is None:
+                                continue
+                            payload = track.action_payload()
+                            if payload:
+                                actor.update(payload)
                         message = (
                             f"{self.actor.backend_name} actors={int(valid.sum().item())} "
                             f"det={self.last_detector_ms:.0f}ms "
                             f"actor={self.last_actor_ms:.0f}ms "
+                            f"smooth={self.args.action_smoothing_window} "
                             f"frame={self.frame_count}"
                         )
                     else:
