@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.jpeg
 *.mp4
 # C extensions
 *.so
@@ -169,3 +170,28 @@ wandb/
 *.ckpt
 .vscode
 toyota_smarthome_skeleton_v1.2.zip
+
+# Local Toyota data and generated frame archives.
+.toyota_frame_extract_manifest/
+frames/
+mp4/
+toyota_smarthome_*.tar
+toyota_smarthome_*.tar.index.sqlite
+toyota_smarthome_*.manifest.txt
+toyota_smarthome_*.files.txt
+toyota_smarthome_*.zip
+toyota_frame_counts.json
+
+# Local model/export outputs.
+checkpoints_smoke/
+exports/
+toyota_actor_visualizations/
+rf-detr-*.pth
+*.engine
+*.onnx
+
+# One-off local frame packaging helpers.
+utils/build_toyota_frames_tar.sh
+utils/extract_toyota_frames_ffmpeg.py
+utils/make_toyota_frame_tar_part.py
+utils/rolling_tar_frames.py
