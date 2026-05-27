@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.jpg
 *.jpeg
 *.mp4
 # C extensions
@@ -195,3 +196,9 @@ utils/build_toyota_frames_tar.sh
 utils/extract_toyota_frames_ffmpeg.py
 utils/make_toyota_frame_tar_part.py
 utils/rolling_tar_frames.py
+object_cache_rfdetr_large_coco19_visual100_viewfiltered.jsonl
+object_cache_rfdetr_large_coco19_visual100.jsonl
+object_cache_rfdetr_large_smoke.jsonl
+object_cache_rfdetr_large_visual100_strict.jsonl
+object_cache_rfdetr_large_visual100.jsonl
+object_cache_rfdetr_large_coco19_visual100_viewfiltered_staticmasked.jsonl

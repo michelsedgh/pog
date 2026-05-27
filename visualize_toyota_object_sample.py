@@ -41,11 +41,13 @@ def build_parser():
     parser.add_argument("--n_frames", type=int, default=16)
     parser.add_argument("--n_landmarks", type=int, default=13)
     parser.add_argument("--num_actor_tokens", type=int, default=8)
-    parser.add_argument("--num_object_tokens", type=int, default=16)
+    parser.add_argument("--num_object_tokens", type=int, default=24)
     parser.add_argument("--num_object_classes", type=int, default=NUM_OBJECT_CLASSES)
     parser.add_argument("--object_conf_threshold", type=float, default=0.25)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--synthetic_two_actor", action="store_true")
+    parser.add_argument("--contact_sheet", type=int, default=1)
+    parser.add_argument("--contact_cols", type=int, default=4)
     parser.add_argument(
         "--only_with_objects",
         action="store_true",
@@ -106,7 +108,9 @@ def draw_normalized_box(draw, box, color, width=3):
     draw.rectangle((x1 * 224, y1 * 224, x2 * 224, y2 * 224), outline=color, width=width)
 
 
-def heatmap_overlay(image, object_heatmap, object_heatmap_valid):
+def heatmap_overlay(image, object_heatmap, object_heatmap_valid=None):
+    if object_heatmap_valid is None:
+        object_heatmap_valid = object_heatmap.flatten(1).amax(dim=1) > 0
     if not object_heatmap_valid.any():
         return image
     hm = object_heatmap[object_heatmap_valid].max(dim=0).values
@@ -126,7 +130,9 @@ def draw_overlay(frames, target, output_path, sample_idx):
     image = heatmap_overlay(
         image,
         target["object_heatmap"],
-        target["object_heatmap_valid"].bool(),
+        target.get("object_heatmap_valid", None).bool()
+        if "object_heatmap_valid" in target
+        else None,
     )
     draw = ImageDraw.Draw(image)
 
@@ -170,6 +176,28 @@ def draw_overlay(frames, target, output_path, sample_idx):
     image.save(output_path)
 
 
+def build_contact_sheet(paths, output_path, cols):
+    if not paths:
+        return
+    thumb_w, thumb_h = 224, 224
+    label_h = 18
+    rows = (len(paths) + cols - 1) // cols
+    sheet = Image.new(
+        "RGB",
+        (cols * thumb_w, rows * (thumb_h + label_h)),
+        (20, 20, 20),
+    )
+    draw = ImageDraw.Draw(sheet)
+    for idx, path in enumerate(paths):
+        image = Image.open(path).convert("RGB")
+        image.thumbnail((thumb_w, thumb_h))
+        x = (idx % cols) * thumb_w
+        y = (idx // cols) * (thumb_h + label_h)
+        sheet.paste(image, (x, y + label_h))
+        draw.text((x + 4, y + 3), os.path.basename(path), fill=(255, 255, 0))
+    sheet.save(output_path, quality=95)
+
+
 def main():
     args = build_parser().parse_args()
     try:
@@ -179,6 +207,7 @@ def main():
         ds.setup()
 
         written = 0
+        output_paths = []
         idx = int(args.start_index)
         while idx < len(ds) and written < args.count:
             frames, target = ds[idx]
@@ -187,11 +216,16 @@ def main():
                 continue
             output_path = os.path.join(args.output_dir, f"sample_{idx:05d}.jpg")
             draw_overlay(frames, target, output_path, idx)
+            output_paths.append(output_path)
             print(output_path)
             written += 1
             idx += 1
         if written == 0:
             raise RuntimeError("No overlays were written.")
+        if args.contact_sheet:
+            sheet_path = os.path.join(args.output_dir, "contact_sheet.jpg")
+            build_contact_sheet(output_paths, sheet_path, max(1, int(args.contact_cols)))
+            print(sheet_path)
         return 0
     except Exception:
         traceback.print_exc()

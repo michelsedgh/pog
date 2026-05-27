@@ -799,7 +799,7 @@ class VisionTransformer(nn.Module):
         actor_bbox_prior_weight=0.1,
         actor_bbox_prior_expand=1.75,
         object_prompt=0,
-        num_object_tokens=16,
+        num_object_tokens=24,
         num_object_classes=0,
         object_bbox_prior_weight=0.0,
         object_bbox_prior_expand=1.25,
@@ -1004,7 +1004,7 @@ class VisionTransformer(nn.Module):
         valid = valid.bool()
         center = (boxes[..., :2] + boxes[..., 2:]) * 0.5
         size = (boxes[..., 2:] - boxes[..., :2]).clamp_min(1e-4)
-        expanded = size * self.actor_bbox_prior_expand
+        expanded = size * float(expand)
         mins = (center - expanded * 0.5).clamp(0.0, 1.0)
         maxs = (center + expanded * 0.5).clamp(0.0, 1.0)
 

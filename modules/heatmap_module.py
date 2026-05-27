@@ -295,23 +295,27 @@ class HeatmapModule(pl.LightningModule):
         n_pose = int(self.model.hparams.n_landmarks)
         return hm_preds[:, n_pose : n_pose + self.num_object_classes]
 
-    def _object_heatmap_loss(self, pred_obj, target_obj, object_valid):
+    def _object_heatmap_loss(self, pred_obj, target_obj, object_weight):
         if pred_obj is None:
             return None
-        mask = object_valid[:, :, None, None].to(dtype=pred_obj.dtype)
-        if mask.sum() <= 0:
+        weight = object_weight.to(device=pred_obj.device, dtype=pred_obj.dtype)
+        if weight.ndim == 2:
+            weight = weight[:, :, None, None]
+        if weight.sum() <= 0:
             return pred_obj.sum() * 0.0
         loss = (pred_obj - target_obj.to(dtype=pred_obj.dtype)) ** 2
-        denom = (mask.sum() * pred_obj.shape[-1] * pred_obj.shape[-2]).clamp_min(1.0)
-        return (loss * mask).sum() / denom
+        return (loss * weight).sum() / weight.sum().clamp_min(1.0)
 
     def _log_object_heatmap_metrics(self, pred_obj, target, stage):
         if pred_obj is None or "object_heatmap" not in target:
             return
         target_obj = target["object_heatmap"].to(device=pred_obj.device)
-        object_valid = target["object_heatmap_valid"].to(
-            device=pred_obj.device, dtype=torch.bool
-        )
+        if "object_heatmap_valid" in target:
+            object_valid = target["object_heatmap_valid"].to(
+                device=pred_obj.device, dtype=torch.bool
+            )
+        else:
+            object_valid = target_obj.flatten(2).amax(dim=2) > 0
         if not object_valid.any():
             return
 
@@ -600,10 +604,19 @@ class HeatmapModule(pl.LightningModule):
             pred_obj = self._object_heatmap_pred(hm_preds)
             if pred_obj is not None and "object_heatmap" in target:
                 target_obj = target["object_heatmap"].to(device=pred_obj.device)
-                object_valid = target["object_heatmap_valid"].to(
-                    device=pred_obj.device, dtype=torch.bool
+                if "object_heatmap_weight" in target:
+                    object_weight = target["object_heatmap_weight"].to(
+                        device=pred_obj.device
+                    )
+                else:
+                    object_weight = target["object_heatmap_valid"].to(
+                        device=pred_obj.device, dtype=torch.float32
+                    )
+                loss_obj = self._object_heatmap_loss(
+                    pred_obj,
+                    target_obj,
+                    object_weight,
                 )
-                loss_obj = self._object_heatmap_loss(pred_obj, target_obj, object_valid)
                 if loss_obj is not None:
                     loss = loss + loss_obj * self.model.hparams.get(
                         "object_heatmap_weight", 200.0

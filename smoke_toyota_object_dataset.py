@@ -60,7 +60,7 @@ def build_parser():
     parser.add_argument("--n_frames", type=int, default=16)
     parser.add_argument("--n_landmarks", type=int, default=13)
     parser.add_argument("--num_actor_tokens", type=int, default=8)
-    parser.add_argument("--num_object_tokens", type=int, default=16)
+    parser.add_argument("--num_object_tokens", type=int, default=24)
     parser.add_argument("--num_object_classes", type=int, default=NUM_OBJECT_CLASSES)
     parser.add_argument("--num_classes", type=int, default=31)
     parser.add_argument("--object_conf_threshold", type=float, default=0.25)
@@ -128,6 +128,7 @@ def print_target_summary(name, target):
         "object_valid",
         "object_heatmap",
         "object_heatmap_valid",
+        "object_heatmap_weight",
         "interaction_cls",
         "interaction_valid",
     ):
@@ -159,6 +160,7 @@ def validate_object_target(name, frames, target, args, report):
     object_valid = target["object_valid"].bool()
     object_heatmap = target["object_heatmap"]
     object_heatmap_valid = target["object_heatmap_valid"].bool()
+    object_heatmap_weight = target["object_heatmap_weight"]
     interaction_cls = target["interaction_cls"]
     interaction_valid = target["interaction_valid"].bool()
 
@@ -234,10 +236,23 @@ def validate_object_target(name, frames, target, args, report):
         object_heatmap_valid.dtype == torch.bool,
         f"{name}: object_heatmap_valid is bool",
     )
+    report.check(
+        object_heatmap_weight.shape == (args.num_object_classes, 56, 56),
+        f"{name}: object_heatmap_weight shape is [C_obj, 56, 56]",
+        object_heatmap_weight.shape,
+    )
     report.check(torch.isfinite(object_heatmap).all(), f"{name}: object heatmap finite")
+    report.check(
+        torch.isfinite(object_heatmap_weight).all(),
+        f"{name}: object heatmap weights finite",
+    )
     report.check(
         bool(((object_heatmap >= 0.0) & (object_heatmap <= 1.0)).all()),
         f"{name}: object heatmap is in [0, 1]",
+    )
+    report.check(
+        bool(((object_heatmap_weight >= 0.0) & (object_heatmap_weight <= 1.0)).all()),
+        f"{name}: object heatmap weights are in [0, 1]",
     )
     if object_valid.any():
         report.check(
@@ -295,10 +310,38 @@ def validate_object_target(name, frames, target, args, report):
                 ),
                 f"{name}: Readbook gets book interaction when book is detected",
             )
-        if name_for_slot == "WatchTV" and OBJECT_TO_ID["tv_monitor"] not in present_objects:
+        if name_for_slot == "WatchTV" and bool(interaction_valid[slot]):
+            report.check(
+                int(interaction_cls[slot])
+                in {
+                    OBJECT_TO_ID["tv_monitor"],
+                    OBJECT_TO_ID["remote"],
+                    OBJECT_TO_ID["couch"],
+                },
+                f"{name}: WatchTV interaction is TV/remote/couch when valid",
+                interaction_cls[slot],
+            )
+        if name_for_slot == "WatchTV" and not (
+            {
+                OBJECT_TO_ID["tv_monitor"],
+                OBJECT_TO_ID["remote"],
+                OBJECT_TO_ID["couch"],
+            }
+            & present_objects
+        ):
             report.check(
                 not bool(interaction_valid[slot]),
-                f"{name}: WatchTV does not force TV when TV is absent",
+                f"{name}: WatchTV interaction is ignored when expected context is absent",
+            )
+        if name_for_slot == "Usetablet":
+            report.check(
+                not bool(interaction_valid[slot]),
+                f"{name}: Usetablet does not force a COCO phone/tablet surrogate",
+            )
+        if name_for_slot == "Drink.Fromcan":
+            report.check(
+                not bool(interaction_valid[slot]),
+                f"{name}: Drink.Fromcan has no forced COCO object target",
             )
 
 

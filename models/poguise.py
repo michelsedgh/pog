@@ -189,7 +189,7 @@ class POGUISE(pl.LightningModule):
                     "actor_bbox_prior_expand", 1.75
                 ),
                 object_prompt=self.object_prompt,
-                num_object_tokens=self.hparams.get("num_object_tokens", 16),
+                num_object_tokens=self.hparams.get("num_object_tokens", 24),
                 num_object_classes=self.hparams.get("num_object_classes", 0),
                 object_bbox_prior_weight=self.hparams.get(
                     "object_bbox_prior_weight", 0.0
@@ -225,7 +225,7 @@ class POGUISE(pl.LightningModule):
                     "actor_bbox_prior_expand", 1.75
                 ),
                 object_prompt=self.object_prompt,
-                num_object_tokens=self.hparams.get("num_object_tokens", 16),
+                num_object_tokens=self.hparams.get("num_object_tokens", 24),
                 num_object_classes=self.hparams.get("num_object_classes", 0),
                 object_bbox_prior_weight=self.hparams.get(
                     "object_bbox_prior_weight", 0.0

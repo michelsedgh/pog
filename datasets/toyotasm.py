@@ -17,10 +17,16 @@ import zlib
 from utils.ntu import frame_utils as utils
 from datasets.object_vocab import (
     ACTION_TO_OBJECT,
+    DETECTOR_TO_OBJECT,
     NONE_OBJECT_ID,
     NUM_OBJECT_CLASSES,
     OBJECT_TO_ID,
-    YOLO_TO_OBJECT,
+    OBJECTLESS_ACTIONS,
+    STRONG_ACTION_OBJECTS,
+    object_box_ignored_for_file_id,
+    object_allowed_for_file_id,
+    parse_object_camera_allowlist,
+    parse_object_ignore_regions,
 )
 
 try:
@@ -121,7 +127,7 @@ class ToyotaSMDataset(Dataset):
         self.object_prompt = bool(kwargs.get("object_prompt", 0))
         if self.object_prompt and not self.actor_prompt:
             raise ValueError("object_prompt requires actor_prompt")
-        self.num_object_tokens = int(kwargs.get("num_object_tokens", 16))
+        self.num_object_tokens = int(kwargs.get("num_object_tokens", 24))
         if self.num_object_tokens <= 0:
             raise ValueError("num_object_tokens must be positive")
         self.num_object_classes = int(
@@ -133,12 +139,23 @@ class ToyotaSMDataset(Dataset):
                 f"{NUM_OBJECT_CLASSES} classes, got {self.num_object_classes}"
             )
         self.object_detector_cache = kwargs.get("object_detector_cache")
+        self.object_camera_allowlist = parse_object_camera_allowlist(
+            kwargs.get("object_camera_allowlist", None)
+        )
+        self.object_ignore_regions = parse_object_ignore_regions(
+            kwargs.get("object_ignore_regions", None)
+        )
         self.object_conf_threshold = float(kwargs.get("object_conf_threshold", 0.25))
         if not 0 <= self.object_conf_threshold <= 1:
             raise ValueError("object_conf_threshold must be in [0, 1]")
         self.object_heatmap_size = int(kwargs.get("object_heatmap_size", 56))
         if self.object_heatmap_size != 56:
             raise ValueError("Toyota object_heatmap_size must be 56")
+        self.object_heatmap_negative_weight = float(
+            kwargs.get("object_heatmap_negative_weight", 0.05)
+        )
+        if not 0 <= self.object_heatmap_negative_weight <= 1:
+            raise ValueError("object_heatmap_negative_weight must be in [0, 1]")
         self.object_none_target_prob = float(kwargs.get("object_none_target_prob", 0.3))
         if not 0 <= self.object_none_target_prob <= 1:
             raise ValueError("object_none_target_prob must be in [0, 1]")
@@ -369,12 +386,15 @@ class ToyotaSMDataset(Dataset):
         parser.add_argument("--toyota_actor_background_box_prob", type=float, default=0.5)
         parser.add_argument("--object_prompt", type=int, default=0)
         parser.add_argument("--object_detector_cache", type=str, default=None)
-        parser.add_argument("--num_object_tokens", type=int, default=16)
+        parser.add_argument("--object_camera_allowlist", type=str, default=None)
+        parser.add_argument("--object_ignore_regions", type=str, default=None)
+        parser.add_argument("--num_object_tokens", type=int, default=24)
         parser.add_argument(
             "--num_object_classes", type=int, default=NUM_OBJECT_CLASSES
         )
         parser.add_argument("--object_conf_threshold", type=float, default=0.25)
         parser.add_argument("--object_heatmap_size", type=int, default=56)
+        parser.add_argument("--object_heatmap_negative_weight", type=float, default=0.05)
         parser.add_argument("--object_none_target_prob", type=float, default=0.3)
         parser.add_argument("--object_track_iou_threshold", type=float, default=0.2)
         parser.add_argument("--toyota_pose_guided_sampling", type=int, default=1)
@@ -880,7 +900,6 @@ class ToyotaSMDataset(Dataset):
                         self._build_object_target(
                             object_entries,
                             actor_target,
-                            label,
                             height=frames.shape[2],
                             width=frames.shape[3],
                             file_id=file_id,
@@ -1220,6 +1239,14 @@ class ToyotaSMDataset(Dataset):
         object_heatmap_valid = torch.stack(
             [target["object_heatmap_valid"].bool() for target in targets]
         ).any(dim=0)
+        object_heatmap_weight = self._compose_synthetic_heatmaps(
+            [target["object_heatmap_weight"] for target in targets],
+            heatmap_bounds,
+            combine="max",
+        ).clamp_(
+            float(self.object_heatmap_negative_weight),
+            1.0,
+        )
 
         interaction_cls = torch.full(
             (self.num_actor_tokens,), NONE_OBJECT_ID, dtype=torch.long
@@ -1237,27 +1264,29 @@ class ToyotaSMDataset(Dataset):
             "object_valid": object_valid,
             "object_heatmap": object_heatmap,
             "object_heatmap_valid": object_heatmap_valid,
+            "object_heatmap_weight": object_heatmap_weight,
             "interaction_cls": interaction_cls,
             "interaction_valid": interaction_valid,
         }
 
-    def _draw_object_gaussian(self, heatmap, cx, cy, sigma=1.5):
-        height, width = heatmap.shape
-        radius = int(math.ceil(sigma * 3.0))
-        x0 = max(0, int(math.floor(cx)) - radius)
-        y0 = max(0, int(math.floor(cy)) - radius)
-        x1 = min(width, int(math.floor(cx)) + radius + 1)
-        y1 = min(height, int(math.floor(cy)) + radius + 1)
-        if x1 <= x0 or y1 <= y0:
-            return
-        ys = torch.arange(y0, y1, dtype=heatmap.dtype, device=heatmap.device)
-        xs = torch.arange(x0, x1, dtype=heatmap.dtype, device=heatmap.device)
-        grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
-        gaussian = torch.exp(
-            -((grid_x - float(cx)) ** 2 + (grid_y - float(cy)) ** 2)
-            / (2.0 * sigma * sigma)
+    def _blur_object_heatmap(self, heatmap, sigma=1.0):
+        if sigma <= 0 or heatmap.numel() == 0:
+            return heatmap
+        radius = int(math.ceil(float(sigma) * 3.0))
+        coords = torch.arange(-radius, radius + 1, dtype=heatmap.dtype)
+        kernel_1d = torch.exp(-(coords**2) / (2.0 * float(sigma) ** 2))
+        kernel_1d = kernel_1d / kernel_1d.sum().clamp_min(1e-12)
+        kernel_2d = kernel_1d[:, None] * kernel_1d[None, :]
+        kernel = kernel_2d.view(1, 1, *kernel_2d.shape).repeat(
+            heatmap.shape[0], 1, 1, 1
         )
-        heatmap[y0:y1, x0:x1] = torch.maximum(heatmap[y0:y1, x0:x1], gaussian)
+        blurred = F.conv2d(
+            heatmap.unsqueeze(0),
+            kernel,
+            padding=radius,
+            groups=heatmap.shape[0],
+        ).squeeze(0)
+        return torch.maximum(heatmap, blurred).clamp_(0.0, 1.0)
 
     def _build_object_heatmaps(self, object_entries, height, width):
         hm_h, hm_w = self.heatmap_size
@@ -1271,15 +1300,35 @@ class ToyotaSMDataset(Dataset):
             if cls_id < 0 or cls_id >= self.num_object_classes:
                 continue
             x1, y1, x2, y2 = [float(v) for v in entry["xyxy"].tolist()]
-            cx = (x1 + x2) * 0.5 * hm_w / float(width)
-            cy = (y1 + y2) * 0.5 * hm_h / float(height)
-            self._draw_object_gaussian(
-                frame_heatmaps[int(entry["sample_pos"]), cls_id],
-                cx,
-                cy,
+            x1h = int(
+                math.floor(max(0.0, min(float(width), x1)) * hm_w / float(width))
+            )
+            y1h = int(
+                math.floor(max(0.0, min(float(height), y1)) * hm_h / float(height))
+            )
+            x2h = int(
+                math.ceil(max(0.0, min(float(width), x2)) * hm_w / float(width))
+            )
+            y2h = int(
+                math.ceil(max(0.0, min(float(height), y2)) * hm_h / float(height))
+            )
+            x1h = int(np.clip(x1h, 0, hm_w - 1))
+            y1h = int(np.clip(y1h, 0, hm_h - 1))
+            x2h = int(np.clip(x2h, x1h + 1, hm_w))
+            y2h = int(np.clip(y2h, y1h + 1, hm_h))
+            confidence = float(np.clip(float(entry["conf"]), 0.0, 1.0))
+            frame_heatmaps[int(entry["sample_pos"]), cls_id, y1h:y2h, x1h:x2h] = (
+                torch.maximum(
+                    frame_heatmaps[int(entry["sample_pos"]), cls_id, y1h:y2h, x1h:x2h],
+                    torch.tensor(confidence, dtype=torch.float32),
+                )
             )
             valid[cls_id] = True
-        return frame_heatmaps.mean(dim=0).clamp_(0.0, 1.0), valid
+        heatmap = frame_heatmaps.max(dim=0).values.clamp_(0.0, 1.0)
+        heatmap = self._blur_object_heatmap(heatmap, sigma=1.0)
+        weight = torch.full_like(heatmap, float(self.object_heatmap_negative_weight))
+        weight = torch.where(heatmap > 0, torch.ones_like(weight), weight)
+        return heatmap, valid, weight
 
     def _box_iou(self, box_a, box_b):
         ax1, ay1, ax2, ay2 = [float(v) for v in box_a]
@@ -1300,7 +1349,11 @@ class ToyotaSMDataset(Dataset):
         tracks = []
         entries = sorted(
             object_entries,
-            key=lambda item: (int(item["sample_pos"]), int(item["cls_id"]), -float(item["conf"])),
+            key=lambda item: (
+                int(item["sample_pos"]),
+                int(item["cls_id"]),
+                -float(item["conf"]),
+            ),
         )
         for entry in entries:
             best_track = None
@@ -1329,16 +1382,7 @@ class ToyotaSMDataset(Dataset):
                 )
         return tracks
 
-    def _expected_object_ids_for_label(self, label):
-        action_name = self._action_name_from_label(int(label))
-        if action_name is None:
-            return []
-        object_names = ACTION_TO_OBJECT.get(action_name)
-        if object_names is None:
-            return []
-        return [OBJECT_TO_ID[name] for name in object_names if name in OBJECT_TO_ID]
-
-    def _pack_object_tokens(self, object_entries, label, height, width):
+    def _pack_object_tokens(self, object_entries, height, width):
         object_boxes = torch.zeros((self.num_object_tokens, 4), dtype=torch.float32)
         object_cls = torch.full(
             (self.num_object_tokens,), NONE_OBJECT_ID, dtype=torch.long
@@ -1348,7 +1392,6 @@ class ToyotaSMDataset(Dataset):
         if not object_entries:
             return object_boxes, object_cls, object_conf, object_valid
 
-        expected_ids = set(self._expected_object_ids_for_label(label))
         candidates = []
         for track in self._object_tracks(object_entries):
             confs = np.asarray(track["confs"], dtype=np.float32)
@@ -1356,9 +1399,7 @@ class ToyotaSMDataset(Dataset):
             weights = np.maximum(confs, 1e-4)
             mean_box = (boxes * weights[:, None]).sum(axis=0) / weights.sum()
             frames_seen_fraction = len(track["frames"]) / float(self.n_frames)
-            score = float(confs.max()) + 0.10 * frames_seen_fraction
-            if int(track["cls_id"]) in expected_ids:
-                score += 0.05
+            score = float(confs.max()) * math.sqrt(max(frames_seen_fraction, 1e-6))
             candidates.append(
                 {
                     "score": score,
@@ -1411,7 +1452,21 @@ class ToyotaSMDataset(Dataset):
             (self.num_actor_tokens,), NONE_OBJECT_ID, dtype=torch.long
         )
         interaction_valid = torch.zeros(self.num_actor_tokens, dtype=torch.bool)
-        present_object_ids = {int(entry["cls_id"]) for entry in object_entries}
+        object_stats = {}
+        for track in self._object_tracks(object_entries):
+            cls_id = int(track["cls_id"])
+            confs = np.asarray(track["confs"], dtype=np.float32)
+            if confs.size == 0:
+                continue
+            frames_seen_fraction = len(track["frames"]) / float(self.n_frames)
+            score = float(confs.max()) * math.sqrt(max(frames_seen_fraction, 1e-6))
+            previous = object_stats.get(cls_id)
+            if previous is None or score > previous["score"]:
+                object_stats[cls_id] = {
+                    "score": score,
+                    "conf": float(confs.max()),
+                    "frames_seen_fraction": frames_seen_fraction,
+                }
 
         for slot in torch.nonzero(actor_target["valid"], as_tuple=False).flatten():
             slot = int(slot)
@@ -1423,27 +1478,51 @@ class ToyotaSMDataset(Dataset):
                 continue
             expected_names = ACTION_TO_OBJECT[action_name]
             if expected_names:
+                candidates = []
                 for object_name in expected_names:
                     cls_id = OBJECT_TO_ID.get(object_name)
-                    if cls_id in present_object_ids:
-                        interaction_cls[slot] = int(cls_id)
-                        interaction_valid[slot] = True
-                        break
-            elif self._use_none_interaction_target(file_id, slot):
+                    if cls_id not in object_stats:
+                        continue
+                    candidates.append(
+                        {
+                            "cls_id": int(cls_id),
+                            "strong": (action_name, object_name)
+                            in STRONG_ACTION_OBJECTS,
+                            "score": float(object_stats[int(cls_id)]["score"]),
+                        }
+                    )
+                if candidates:
+                    candidates.sort(
+                        key=lambda item: (item["strong"], item["score"]),
+                        reverse=True,
+                    )
+                    interaction_cls[slot] = int(candidates[0]["cls_id"])
+                    interaction_valid[slot] = True
+            elif action_name in OBJECTLESS_ACTIONS and self._use_none_interaction_target(
+                file_id, slot
+            ):
                 interaction_cls[slot] = NONE_OBJECT_ID
                 interaction_valid[slot] = True
 
         return interaction_cls, interaction_valid
 
-    def _build_object_target(self, object_entries, actor_target, label, height, width, file_id):
-        object_heatmap, object_heatmap_valid = self._build_object_heatmaps(
-            object_entries,
-            height,
-            width,
+    def _build_object_target(
+        self,
+        object_entries,
+        actor_target,
+        height,
+        width,
+        file_id,
+    ):
+        object_heatmap, object_heatmap_valid, object_heatmap_weight = (
+            self._build_object_heatmaps(
+                object_entries,
+                height,
+                width,
+            )
         )
         object_boxes, object_cls, object_conf, object_valid = self._pack_object_tokens(
             object_entries,
-            label,
             height,
             width,
         )
@@ -1459,6 +1538,7 @@ class ToyotaSMDataset(Dataset):
             "object_valid": object_valid,
             "object_heatmap": object_heatmap,
             "object_heatmap_valid": object_heatmap_valid,
+            "object_heatmap_weight": object_heatmap_weight,
             "interaction_cls": interaction_cls,
             "interaction_valid": interaction_valid,
         }
@@ -1817,9 +1897,16 @@ class ToyotaSMDataset(Dataset):
                         f"Object cache line {line_idx} is missing frame_idx"
                     )
                 frame_idx = int(record["frame_idx"])
+                frame_width = record.get("width")
+                frame_height = record.get("height")
                 objects = []
                 for obj in record.get("objects", []):
-                    parsed = self._parse_cache_object(obj)
+                    parsed = self._parse_cache_object(
+                        obj,
+                        file_id=file_id,
+                        width=frame_width,
+                        height=frame_height,
+                    )
                     if parsed is not None:
                         objects.append(parsed)
                 if objects:
@@ -1833,27 +1920,48 @@ class ToyotaSMDataset(Dataset):
         )
         return cache
 
-    def _parse_cache_object(self, obj):
+    def _parse_cache_object(self, obj, file_id=None, width=None, height=None):
         conf = float(obj.get("conf", 0.0))
         if conf < self.object_conf_threshold:
             return None
 
-        cls_id = obj.get("cls_id")
+        cls_id = None
+        for cls_name in (obj.get("detector_cls"), obj.get("cls")):
+            object_name = self._object_name_from_name(cls_name)
+            if object_name is not None:
+                if not object_allowed_for_file_id(
+                    object_name,
+                    file_id,
+                    self.object_camera_allowlist,
+                ):
+                    return None
+                cls_id = int(OBJECT_TO_ID[object_name])
+                break
         if cls_id is None:
-            cls_name = obj.get("cls")
-            cls_id = self._object_class_id_from_name(cls_name)
-            if cls_id is None:
-                return None
-        else:
-            cls_id = int(cls_id)
-            if cls_id < 0 or cls_id >= self.num_object_classes:
-                return None
+            return None
 
         xyxy = np.asarray(obj.get("xyxy", []), dtype=np.float32)
         if xyxy.shape != (4,) or not np.isfinite(xyxy).all():
             return None
         x1, y1, x2, y2 = [float(v) for v in xyxy.tolist()]
+        if width is not None and height is not None:
+            width = float(width)
+            height = float(height)
+            if width <= 0 or height <= 0:
+                return None
+            x1 = max(0.0, min(width, x1))
+            y1 = max(0.0, min(height, y1))
+            x2 = max(0.0, min(width, x2))
+            y2 = max(0.0, min(height, y2))
         if x2 <= x1 or y2 <= y1:
+            return None
+        if object_box_ignored_for_file_id(
+            (x1, y1, x2, y2),
+            file_id,
+            width,
+            height,
+            self.object_ignore_regions,
+        ):
             return None
         return {
             "cls_id": int(cls_id),
@@ -1862,13 +1970,19 @@ class ToyotaSMDataset(Dataset):
         }
 
     def _object_class_id_from_name(self, cls_name):
-        if cls_name is None:
-            return None
-        cls_name = str(cls_name)
-        object_name = YOLO_TO_OBJECT.get(cls_name, cls_name)
-        if object_name not in OBJECT_TO_ID:
+        object_name = self._object_name_from_name(cls_name)
+        if object_name is None:
             return None
         return int(OBJECT_TO_ID[object_name])
+
+    def _object_name_from_name(self, cls_name):
+        if cls_name is None:
+            return None
+        cls_name = str(cls_name).strip().lower()
+        object_name = DETECTOR_TO_OBJECT.get(cls_name, cls_name)
+        if object_name not in OBJECT_TO_ID:
+            return None
+        return object_name
 
     def _get_frame_objects(self, file_id, frame_idx):
         return self._object_cache.get(file_id, {}).get(int(frame_idx), [])
