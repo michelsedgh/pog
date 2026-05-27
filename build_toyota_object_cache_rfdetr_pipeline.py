@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 import time
 from collections import defaultdict
 
@@ -15,6 +16,9 @@ import cv2
 import numpy as np
 
 import build_toyota_object_cache_rfdetr as cache_base
+
+_THREAD_STATE = threading.local()
+_MODEL_INIT_LOCK = threading.Lock()
 
 
 def build_parser():
@@ -41,6 +45,18 @@ def build_parser():
         help="Maximum queued preprocessed batches before GPU inference catches up.",
     )
     parser.add_argument(
+        "--inference_workers",
+        type=int,
+        default=4,
+        help="TensorRT/ONNX Runtime sessions to run concurrently.",
+    )
+    parser.add_argument(
+        "--inference_queue_batches",
+        type=int,
+        default=2,
+        help="Maximum queued GPU batches per inference worker.",
+    )
+    parser.add_argument(
         "--log_interval_frames",
         type=int,
         default=5000,
@@ -53,6 +69,34 @@ def build_parser():
         help="Merge shards into --output after all missing frames are written.",
     )
     return parser
+
+
+def onnx_input_hw(onnx_model_path):
+    import onnx
+
+    model = onnx.load(onnx_model_path)
+    if not model.graph.input:
+        raise ValueError(f"ONNX model has no inputs: {onnx_model_path}")
+    input_type = model.graph.input[0].type.tensor_type
+    dims = [dim.dim_value for dim in input_type.shape.dim]
+    if len(dims) != 4 or dims[2] <= 0 or dims[3] <= 0:
+        raise ValueError(
+            "ONNX model must have static [B,C,H,W] input shape, "
+            f"got {dims} from {onnx_model_path}"
+        )
+    return int(dims[2]), int(dims[3])
+
+
+def get_thread_model(args):
+    model = getattr(_THREAD_STATE, "model", None)
+    if model is not None:
+        return model
+    with _MODEL_INIT_LOCK:
+        model = cache_base.build_model(args)
+    if not hasattr(model, "predict_preprocessed"):
+        raise RuntimeError("Selected detector does not support predict_preprocessed().")
+    _THREAD_STATE.model = model
+    return model
 
 
 def shard_path(shard_output_dir, shard_idx, num_shards):
@@ -125,6 +169,10 @@ def validate_args(args):
         raise ValueError("decode_workers must be positive")
     if args.prefetch_batches <= 0:
         raise ValueError("prefetch_batches must be positive")
+    if args.inference_workers <= 0:
+        raise ValueError("inference_workers must be positive")
+    if args.inference_queue_batches <= 0:
+        raise ValueError("inference_queue_batches must be positive")
 
 
 def select_file_ids(args):
@@ -216,8 +264,8 @@ def preprocess_frame(job, target_width, target_height, mean, std):
     }
 
 
-def write_detection_record(writer, item, objects, args):
-    writer.write(
+def detection_record_line(item, objects, args):
+    return (
         json.dumps(
             {
                 "file_id": item["file_id"],
@@ -234,19 +282,19 @@ def write_detection_record(writer, item, objects, args):
     )
 
 
-def process_preprocessed_batch(
-    model,
+def infer_write_preprocessed_batch(
+    args,
     class_names,
     object_thresholds,
     object_camera_allowlist,
     object_ignore_regions,
     writers,
-    done_by_shard,
+    writer_locks,
     batch_items,
-    args,
 ):
     if not batch_items:
-        return 0, 0
+        return 0, 0, {}
+    model = get_thread_model(args)
     model_inputs = np.stack([item["input"] for item in batch_items]).astype(
         np.float32,
         copy=False,
@@ -259,6 +307,8 @@ def process_preprocessed_batch(
     )
     written = 0
     objects_total = 0
+    lines_by_shard = defaultdict(list)
+    keys_by_shard = defaultdict(list)
     for item, det in zip(batch_items, detections):
         objects = cache_base.detections_to_objects(
             det,
@@ -270,12 +320,16 @@ def process_preprocessed_batch(
             item["width"],
             item["height"],
         )
-        writer = writers[item["shard_idx"]]
-        write_detection_record(writer, item, objects, args)
-        done_by_shard[item["shard_idx"]].add((item["file_id"], int(item["frame_idx"])))
+        shard_idx = item["shard_idx"]
+        lines_by_shard[shard_idx].append(detection_record_line(item, objects, args))
+        keys_by_shard[shard_idx].append((item["file_id"], int(item["frame_idx"])))
         objects_total += len(objects)
         written += 1
-    return written, objects_total
+
+    for shard_idx, lines in lines_by_shard.items():
+        with writer_locks[shard_idx]:
+            writers[shard_idx].writelines(lines)
+    return written, objects_total, dict(keys_by_shard)
 
 
 def print_progress(written, total_missing, objects_total, started_at, prefix="pipeline"):
@@ -334,9 +388,7 @@ def build_cache_pipeline(args):
             merge_shards(args)
         return
 
-    model = cache_base.build_model(args)
-    if not hasattr(model, "predict_preprocessed"):
-        raise RuntimeError("Selected detector does not support predict_preprocessed().")
+    input_height, input_width = onnx_input_hw(args.onnx_model_path)
     class_names = cache_base.coco_classes()
     object_thresholds = cache_base.parse_object_class_thresholds(
         args.object_class_thresholds
@@ -350,19 +402,31 @@ def build_cache_pipeline(args):
     print("Object class thresholds:", object_thresholds)
     print("Object camera allowlist:", object_camera_allowlist)
     print("Object ignore regions:", object_ignore_regions)
+    print(
+        f"Pipeline workers: decode={args.decode_workers}, "
+        f"inference={args.inference_workers}, batch={args.batch_size}, "
+        f"input={input_height}x{input_width}"
+    )
 
     writers = {}
+    writer_locks = {}
     try:
         for shard_idx in range(args.num_shards):
             path = shard_path(args.shard_output_dir, shard_idx, args.num_shards)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             writers[shard_idx] = open(path, "a" if args.resume else "w", buffering=1)
+            writer_locks[shard_idx] = threading.Lock()
 
         mean = np.asarray([0.485, 0.456, 0.406], dtype=np.float32)
         std = np.asarray([0.229, 0.224, 0.225], dtype=np.float32)
         max_inflight = max(args.batch_size, args.batch_size * args.prefetch_batches)
+        max_inflight_inference = max(
+            args.inference_workers,
+            args.inference_workers * args.inference_queue_batches,
+        )
         job_iter = iter_missing_frame_jobs(args, file_ids, done_by_shard)
-        futures = {}
+        decode_futures = {}
+        inference_futures = set()
         batch_items = []
         written_total = 0
         objects_total = 0
@@ -370,7 +434,7 @@ def build_cache_pipeline(args):
         started_at = time.time()
 
         def submit_until_full(executor):
-            while len(futures) < max_inflight:
+            while len(decode_futures) < max_inflight:
                 try:
                     job = next(job_iter)
                 except StopIteration:
@@ -378,64 +442,85 @@ def build_cache_pipeline(args):
                 future = executor.submit(
                     preprocess_frame,
                     job,
-                    model.width,
-                    model.height,
+                    input_width,
+                    input_height,
                     mean,
                     std,
                 )
-                futures[future] = job
+                decode_futures[future] = job
+
+        def collect_inference(wait_for_one):
+            nonlocal written_total, objects_total, next_log
+            if not inference_futures:
+                return
+            if wait_for_one:
+                done_futures, _ = concurrent.futures.wait(
+                    list(inference_futures),
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+            else:
+                done_futures = {
+                    future for future in inference_futures if future.done()
+                }
+            for future in done_futures:
+                inference_futures.remove(future)
+                written, objects, keys_by_shard = future.result()
+                written_total += written
+                objects_total += objects
+                for shard_idx, keys in keys_by_shard.items():
+                    done_by_shard[shard_idx].update(keys)
+                if written_total >= next_log:
+                    print_progress(
+                        written_total,
+                        total_missing,
+                        objects_total,
+                        started_at,
+                    )
+                    next_log += int(args.log_interval_frames)
+
+        def submit_inference(executor, items):
+            while len(inference_futures) >= max_inflight_inference:
+                collect_inference(wait_for_one=True)
+            inference_futures.add(
+                executor.submit(
+                    infer_write_preprocessed_batch,
+                    args,
+                    class_names,
+                    object_thresholds,
+                    object_camera_allowlist,
+                    object_ignore_regions,
+                    writers,
+                    writer_locks,
+                    items,
+                )
+            )
 
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=args.decode_workers
-        ) as executor:
-            submit_until_full(executor)
-            while futures:
+        ) as decode_executor, concurrent.futures.ThreadPoolExecutor(
+            max_workers=args.inference_workers
+        ) as inference_executor:
+            submit_until_full(decode_executor)
+            while decode_futures:
                 done_futures, _ = concurrent.futures.wait(
-                    list(futures),
+                    list(decode_futures),
                     return_when=concurrent.futures.FIRST_COMPLETED,
                 )
                 for future in done_futures:
-                    futures.pop(future)
+                    decode_futures.pop(future)
                     batch_items.append(future.result())
                     if len(batch_items) >= args.batch_size:
-                        written, objects = process_preprocessed_batch(
-                            model,
-                            class_names,
-                            object_thresholds,
-                            object_camera_allowlist,
-                            object_ignore_regions,
-                            writers,
-                            done_by_shard,
-                            batch_items,
-                            args,
-                        )
-                        written_total += written
-                        objects_total += objects
-                        batch_items.clear()
-                        if written_total >= next_log:
-                            print_progress(
-                                written_total,
-                                total_missing,
-                                objects_total,
-                                started_at,
-                            )
-                            next_log += int(args.log_interval_frames)
-                submit_until_full(executor)
+                        submit_inference(inference_executor, batch_items)
+                        batch_items = []
+                collect_inference(wait_for_one=False)
+                submit_until_full(decode_executor)
 
-        if batch_items:
-            written, objects = process_preprocessed_batch(
-                model,
-                class_names,
-                object_thresholds,
-                object_camera_allowlist,
-                object_ignore_regions,
-                writers,
-                done_by_shard,
-                batch_items,
-                args,
-            )
-            written_total += written
-            objects_total += objects
+            if batch_items:
+                submit_inference(inference_executor, batch_items)
+                batch_items = []
+
+            while inference_futures:
+                collect_inference(wait_for_one=True)
 
         for writer in writers.values():
             writer.flush()
