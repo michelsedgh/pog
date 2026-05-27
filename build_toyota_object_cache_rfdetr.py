@@ -341,7 +341,7 @@ def build_model(args):
         kwargs["device"] = args.device
     model = model_classes[args.model_size](**kwargs)
     if args.optimize_for_inference and hasattr(model, "optimize_for_inference"):
-        optimized = model.optimize_for_inference()
+        optimized = model.optimize_for_inference(batch_size=args.batch_size)
         if optimized is not None:
             model = optimized
     return model
@@ -493,10 +493,14 @@ def flush_batch(
 ):
     if not batch:
         return 0, 0
+    original_batch_len = len(batch)
     images = [item["image"] for item in batch]
+    if args.optimize_for_inference and original_batch_len < args.batch_size:
+        images.extend([images[-1]] * (args.batch_size - original_batch_len))
     detections = model.predict(images, threshold=args.conf_threshold)
     if not isinstance(detections, list):
         detections = [detections]
+    detections = detections[:original_batch_len]
 
     written = 0
     objects_total = 0
