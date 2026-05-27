@@ -312,26 +312,19 @@ def validate_object_target(name, frames, target, args, report):
             )
         if name_for_slot == "WatchTV" and bool(interaction_valid[slot]):
             report.check(
-                int(interaction_cls[slot])
-                in {
-                    OBJECT_TO_ID["tv_monitor"],
-                    OBJECT_TO_ID["remote"],
-                    OBJECT_TO_ID["couch"],
-                },
-                f"{name}: WatchTV interaction is TV/remote/couch when valid",
+                False,
+                f"{name}: WatchTV context objects do not become interaction CE targets",
                 interaction_cls[slot],
             )
-        if name_for_slot == "WatchTV" and not (
-            {
-                OBJECT_TO_ID["tv_monitor"],
-                OBJECT_TO_ID["remote"],
-                OBJECT_TO_ID["couch"],
-            }
-            & present_objects
-        ):
+        if name_for_slot == "WatchTV":
             report.check(
                 not bool(interaction_valid[slot]),
-                f"{name}: WatchTV interaction is ignored when expected context is absent",
+                f"{name}: WatchTV context objects are heatmap/token evidence only",
+            )
+        if name_for_slot in {"Sitdown", "Eat.Attable", "Eat.Snack", "Takepills"}:
+            report.check(
+                not bool(interaction_valid[slot]),
+                f"{name}: {name_for_slot} weak/context objects are not interaction CE targets",
             )
         if name_for_slot == "Usetablet":
             report.check(

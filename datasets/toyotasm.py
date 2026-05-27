@@ -1480,22 +1480,19 @@ class ToyotaSMDataset(Dataset):
             if expected_names:
                 candidates = []
                 for object_name in expected_names:
+                    if (action_name, object_name) not in STRONG_ACTION_OBJECTS:
+                        continue
                     cls_id = OBJECT_TO_ID.get(object_name)
                     if cls_id not in object_stats:
                         continue
                     candidates.append(
                         {
                             "cls_id": int(cls_id),
-                            "strong": (action_name, object_name)
-                            in STRONG_ACTION_OBJECTS,
                             "score": float(object_stats[int(cls_id)]["score"]),
                         }
                     )
                 if candidates:
-                    candidates.sort(
-                        key=lambda item: (item["strong"], item["score"]),
-                        reverse=True,
-                    )
+                    candidates.sort(key=lambda item: item["score"], reverse=True)
                     interaction_cls[slot] = int(candidates[0]["cls_id"])
                     interaction_valid[slot] = True
             elif action_name in OBJECTLESS_ACTIONS and self._use_none_interaction_target(
