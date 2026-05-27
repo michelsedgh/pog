@@ -537,6 +537,7 @@ def _ensure_transformers_backbone_api():
 
 
 def coco_classes():
+    _ensure_transformers_backbone_api()
     from rfdetr.util.coco_classes import COCO_CLASSES
 
     if hasattr(COCO_CLASSES, "items"):
