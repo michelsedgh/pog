@@ -376,6 +376,12 @@ class OnnxRuntimeRFDETRDetector:
 
         import onnxruntime as ort
 
+        if "TensorrtExecutionProvider" not in ort.get_available_providers():
+            raise RuntimeError(
+                "onnxruntime-gpu does not expose TensorrtExecutionProvider in this "
+                "environment. Install a TensorRT-enabled onnxruntime-gpu build."
+            )
+
         cache_dir = args.onnx_trt_cache_dir or os.path.join(
             os.path.dirname(args.onnx_model_path),
             "ort_trt_cache",
@@ -397,6 +403,10 @@ class OnnxRuntimeRFDETRDetector:
             sess_options=session_options,
             providers=providers,
         )
+        if "TensorrtExecutionProvider" not in self.session.get_providers():
+            raise RuntimeError(
+                "ONNX Runtime session did not activate TensorrtExecutionProvider."
+            )
         self.input_name = self.session.get_inputs()[0].name
         input_shape = self.session.get_inputs()[0].shape
         self.batch_size = int(args.batch_size)
