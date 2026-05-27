@@ -398,23 +398,25 @@ class POGUISE(pl.LightningModule):
                 "object_boxes, object_cls, object_conf, and object_valid must be passed together"
             )
 
-        object_valid = object_valid.bool()
+        object_valid = object_valid.to(device=actor_feat.device, dtype=torch.bool)
+        object_boxes = object_boxes.to(device=actor_feat.device)
+        object_cls = object_cls.to(device=actor_feat.device)
+        object_conf = object_conf.to(device=actor_feat.device)
+
         has_objects = object_valid.any(dim=1)
         if not has_objects.any():
             return actor_feat
 
-        context = torch.zeros_like(actor_feat)
-        actor_subset = actor_feat[has_objects]
-        boxes_subset = object_boxes[has_objects].to(
-            device=actor_feat.device,
-            dtype=actor_feat.dtype,
+        object_batch_idx = has_objects.nonzero(as_tuple=False).flatten()
+        actor_subset = actor_feat.index_select(0, object_batch_idx)
+        boxes_subset = object_boxes.index_select(0, object_batch_idx).to(
+            dtype=actor_feat.dtype
         )
-        cls_subset = object_cls[has_objects].to(device=actor_feat.device).long()
-        conf_subset = object_conf[has_objects].to(
-            device=actor_feat.device,
-            dtype=actor_feat.dtype,
+        cls_subset = object_cls.index_select(0, object_batch_idx).long()
+        conf_subset = object_conf.index_select(0, object_batch_idx).to(
+            dtype=actor_feat.dtype
         )
-        valid_subset = object_valid[has_objects].to(device=actor_feat.device)
+        valid_subset = object_valid.index_select(0, object_batch_idx)
 
         cls_subset = cls_subset.clamp(0, self.num_object_classes)
         cls_subset = cls_subset.masked_fill(~valid_subset, self.num_object_classes)
@@ -424,16 +426,26 @@ class POGUISE(pl.LightningModule):
             + self.object_conf_mlp(conf_subset.unsqueeze(-1))
             + self.object_valid_embed(valid_subset.long()).to(dtype=actor_feat.dtype)
         )
+        query = self.actor_object_norm(actor_subset)
+        obj_feat = obj_feat.to(dtype=query.dtype)
 
         attended, _ = self.actor_object_attn(
-            query=self.actor_object_norm(actor_subset),
+            query=query,
             key=obj_feat,
             value=obj_feat,
             key_padding_mask=~valid_subset,
             need_weights=False,
         )
-        context[has_objects] = attended
-        gate = torch.sigmoid(self.actor_object_gate_logit).to(dtype=actor_feat.dtype)
+        context = actor_feat.new_zeros(actor_feat.shape)
+        context = context.index_copy(
+            0,
+            object_batch_idx,
+            attended.to(dtype=actor_feat.dtype),
+        )
+        gate = torch.sigmoid(self.actor_object_gate_logit).to(
+            device=actor_feat.device,
+            dtype=actor_feat.dtype,
+        )
         return actor_feat + gate * context
 
     def forward(
