@@ -398,6 +398,12 @@ class OnnxRuntimeRFDETRDetector:
             "CPUExecutionProvider",
         ]
         session_options = ort.SessionOptions()
+        session_options.intra_op_num_threads = int(
+            os.environ.get("ORT_INTRA_OP_NUM_THREADS", "1")
+        )
+        session_options.inter_op_num_threads = int(
+            os.environ.get("ORT_INTER_OP_NUM_THREADS", "1")
+        )
         self.session = ort.InferenceSession(
             args.onnx_model_path,
             sess_options=session_options,
@@ -440,10 +446,42 @@ class OnnxRuntimeRFDETRDetector:
         outputs = self.session.run(None, {self.input_name: batch})
         boxes, logits = self._split_outputs(outputs)
         detections = [
-            self._postprocess_single(boxes[idx], logits[idx], images[idx], threshold)
+            self._postprocess_single(
+                boxes[idx],
+                logits[idx],
+                images[idx].shape[:2],
+                threshold,
+            )
             for idx in range(original_len)
         ]
         return detections if original_len > 1 else detections[0]
+
+    def predict_preprocessed(self, batch, image_shapes, threshold=0.5):
+        batch = np.asarray(batch, dtype=np.float32)
+        if batch.ndim != 4:
+            raise ValueError(f"Expected preprocessed batch [B,3,H,W], got {batch.shape}")
+        original_len = int(batch.shape[0])
+        if original_len == 0:
+            return []
+        if original_len != len(image_shapes):
+            raise ValueError(
+                "image_shapes length must match preprocessed batch size: "
+                f"{len(image_shapes)} vs {original_len}"
+            )
+        if original_len < self.batch_size:
+            pad = np.repeat(batch[-1:], self.batch_size - original_len, axis=0)
+            batch = np.concatenate([batch, pad], axis=0)
+        outputs = self.session.run(None, {self.input_name: batch})
+        boxes, logits = self._split_outputs(outputs)
+        return [
+            self._postprocess_single(
+                boxes[idx],
+                logits[idx],
+                image_shapes[idx],
+                threshold,
+            )
+            for idx in range(original_len)
+        ]
 
     def _split_outputs(self, outputs):
         if len(outputs) != 2:
@@ -458,7 +496,7 @@ class OnnxRuntimeRFDETRDetector:
             f"{[output.shape for output in outputs]}"
         )
 
-    def _postprocess_single(self, boxes_cxcywh, logits, image, threshold):
+    def _postprocess_single(self, boxes_cxcywh, logits, image_shape, threshold):
         scores = 1.0 / (1.0 + np.exp(-logits.astype(np.float32)))
         flat = scores.reshape(-1)
         k = min(max(self.topk, 1), flat.size)
@@ -482,7 +520,7 @@ class OnnxRuntimeRFDETRDetector:
             ],
             axis=1,
         )
-        height, width = image.shape[:2]
+        height, width = image_shape[:2]
         scale = np.asarray([width, height, width, height], dtype=np.float32)
         xyxy = xyxy * scale[None, :]
         xyxy[:, [0, 2]] = np.clip(xyxy[:, [0, 2]], 0.0, float(width))
