@@ -323,6 +323,19 @@ class HeatmapModule(pl.LightningModule):
         pred_bin = probs > 0.3
         target_bin = target_obj.float() > 0.3
         valid_mask = object_valid[:, :, None, None]
+        valid_values = probs.masked_select(valid_mask.expand_as(probs))
+        if valid_values.numel() > 0:
+            self._log_scalar(
+                f"{stage}_obj_pred_max",
+                valid_values.max(),
+                object_valid.sum().item(),
+            )
+            self._log_scalar(
+                f"{stage}_obj_pred_mean",
+                valid_values.mean(),
+                object_valid.sum().item(),
+            )
+
         intersection = (pred_bin & target_bin & valid_mask).float().sum()
         union = ((pred_bin | target_bin) & valid_mask).float().sum()
         if union > 0:
@@ -334,6 +347,13 @@ class HeatmapModule(pl.LightningModule):
 
         visible = target_bin.flatten(2).any(dim=2) & object_valid
         if visible.any():
+            positive_values = probs.masked_select(target_bin & valid_mask)
+            if positive_values.numel() > 0:
+                self._log_scalar(
+                    f"{stage}_obj_pred_positive_mean",
+                    positive_values.mean(),
+                    visible.sum().item(),
+                )
             pred_visible = pred_bin.flatten(2).any(dim=2) & object_valid
             self._log_scalar(
                 f"{stage}_obj_recall_visible",
