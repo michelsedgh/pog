@@ -319,7 +319,7 @@ class HeatmapModule(pl.LightningModule):
         if not object_valid.any():
             return
 
-        probs = torch.sigmoid(pred_obj.float())
+        probs = pred_obj.float().clamp(0.0, 1.0)
         pred_bin = probs > 0.3
         target_bin = target_obj.float() > 0.3
         valid_mask = object_valid[:, :, None, None]
