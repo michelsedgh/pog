@@ -288,6 +288,7 @@ def build_parser():
     parser.add_argument("--num_sanity_val_steps", type=int, default=2)
     parser.add_argument("--check_val_every_n_epoch", type=int, default=1)
     parser.add_argument("--limit_val_batches", type=float, default=None)
+    parser.add_argument("--log_every_n_steps", type=int, default=50)
 
     parser.add_argument("--project_folder", type=str, default="toyotaSM")
     parser.add_argument("--model_name", type=str, default="poguise_actor_prompt")
@@ -425,6 +426,7 @@ def main():
         gradient_clip_val=hparams.gradient_clip_val,
         num_sanity_val_steps=hparams.num_sanity_val_steps,
         check_val_every_n_epoch=hparams.check_val_every_n_epoch,
+        log_every_n_steps=hparams.log_every_n_steps,
         reload_dataloaders_every_n_epochs=hparams.reload_dataloaders_every_n_epochs,
         benchmark=True,
         **trainer_kwargs,
