@@ -6,6 +6,8 @@ from datamodule.mixup import Mixup
 import torch
 import torch
 import numpy as np
+import json
+import os
 
 
 # collate_fn for THUMOS14Dataset
@@ -196,7 +198,12 @@ class BaseDataModule(pl.LightningDataModule):
 
     def _class_balanced_train_sampler(self):
         if not getattr(self.hparams, "class_balanced_sampler", 0):
-            return None
+            weights = self._hard_negative_train_sampler(None)
+            if weights is None:
+                return None
+            return WeightedRandomSampler(
+                weights.double(), num_samples=len(weights), replacement=True
+            )
         labels = getattr(self.train_dataset, "y", None)
         if labels is None:
             raise ValueError(
@@ -209,9 +216,94 @@ class BaseDataModule(pl.LightningDataModule):
         if torch.any(class_counts[labels] == 0):
             raise ValueError("class_balanced_sampler found a label with zero count")
         weights = 1.0 / class_counts[labels].float()
+        weights = self._hard_negative_train_sampler(weights)
         return WeightedRandomSampler(
             weights.double(), num_samples=len(weights), replacement=True
         )
+
+    def _hard_negative_file_ids(self):
+        manifest_path = getattr(self.hparams, "hard_negative_manifest", None)
+        if not manifest_path:
+            raise ValueError(
+                "hard_negative_sampler requires --hard_negative_manifest"
+            )
+        if not os.path.exists(manifest_path):
+            raise FileNotFoundError(manifest_path)
+        with open(manifest_path) as f:
+            entries = json.load(f)
+        if not isinstance(entries, list):
+            raise ValueError("hard_negative_manifest must be a JSON list")
+        file_ids = set()
+        for idx, entry in enumerate(entries):
+            if not isinstance(entry, dict) or "file_id" not in entry:
+                raise ValueError(
+                    f"hard_negative_manifest entry {idx} is missing file_id"
+                )
+            file_ids.add(str(entry["file_id"]))
+        if not file_ids:
+            raise ValueError("hard_negative_manifest contains no file_id entries")
+        return file_ids
+
+    def _hard_negative_train_sampler(self, weights):
+        if not getattr(self.hparams, "hard_negative_sampler", 0):
+            return weights
+
+        data_df = getattr(self.train_dataset, "data_df", None)
+        if data_df is None or "file_id" not in data_df:
+            raise ValueError(
+                "hard_negative_sampler requires train_dataset.data_df.file_id"
+            )
+        dataset_file_ids = [str(file_id) for file_id in data_df.file_id.tolist()]
+        if not dataset_file_ids:
+            raise ValueError("hard_negative_sampler received an empty training dataset")
+
+        hard_file_ids = self._hard_negative_file_ids()
+        hard_mask = torch.tensor(
+            [file_id in hard_file_ids for file_id in dataset_file_ids],
+            dtype=torch.bool,
+        )
+        hard_count = int(hard_mask.sum().item())
+        if hard_count == 0:
+            raise ValueError(
+                "hard_negative_sampler found no manifest file_ids in the training split"
+            )
+
+        if weights is None:
+            weights = torch.ones(len(dataset_file_ids), dtype=torch.float32)
+        else:
+            weights = torch.as_tensor(weights, dtype=torch.float32).clone()
+            if weights.numel() != len(dataset_file_ids):
+                raise ValueError(
+                    "hard_negative_sampler weight count does not match dataset: "
+                    f"{weights.numel()} vs {len(dataset_file_ids)}"
+                )
+
+        target_prob = float(getattr(self.hparams, "hard_negative_prob", 0.15))
+        if not 0.0 < target_prob < 1.0:
+            raise ValueError("hard_negative_prob must be in (0, 1)")
+
+        hard_mass = weights[hard_mask].sum()
+        total_mass = weights.sum()
+        if hard_mass <= 0 or total_mass <= 0:
+            raise ValueError("hard_negative_sampler received non-positive weights")
+
+        current_prob = float((hard_mass / total_mass).item())
+        multiplier = 1.0
+        if current_prob < target_prob:
+            non_hard_mass = total_mass - hard_mass
+            multiplier = float(
+                target_prob * non_hard_mass / (hard_mass * (1.0 - target_prob))
+            )
+            weights[hard_mask] *= multiplier
+
+        final_prob = float((weights[hard_mask].sum() / weights.sum()).item())
+        print(
+            "Hard-negative sampler: "
+            f"{hard_count}/{len(dataset_file_ids)} train clips from manifest; "
+            f"sampling mass {current_prob:.3f} -> {final_prob:.3f}; "
+            f"multiplier {multiplier:.3f}"
+        )
+        return weights
 
     def train_dataloader(self):
         # # Balanced batch sampler
