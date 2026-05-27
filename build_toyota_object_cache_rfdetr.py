@@ -116,6 +116,16 @@ def build_parser():
     parser.add_argument("--num_shards", type=int, default=1)
     parser.add_argument("--shard_index", type=int, default=0)
     parser.add_argument(
+        "--inference_backend",
+        default="torch",
+        choices=["torch", "onnxruntime_trt"],
+        help="Detector runtime. onnxruntime_trt uses ONNX Runtime TensorRT EP.",
+    )
+    parser.add_argument("--onnx_model_path", default=None)
+    parser.add_argument("--onnx_trt_cache_dir", default=None)
+    parser.add_argument("--onnx_trt_fp16", type=int, default=1)
+    parser.add_argument("--onnx_topk", type=int, default=300)
+    parser.add_argument(
         "--optimize_for_inference",
         type=int,
         default=1,
@@ -309,6 +319,9 @@ def video_path_for_file_id(file_id, args, zip_index):
 
 
 def build_model(args):
+    if args.inference_backend == "onnxruntime_trt":
+        return OnnxRuntimeRFDETRDetector(args)
+
     _ensure_transformers_backbone_api()
     from rfdetr import (
         RFDETRBase,
@@ -345,6 +358,127 @@ def build_model(args):
         if optimized is not None:
             model = optimized
     return model
+
+
+class SimpleDetections:
+    def __init__(self, xyxy, confidence, class_id):
+        self.xyxy = xyxy.astype(np.float32, copy=False)
+        self.confidence = confidence.astype(np.float32, copy=False)
+        self.class_id = class_id.astype(np.int64, copy=False)
+
+
+class OnnxRuntimeRFDETRDetector:
+    def __init__(self, args):
+        if not args.onnx_model_path:
+            raise ValueError("onnxruntime_trt requires --onnx_model_path")
+        if not os.path.exists(args.onnx_model_path):
+            raise FileNotFoundError(args.onnx_model_path)
+
+        import onnxruntime as ort
+
+        cache_dir = args.onnx_trt_cache_dir or os.path.join(
+            os.path.dirname(args.onnx_model_path),
+            "ort_trt_cache",
+        )
+        os.makedirs(cache_dir, exist_ok=True)
+        provider_options = {
+            "trt_engine_cache_enable": True,
+            "trt_engine_cache_path": cache_dir,
+            "trt_fp16_enable": bool(args.onnx_trt_fp16),
+        }
+        providers = [
+            ("TensorrtExecutionProvider", provider_options),
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider",
+        ]
+        session_options = ort.SessionOptions()
+        self.session = ort.InferenceSession(
+            args.onnx_model_path,
+            sess_options=session_options,
+            providers=providers,
+        )
+        self.input_name = self.session.get_inputs()[0].name
+        input_shape = self.session.get_inputs()[0].shape
+        self.batch_size = int(args.batch_size)
+        self.height = int(input_shape[2])
+        self.width = int(input_shape[3])
+        if self.height <= 0 or self.width <= 0:
+            raise ValueError(f"ONNX model must have static H/W, got {input_shape}")
+        self.topk = int(args.onnx_topk)
+        self.mean = np.asarray([0.485, 0.456, 0.406], dtype=np.float32)
+        self.std = np.asarray([0.229, 0.224, 0.225], dtype=np.float32)
+        print(
+            "ONNX Runtime providers:",
+            self.session.get_providers(),
+            "input_shape:",
+            input_shape,
+        )
+
+    def _preprocess(self, image):
+        resized = cv2.resize(image, (self.width, self.height), interpolation=cv2.INTER_LINEAR)
+        array = resized.astype(np.float32) / 255.0
+        array = (array - self.mean) / self.std
+        return np.transpose(array, (2, 0, 1))
+
+    def predict(self, images, threshold=0.5):
+        if not isinstance(images, list):
+            images = [images]
+        original_len = len(images)
+        if original_len < self.batch_size:
+            images = images + [images[-1]] * (self.batch_size - original_len)
+        batch = np.stack([self._preprocess(image) for image in images]).astype(np.float32)
+        outputs = self.session.run(None, {self.input_name: batch})
+        boxes, logits = self._split_outputs(outputs)
+        detections = [
+            self._postprocess_single(boxes[idx], logits[idx], images[idx], threshold)
+            for idx in range(original_len)
+        ]
+        return detections if original_len > 1 else detections[0]
+
+    def _split_outputs(self, outputs):
+        if len(outputs) != 2:
+            raise RuntimeError(f"Expected two ONNX outputs, got {len(outputs)}")
+        first, second = outputs
+        if first.shape[-1] == 4:
+            return first, second
+        if second.shape[-1] == 4:
+            return second, first
+        raise RuntimeError(
+            "Could not identify RF-DETR ONNX boxes/logits outputs: "
+            f"{[output.shape for output in outputs]}"
+        )
+
+    def _postprocess_single(self, boxes_cxcywh, logits, image, threshold):
+        scores = 1.0 / (1.0 + np.exp(-logits.astype(np.float32)))
+        flat = scores.reshape(-1)
+        k = min(max(self.topk, 1), flat.size)
+        top_idx = np.argpartition(flat, -k)[-k:]
+        top_idx = top_idx[np.argsort(flat[top_idx])[::-1]]
+        conf = flat[top_idx]
+        keep = conf > float(threshold)
+        top_idx = top_idx[keep]
+        conf = conf[keep]
+        labels = (top_idx % scores.shape[1]).astype(np.int64)
+        query_idx = top_idx // scores.shape[1]
+        boxes = boxes_cxcywh[query_idx].astype(np.float32, copy=False)
+
+        cx, cy, bw, bh = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+        xyxy = np.stack(
+            [
+                cx - 0.5 * bw,
+                cy - 0.5 * bh,
+                cx + 0.5 * bw,
+                cy + 0.5 * bh,
+            ],
+            axis=1,
+        )
+        height, width = image.shape[:2]
+        scale = np.asarray([width, height, width, height], dtype=np.float32)
+        xyxy = xyxy * scale[None, :]
+        xyxy[:, [0, 2]] = np.clip(xyxy[:, [0, 2]], 0.0, float(width))
+        xyxy[:, [1, 3]] = np.clip(xyxy[:, [1, 3]], 0.0, float(height))
+        valid = (xyxy[:, 2] > xyxy[:, 0]) & (xyxy[:, 3] > xyxy[:, 1])
+        return SimpleDetections(xyxy[valid], conf[valid], labels[valid])
 
 
 def _ensure_transformers_backbone_api():
@@ -395,7 +529,9 @@ def _ensure_transformers_backbone_api():
 def coco_classes():
     from rfdetr.util.coco_classes import COCO_CLASSES
 
-    return {int(k): str(v) for k, v in COCO_CLASSES.items()}
+    if hasattr(COCO_CLASSES, "items"):
+        return {int(k): str(v) for k, v in COCO_CLASSES.items()}
+    return {int(idx): str(name) for idx, name in enumerate(COCO_CLASSES)}
 
 
 def mapped_object_name(detector_name):
@@ -492,13 +628,34 @@ def read_existing_keys(path):
     if not path or not os.path.exists(path):
         return set()
     keys = set()
+    valid_lines = []
+    needs_rewrite = False
     with open(path) as f:
-        for line in f:
-            line = line.strip()
+        for line_idx, raw_line in enumerate(f, start=1):
+            line = raw_line.strip()
             if not line:
                 continue
-            record = json.loads(line)
-            keys.add((record["file_id"], int(record["frame_idx"])))
+            try:
+                record = json.loads(line)
+                key = (record["file_id"], int(record["frame_idx"]))
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                print(
+                    f"Skipping malformed existing cache line {line_idx} in {path}",
+                    file=sys.stderr,
+                )
+                needs_rewrite = True
+                continue
+            if key in keys:
+                needs_rewrite = True
+                continue
+            keys.add(key)
+            valid_lines.append(raw_line if raw_line.endswith("\n") else raw_line + "\n")
+    if needs_rewrite:
+        tmp_path = f"{path}.{os.getpid()}.repair"
+        with open(tmp_path, "w") as f:
+            f.writelines(valid_lines)
+        os.replace(tmp_path, path)
+        print(f"Repaired existing cache file before resume: {path}")
     return keys
 
 
