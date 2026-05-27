@@ -309,6 +309,7 @@ def video_path_for_file_id(file_id, args, zip_index):
 
 
 def build_model(args):
+    _ensure_transformers_backbone_api()
     from rfdetr import (
         RFDETRBase,
         RFDETRLarge,
@@ -344,6 +345,30 @@ def build_model(args):
         if optimized is not None:
             model = optimized
     return model
+
+
+def _ensure_transformers_backbone_api():
+    try:
+        import transformers
+    except ImportError:
+        return
+
+    if hasattr(transformers, "BackboneConfigMixin") and hasattr(
+        transformers,
+        "BackboneMixin",
+    ):
+        return
+
+    try:
+        from transformers.utils.backbone_utils import (
+            BackboneConfigMixin,
+            BackboneMixin,
+        )
+    except ImportError:
+        return
+
+    transformers.BackboneConfigMixin = BackboneConfigMixin
+    transformers.BackboneMixin = BackboneMixin
 
 
 def coco_classes():
