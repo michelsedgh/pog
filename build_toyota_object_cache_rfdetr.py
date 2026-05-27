@@ -28,11 +28,29 @@ def build_parser():
         description="Build a Toyota object detector JSONL cache with RF-DETR."
     )
     parser.add_argument("--data_dir", default=".")
-    parser.add_argument("--set_type", default="train", choices=["train", "val", "test"])
+    parser.add_argument(
+        "--set_type",
+        default="train",
+        choices=["train", "val", "test", "all"],
+        help="Toyota split to cache. Use all for train+val, plus test when test fraction > 0.",
+    )
     parser.add_argument("--task_type", default="CS")
+    parser.add_argument(
+        "--toyota_frame_source",
+        default="auto",
+        choices=["auto", "frames", "mp4", "mp4_zip"],
+        help="Toyota input source. Use frames to match the extracted-frame training path.",
+    )
     parser.add_argument("--toyota_mp4_zip", default="toyota_smarthome_mp4.zip")
     parser.add_argument("--toyota_video_cache_dir", default=None)
     parser.add_argument("--toyota_frame_count_cache", default=None)
+    parser.add_argument(
+        "--toyota_split_source",
+        default="auto",
+        choices=["auto", "files"],
+    )
+    parser.add_argument("--toyota_val_fraction", type=float, default=0.15)
+    parser.add_argument("--toyota_test_fraction", type=float, default=0.20)
     parser.add_argument("--toyota_max_samples", type=int, default=64)
     parser.add_argument("--toyota_seed", type=int, default=42)
     parser.add_argument("--sample_seed", type=int, default=42)
@@ -95,7 +113,24 @@ def build_parser():
     parser.add_argument("--max_frames_per_clip", type=int, default=0)
     parser.add_argument("--resume", type=int, default=1)
     parser.add_argument("--limit_clips", type=int, default=0)
+    parser.add_argument("--num_shards", type=int, default=1)
+    parser.add_argument("--shard_index", type=int, default=0)
+    parser.add_argument(
+        "--optimize_for_inference",
+        type=int,
+        default=1,
+        help="Call RF-DETR optimize_for_inference() when the installed model exposes it.",
+    )
     return parser
+
+
+def selected_set_types(args):
+    if args.set_type != "all":
+        return [args.set_type]
+    set_types = ["train", "val"]
+    if float(args.toyota_test_fraction) > 0:
+        set_types.append("test")
+    return set_types
 
 
 def load_file_ids(args):
@@ -106,33 +141,38 @@ def load_file_ids(args):
         with open(args.file_ids_txt) as f:
             return [line.strip() for line in f if line.strip()]
 
-    ds = ToyotaSMDataset(
-        data_dir=args.data_dir,
-        set_type=args.set_type,
-        task_type=args.task_type,
-        n_frames=16,
-        n_frames_stride=1,
-        n_landmarks=0,
-        heatmap_agg=1,
-        jitter_scales_min=256,
-        jitter_scales_max=320,
-        actor_prompt=0,
-        object_prompt=0,
-        toyota_frame_source="auto",
-        toyota_mp4_zip=args.toyota_mp4_zip,
-        toyota_video_cache_dir=args.toyota_video_cache_dir,
-        toyota_frame_count_cache=args.toyota_frame_count_cache,
-        toyota_split_source="auto",
-        toyota_max_samples=args.toyota_max_samples,
-        toyota_seed=args.toyota_seed,
-    )
-    return ds.data_df.file_id.tolist()
+    file_ids = []
+    for set_type in selected_set_types(args):
+        ds = ToyotaSMDataset(
+            data_dir=args.data_dir,
+            set_type=set_type,
+            task_type=args.task_type,
+            n_frames=16,
+            n_frames_stride=1,
+            n_landmarks=0,
+            heatmap_agg=1,
+            jitter_scales_min=256,
+            jitter_scales_max=320,
+            actor_prompt=0,
+            object_prompt=0,
+            toyota_frame_source=args.toyota_frame_source,
+            toyota_mp4_zip=args.toyota_mp4_zip,
+            toyota_video_cache_dir=args.toyota_video_cache_dir,
+            toyota_frame_count_cache=args.toyota_frame_count_cache,
+            toyota_split_source=args.toyota_split_source,
+            toyota_val_fraction=args.toyota_val_fraction,
+            toyota_test_fraction=args.toyota_test_fraction,
+            toyota_max_samples=args.toyota_max_samples,
+            toyota_seed=args.toyota_seed,
+        )
+        file_ids.extend(ds.data_df.file_id.tolist())
+    return list(dict.fromkeys(file_ids))
 
 
-def build_sampling_dataset(args):
+def build_sampling_dataset(args, set_type):
     ds = ToyotaSMDataset(
         data_dir=args.data_dir,
-        set_type=args.set_type,
+        set_type=set_type,
         task_type=args.task_type,
         n_frames=args.n_frames,
         n_frames_stride=1,
@@ -143,11 +183,13 @@ def build_sampling_dataset(args):
         actor_prompt=1,
         num_actor_tokens=8,
         object_prompt=0,
-        toyota_frame_source="auto",
+        toyota_frame_source=args.toyota_frame_source,
         toyota_mp4_zip=args.toyota_mp4_zip,
         toyota_video_cache_dir=args.toyota_video_cache_dir,
         toyota_frame_count_cache=args.toyota_frame_count_cache,
-        toyota_split_source="auto",
+        toyota_split_source=args.toyota_split_source,
+        toyota_val_fraction=args.toyota_val_fraction,
+        toyota_test_fraction=args.toyota_test_fraction,
         toyota_max_samples=args.toyota_max_samples,
         toyota_seed=args.toyota_seed,
         toyota_synthetic_warmup_epochs=99,
@@ -217,11 +259,12 @@ def sampled_frame_indices(ds, idx):
 
 
 def sampled_frame_map(args):
-    ds = build_sampling_dataset(args)
     np.random.seed(args.sample_seed)
     frame_map = {}
-    for idx, file_id in enumerate(ds.data_df.file_id.tolist()):
-        frame_map[file_id] = set(sampled_frame_indices(ds, idx))
+    for set_type in selected_set_types(args):
+        ds = build_sampling_dataset(args, set_type)
+        for idx, file_id in enumerate(ds.data_df.file_id.tolist()):
+            frame_map[file_id] = set(sampled_frame_indices(ds, idx))
     return frame_map
 
 
@@ -295,7 +338,12 @@ def build_model(args):
         kwargs["pretrain_weights"] = args.weights
     if args.device:
         kwargs["device"] = args.device
-    return model_classes[args.model_size](**kwargs)
+    model = model_classes[args.model_size](**kwargs)
+    if args.optimize_for_inference and hasattr(model, "optimize_for_inference"):
+        optimized = model.optimize_for_inference()
+        if optimized is not None:
+            model = optimized
+    return model
 
 
 def coco_classes():
@@ -482,6 +530,65 @@ def iter_video_frames(video_path, frame_stride, max_frames):
         cap.release()
 
 
+def iter_image_frames(frame_folder, frame_stride, max_frames):
+    frame_files = sorted(
+        name
+        for name in os.listdir(frame_folder)
+        if name.lower().endswith((".jpg", ".jpeg", ".png"))
+    )
+    if not frame_files:
+        raise RuntimeError(f"No image frames found in {frame_folder}")
+
+    yielded = 0
+    for frame_idx, frame_name in enumerate(frame_files):
+        if frame_idx % frame_stride != 0:
+            continue
+        frame_path = os.path.join(frame_folder, frame_name)
+        frame_bgr = cv2.imread(frame_path, cv2.IMREAD_COLOR)
+        if frame_bgr is None:
+            raise RuntimeError(f"Could not read frame image: {frame_path}")
+        height, width = frame_bgr.shape[:2]
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        yield frame_idx, frame_rgb, width, height
+        yielded += 1
+        if max_frames > 0 and yielded >= max_frames:
+            break
+
+
+def iter_clip_frames(file_id, args, zip_index):
+    frame_folder = os.path.join(args.data_dir, "frames", file_id)
+    if args.toyota_frame_source in {"auto", "frames"} and os.path.isdir(
+        frame_folder
+    ):
+        return iter_image_frames(
+            frame_folder,
+            frame_stride=args.frame_stride,
+            max_frames=args.max_frames_per_clip,
+        )
+    if args.toyota_frame_source == "frames":
+        raise FileNotFoundError(f"No extracted frame folder found for {file_id}")
+
+    mp4_path = os.path.join(args.data_dir, "mp4", file_id + ".mp4")
+    if args.toyota_frame_source in {"auto", "mp4"} and os.path.exists(mp4_path):
+        return iter_video_frames(
+            mp4_path,
+            frame_stride=args.frame_stride,
+            max_frames=args.max_frames_per_clip,
+        )
+    if args.toyota_frame_source == "mp4":
+        raise FileNotFoundError(f"No mp4 found for {file_id}")
+
+    if args.toyota_frame_source in {"auto", "mp4_zip"}:
+        video_path = video_path_for_file_id(file_id, args, zip_index)
+        return iter_video_frames(
+            video_path,
+            frame_stride=args.frame_stride,
+            max_frames=args.max_frames_per_clip,
+        )
+
+    raise FileNotFoundError(f"No supported frame source found for {file_id}")
+
+
 def build_cache(args):
     if args.frame_stride <= 0:
         raise ValueError("frame_stride must be positive")
@@ -489,11 +596,22 @@ def build_cache(args):
         raise ValueError("batch_size must be positive")
     if args.sampled_frames_only and args.frame_stride != 1:
         raise ValueError("sampled_frames_only requires frame_stride=1")
+    if args.num_shards <= 0:
+        raise ValueError("num_shards must be positive")
+    if not 0 <= args.shard_index < args.num_shards:
+        raise ValueError("shard_index must satisfy 0 <= shard_index < num_shards")
 
     selected_frames = sampled_frame_map(args) if args.sampled_frames_only else {}
     file_ids = list(selected_frames.keys()) if selected_frames else load_file_ids(args)
+    file_ids = sorted(file_ids)
     if args.limit_clips > 0:
         file_ids = file_ids[: args.limit_clips]
+    if args.num_shards > 1:
+        file_ids = [
+            file_id
+            for pos, file_id in enumerate(file_ids)
+            if pos % args.num_shards == args.shard_index
+        ]
     if not file_ids:
         raise RuntimeError("No Toyota clips selected for object cache generation.")
 
@@ -511,19 +629,22 @@ def build_cache(args):
     print("Object class thresholds:", object_thresholds)
     print("Object camera allowlist:", object_camera_allowlist)
     print("Object ignore regions:", object_ignore_regions)
+    print(
+        f"Selected {len(file_ids)} clips for shard "
+        f"{args.shard_index + 1}/{args.num_shards}."
+    )
 
     total_frames = 0
     total_objects = 0
     with open(args.output, mode) as writer:
         for clip_pos, file_id in enumerate(file_ids, start=1):
-            video_path = video_path_for_file_id(file_id, args, zip_index)
             batch = []
             clip_frames = 0
             clip_objects = 0
-            for frame_idx, image, width, height in iter_video_frames(
-                video_path,
-                frame_stride=args.frame_stride,
-                max_frames=args.max_frames_per_clip,
+            for frame_idx, image, width, height in iter_clip_frames(
+                file_id,
+                args,
+                zip_index,
             ):
                 if selected_frames and int(frame_idx) not in selected_frames[file_id]:
                     continue
