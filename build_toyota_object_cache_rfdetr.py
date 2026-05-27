@@ -348,6 +348,8 @@ def build_model(args):
 
 
 def _ensure_transformers_backbone_api():
+    import inspect
+
     try:
         import transformers
     except ImportError:
@@ -369,6 +371,25 @@ def _ensure_transformers_backbone_api():
 
     transformers.BackboneConfigMixin = BackboneConfigMixin
     transformers.BackboneMixin = BackboneMixin
+
+    init_fn = getattr(BackboneMixin, "_init_transformers_backbone", None)
+    if init_fn is None or getattr(init_fn, "_poguise_compat", False):
+        return
+    try:
+        signature = inspect.signature(init_fn)
+    except (TypeError, ValueError):
+        return
+    config_param = signature.parameters.get("config")
+    if config_param is None or config_param.default is not inspect.Signature.empty:
+        return
+
+    def _compat_init_transformers_backbone(self, config=None, *args, **kwargs):
+        if config is None:
+            config = getattr(self, "config", None)
+        return init_fn(self, config, *args, **kwargs)
+
+    _compat_init_transformers_backbone._poguise_compat = True
+    BackboneMixin._init_transformers_backbone = _compat_init_transformers_backbone
 
 
 def coco_classes():
