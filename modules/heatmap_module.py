@@ -154,8 +154,9 @@ class HeatmapModule(pl.LightningModule):
                 "model.object_relation_query_norm",
                 "model.object_relation_token_norm",
                 "model.object_relation_attn",
-                "model.object_relation_norm",
+                "model.object_relation_delta_norm",
                 "model.object_relation_delta",
+                "model.object_relation_interaction_norm",
                 "model.object_relation_gate_logit",
                 "model.interaction_head",
             ]
@@ -228,8 +229,9 @@ class HeatmapModule(pl.LightningModule):
             + list(self.model.object_relation_query_norm.parameters())
             + list(self.model.object_relation_token_norm.parameters())
             + list(self.model.object_relation_attn.parameters())
-            + list(self.model.object_relation_norm.parameters())
+            + list(self.model.object_relation_delta_norm.parameters())
             + list(self.model.object_relation_delta.parameters())
+            + list(self.model.object_relation_interaction_norm.parameters())
             + [self.model.object_relation_gate_logit]
             + list(self.model.interaction_head.parameters())
         )

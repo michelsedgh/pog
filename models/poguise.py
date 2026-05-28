@@ -384,18 +384,18 @@ class POGUISE(pl.LightningModule):
             num_heads=relation_heads,
             batch_first=True,
         )
-        self.object_relation_norm = nn.LayerNorm(dim * 3)
+        self.object_relation_delta_norm = nn.LayerNorm(dim * 2)
         self.object_relation_delta = nn.Sequential(
-            nn.Linear(dim * 3, hidden_dim),
+            nn.Linear(dim * 2, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, self.hparams.num_classes),
         )
+        self.object_relation_interaction_norm = nn.LayerNorm(dim * 3)
         self.object_relation_gate_logit = nn.Parameter(
             torch.logit(torch.tensor(gate_init, dtype=torch.float32))
         )
         self.interaction_head = nn.Sequential(
-            nn.LayerNorm(dim * 3),
             nn.Linear(dim * 3, num_object_classes + 1),
         )
 
@@ -416,8 +416,9 @@ class POGUISE(pl.LightningModule):
             self.object_relation_query_norm,
             self.object_relation_token_norm,
             self.object_relation_attn,
-            self.object_relation_norm,
+            self.object_relation_delta_norm,
             self.object_relation_delta,
+            self.object_relation_interaction_norm,
             self.interaction_head,
         )
 
@@ -506,20 +507,29 @@ class POGUISE(pl.LightningModule):
         none_conf = object_conf.new_ones((batch_size, 1))
         none_valid = object_valid.new_ones((batch_size, 1))
 
-        object_boxes = torch.cat([object_boxes, none_boxes], dim=1)
-        object_cls = torch.cat([object_cls, none_cls], dim=1)
-        object_conf = torch.cat([object_conf, none_conf], dim=1)
-        object_valid = torch.cat([object_valid, none_valid], dim=1)
+        real_object_valid = object_valid
+        object_boxes_with_null = torch.cat([object_boxes, none_boxes], dim=1)
+        object_cls_with_null = torch.cat([object_cls, none_cls], dim=1)
+        object_conf_with_null = torch.cat([object_conf, none_conf], dim=1)
+        object_valid_with_null = torch.cat([object_valid, none_valid], dim=1)
 
-        object_cls = object_cls.clamp(0, self.num_object_classes)
-        object_cls = object_cls.masked_fill(~object_valid, self.num_object_classes)
-        object_feat = (
-            self.object_cls_embed(object_cls).to(dtype=actor_feat.dtype)
-            + self.object_bbox_mlp(object_boxes)
-            + self.object_conf_mlp(object_conf.unsqueeze(-1))
-            + self.object_valid_embed(object_valid.long()).to(dtype=actor_feat.dtype)
+        object_cls_with_null = object_cls_with_null.clamp(0, self.num_object_classes)
+        object_cls_with_null = object_cls_with_null.masked_fill(
+            ~object_valid_with_null,
+            self.num_object_classes,
         )
-        relation_geometry = self._object_relation_geometry(actor_boxes, object_boxes)
+        object_feat = (
+            self.object_cls_embed(object_cls_with_null).to(dtype=actor_feat.dtype)
+            + self.object_bbox_mlp(object_boxes_with_null)
+            + self.object_conf_mlp(object_conf_with_null.unsqueeze(-1))
+            + self.object_valid_embed(object_valid_with_null.long()).to(
+                dtype=actor_feat.dtype
+            )
+        )
+        relation_geometry = self._object_relation_geometry(
+            actor_boxes,
+            object_boxes_with_null,
+        )
         pair_object_feat = object_feat[:, None, :, :] + self.object_relation_geom_mlp(
             relation_geometry
         )
@@ -532,12 +542,12 @@ class POGUISE(pl.LightningModule):
         )
         key_value = self.object_relation_token_norm(
             pair_object_feat.to(dtype=query.dtype)
-        ).reshape(batch_size * num_actors, object_valid.shape[1], -1)
-        key_padding_mask = ~object_valid[:, None, :].expand(
+        ).reshape(batch_size * num_actors, object_valid_with_null.shape[1], -1)
+        key_padding_mask = ~object_valid_with_null[:, None, :].expand(
             batch_size,
             num_actors,
-            object_valid.shape[1],
-        ).reshape(batch_size * num_actors, object_valid.shape[1])
+            object_valid_with_null.shape[1],
+        ).reshape(batch_size * num_actors, object_valid_with_null.shape[1])
         context, _ = self.object_relation_attn(
             query=query,
             key=key_value,
@@ -548,13 +558,34 @@ class POGUISE(pl.LightningModule):
         context = context.reshape(batch_size, num_actors, -1).to(
             dtype=actor_feat.dtype
         )
-        relation_feat = torch.cat(
+
+        null_key_value = key_value[:, -1:, :]
+        null_context, _ = self.object_relation_attn(
+            query=query,
+            key=null_key_value,
+            value=null_key_value,
+            need_weights=False,
+        )
+        null_context = null_context.reshape(batch_size, num_actors, -1).to(
+            dtype=actor_feat.dtype
+        )
+        object_effect = context - null_context
+        has_real_objects = real_object_valid.any(dim=1).to(dtype=actor_feat.dtype)
+        object_effect = object_effect * has_real_objects[:, None, None]
+
+        delta_feat = torch.cat(
+            [object_effect, actor_feat * object_effect],
+            dim=-1,
+        )
+        delta_feat = self.object_relation_delta_norm(delta_feat)
+        delta = self.object_relation_delta(delta_feat)
+
+        interaction_feat = torch.cat(
             [actor_feat, context, actor_feat * context],
             dim=-1,
         )
-        relation_feat = self.object_relation_norm(relation_feat)
-        delta = self.object_relation_delta(relation_feat)
-        interaction_logits = self.interaction_head(relation_feat)
+        interaction_feat = self.object_relation_interaction_norm(interaction_feat)
+        interaction_logits = self.interaction_head(interaction_feat)
         return delta, interaction_logits
 
     def forward(
