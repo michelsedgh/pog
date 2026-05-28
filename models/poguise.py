@@ -445,6 +445,13 @@ class POGUISE(pl.LightningModule):
             )
         normalized = self.object_summary_norm(object_summary)
         delta = self.object_summary_delta(normalized)
+        if action_logits.ndim == 3:
+            delta = delta[:, None, :]
+        elif action_logits.ndim != 2:
+            raise ValueError(
+                "action_logits must have shape [B,C] or [B,A,C], "
+                f"got {tuple(action_logits.shape)}"
+            )
         gate = torch.sigmoid(self.object_summary_gate_logit).to(
             device=action_logits.device,
             dtype=action_logits.dtype,
