@@ -1,4 +1,5 @@
 import torch.nn as nn
+import torch.nn.functional as F
 import pytorch_lightning as pl
 from argparse import ArgumentParser
 from blocks.poguise import vit_base_patch16_224
@@ -201,6 +202,7 @@ class POGUISE(pl.LightningModule):
                 object_bbox_prior_expand=self.hparams.get(
                     "object_bbox_prior_expand", 1.25
                 ),
+                return_heatmap_features=self.object_prompt,
             )
         else:
             self.net = vit_base_patch16_224(
@@ -237,6 +239,7 @@ class POGUISE(pl.LightningModule):
                 object_bbox_prior_expand=self.hparams.get(
                     "object_bbox_prior_expand", 1.25
                 ),
+                return_heatmap_features=self.object_prompt,
             )
         if self.hparams.pretrained == "DEFAULT":
             if os.path.exists("vit_b_k710_dl_from_giant.pth"):
@@ -364,62 +367,46 @@ class POGUISE(pl.LightningModule):
             nn.GELU(),
             nn.Linear(dim, dim),
         )
-        self.object_relation_geom_mlp = nn.Sequential(
-            nn.Linear(10, dim),
+        self.object_visual_mlp = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, dim),
             nn.GELU(),
             nn.Linear(dim, dim),
         )
-        self.object_valid_embed = nn.Embedding(2, dim)
-        relation_heads = int(self.hparams.get("object_relation_heads", 8))
-        if dim % relation_heads != 0:
-            raise ValueError(
-                "object_relation_heads must divide model dimension "
-                f"({relation_heads} does not divide {dim})"
-            )
-
-        self.object_relation_query_norm = nn.LayerNorm(dim)
-        self.object_relation_token_norm = nn.LayerNorm(dim)
-        self.object_relation_attn = nn.MultiheadAttention(
-            embed_dim=dim,
-            num_heads=relation_heads,
-            batch_first=True,
+        self.object_selector = nn.Sequential(
+            nn.LayerNorm(dim * 3 + 10),
+            nn.Linear(dim * 3 + 10, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1),
         )
-        self.object_relation_delta_norm = nn.LayerNorm(dim * 2)
+        self.object_relation_delta_norm = nn.LayerNorm(dim * 4)
         self.object_relation_delta = nn.Sequential(
-            nn.Linear(dim * 2, hidden_dim),
+            nn.Linear(dim * 4, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, self.hparams.num_classes),
         )
-        self.object_relation_interaction_norm = nn.LayerNorm(dim * 3)
+        self.object_valid_embed = nn.Embedding(2, dim)
         self.object_relation_gate_logit = nn.Parameter(
             torch.logit(torch.tensor(gate_init, dtype=torch.float32))
-        )
-        self.interaction_head = nn.Sequential(
-            nn.Linear(dim * 3, num_object_classes + 1),
         )
 
         nn.init.normal_(self.object_cls_embed.weight, std=0.02)
         nn.init.normal_(self.object_valid_embed.weight, std=0.02)
         nn.init.zeros_(self.object_relation_delta[-1].weight)
         nn.init.zeros_(self.object_relation_delta[-1].bias)
-        nn.init.normal_(self.interaction_head[-1].weight, std=0.02)
-        nn.init.zeros_(self.interaction_head[-1].bias)
 
     def _object_relation_modules(self):
         return (
             self.object_cls_embed,
             self.object_bbox_mlp,
             self.object_conf_mlp,
-            self.object_relation_geom_mlp,
+            self.object_visual_mlp,
+            self.object_selector,
             self.object_valid_embed,
-            self.object_relation_query_norm,
-            self.object_relation_token_norm,
-            self.object_relation_attn,
             self.object_relation_delta_norm,
             self.object_relation_delta,
-            self.object_relation_interaction_norm,
-            self.interaction_head,
         )
 
     def _apply_object_dropout(self, object_valid):
@@ -474,9 +461,111 @@ class POGUISE(pl.LightningModule):
             dim=-1,
         )
 
+    def _pool_boxes_from_feature_map(self, feature_map, boxes, valid):
+        batch_size, num_objects, _ = boxes.shape
+        dim = self.net.num_features
+        if feature_map is None:
+            return boxes.new_zeros((batch_size, num_objects, dim))
+
+        feature_map = feature_map.to(device=boxes.device, dtype=boxes.dtype)
+        _, channels, _, _ = feature_map.shape
+        boxes = boxes.clamp(0.0, 1.0)
+        valid = valid.to(device=boxes.device, dtype=torch.bool)
+        offsets = torch.tensor(
+            [1.0 / 6.0, 0.5, 5.0 / 6.0],
+            device=boxes.device,
+            dtype=boxes.dtype,
+        )
+        pooled = []
+        for slot in range(num_objects):
+            slot_boxes = boxes[:, slot]
+            xs = slot_boxes[:, 0:1] + offsets[None, :] * (
+                slot_boxes[:, 2:3] - slot_boxes[:, 0:1]
+            ).clamp_min(1e-4)
+            ys = slot_boxes[:, 1:2] + offsets[None, :] * (
+                slot_boxes[:, 3:4] - slot_boxes[:, 1:2]
+            ).clamp_min(1e-4)
+            grid_y, grid_x = torch.meshgrid(
+                torch.arange(3, device=boxes.device),
+                torch.arange(3, device=boxes.device),
+                indexing="ij",
+            )
+            sample_x = xs[:, grid_x.reshape(-1)]
+            sample_y = ys[:, grid_y.reshape(-1)]
+            grid = torch.stack(
+                [sample_x * 2.0 - 1.0, sample_y * 2.0 - 1.0],
+                dim=-1,
+            ).reshape(batch_size, 3, 3, 2)
+            sampled = F.grid_sample(
+                feature_map,
+                grid,
+                mode="bilinear",
+                padding_mode="zeros",
+                align_corners=False,
+            )
+            pooled.append(sampled.mean(dim=(2, 3)))
+
+        pooled = torch.stack(pooled, dim=1)
+        pooled = pooled * valid[:, :, None].to(dtype=pooled.dtype)
+        if channels != dim:
+            raise ValueError(
+                f"Feature map channel count {channels} does not match model dim {dim}"
+            )
+        return pooled
+
+    def _build_interaction_heatmap(self, object_alpha, object_boxes, object_valid, size):
+        height, width = [int(v) for v in size]
+        if height <= 0 or width <= 0:
+            raise ValueError(f"Invalid interaction heatmap size: {size}")
+
+        object_boxes = object_boxes.clamp(0.0, 1.0)
+        object_valid = object_valid.to(device=object_boxes.device, dtype=torch.bool)
+        real_alpha = object_alpha[..., : object_boxes.shape[1]]
+        real_alpha = real_alpha * object_valid[:, None, :].to(dtype=real_alpha.dtype)
+
+        y = (
+            torch.arange(height, device=object_boxes.device, dtype=object_boxes.dtype)
+            + 0.5
+        ) / float(height)
+        x = (
+            torch.arange(width, device=object_boxes.device, dtype=object_boxes.dtype)
+            + 0.5
+        ) / float(width)
+        grid_y, grid_x = torch.meshgrid(y, x, indexing="ij")
+        grid_x = grid_x.reshape(1, 1, 1, height, width)
+        grid_y = grid_y.reshape(1, 1, 1, height, width)
+
+        center = (object_boxes[..., :2] + object_boxes[..., 2:]) * 0.5
+        size_xy = (object_boxes[..., 2:] - object_boxes[..., :2]).clamp_min(1e-4)
+        sigma = (size_xy * 0.5).clamp_min(1.0 / float(max(height, width)))
+        cx = center[:, None, :, 0:1, None]
+        cy = center[:, None, :, 1:2, None]
+        sx = sigma[:, None, :, 0:1, None]
+        sy = sigma[:, None, :, 1:2, None]
+        object_maps = torch.exp(
+            -0.5 * (((grid_x - cx) / sx) ** 2 + ((grid_y - cy) / sy) ** 2)
+        )
+        heatmap = (real_alpha[:, :, :, None, None] * object_maps).sum(dim=2)
+        return heatmap.clamp(0.0, 1.0)
+
+    def _pool_interaction_context(self, feature_map, interaction_heatmap):
+        if feature_map is None:
+            batch_size, num_actors = interaction_heatmap.shape[:2]
+            return interaction_heatmap.new_zeros(
+                (batch_size, num_actors, self.net.num_features)
+            )
+        feature_map = feature_map.to(
+            device=interaction_heatmap.device,
+            dtype=interaction_heatmap.dtype,
+        )
+        weights = interaction_heatmap.clamp_min(0.0)
+        denom = weights.flatten(2).sum(dim=-1).clamp_min(1e-6)
+        return torch.einsum("bkhw,bchw->bkc", weights, feature_map) / denom[:, :, None]
+
     def _object_relation(
         self,
         actor_feat,
+        spatial_feat=None,
         actor_boxes=None,
         object_boxes=None,
         object_cls=None,
@@ -487,10 +576,14 @@ class POGUISE(pl.LightningModule):
             zero_delta = actor_feat.new_zeros(
                 (*actor_feat.shape[:2], self.hparams.num_classes)
             )
-            zero_interaction = actor_feat.new_zeros(
-                (*actor_feat.shape[:2], self.num_object_classes + 1)
+            num_object_tokens = int(self.hparams.get("num_object_tokens", 0))
+            zero_selection = actor_feat.new_zeros(
+                (*actor_feat.shape[:2], num_object_tokens + 1)
             )
-            return zero_delta, zero_interaction
+            zero_heatmap = actor_feat.new_zeros(
+                (*actor_feat.shape[:2], *self.net.HW_OUT_CONV)
+            )
+            return zero_delta, zero_selection, zero_heatmap
         if object_cls is None or object_conf is None or object_valid is None:
             raise ValueError(
                 "object_boxes, object_cls, object_conf, and object_valid must be passed together"
@@ -507,7 +600,6 @@ class POGUISE(pl.LightningModule):
         none_conf = object_conf.new_ones((batch_size, 1))
         none_valid = object_valid.new_ones((batch_size, 1))
 
-        real_object_valid = object_valid
         object_boxes_with_null = torch.cat([object_boxes, none_boxes], dim=1)
         object_cls_with_null = torch.cat([object_cls, none_cls], dim=1)
         object_conf_with_null = torch.cat([object_conf, none_conf], dim=1)
@@ -526,67 +618,74 @@ class POGUISE(pl.LightningModule):
                 dtype=actor_feat.dtype
             )
         )
+        object_visual = self._pool_boxes_from_feature_map(
+            spatial_feat,
+            object_boxes,
+            object_valid,
+        )
+        null_visual = object_visual.new_zeros((batch_size, 1, object_visual.shape[-1]))
+        object_visual = torch.cat([object_visual, null_visual], dim=1)
+        object_feat = object_feat + self.object_visual_mlp(object_visual)
+
         relation_geometry = self._object_relation_geometry(
             actor_boxes,
             object_boxes_with_null,
         )
-        pair_object_feat = object_feat[:, None, :, :] + self.object_relation_geom_mlp(
-            relation_geometry
-        )
-
         num_actors = actor_feat.shape[1]
-        query = self.object_relation_query_norm(actor_feat).reshape(
-            batch_size * num_actors,
-            1,
+        actor_pair = actor_feat[:, :, None, :].expand(
+            -1,
+            -1,
+            object_feat.shape[1],
             -1,
         )
-        key_value = self.object_relation_token_norm(
-            pair_object_feat.to(dtype=query.dtype)
-        ).reshape(batch_size * num_actors, object_valid_with_null.shape[1], -1)
-        key_padding_mask = ~object_valid_with_null[:, None, :].expand(
-            batch_size,
+        object_pair = object_feat[:, None, :, :].expand(
+            -1,
             num_actors,
-            object_valid_with_null.shape[1],
-        ).reshape(batch_size * num_actors, object_valid_with_null.shape[1])
-        context, _ = self.object_relation_attn(
-            query=query,
-            key=key_value,
-            value=key_value,
-            key_padding_mask=key_padding_mask,
-            need_weights=False,
+            -1,
+            -1,
         )
-        context = context.reshape(batch_size, num_actors, -1).to(
-            dtype=actor_feat.dtype
-        )
-
-        null_key_value = key_value[:, -1:, :]
-        null_context, _ = self.object_relation_attn(
-            query=query,
-            key=null_key_value,
-            value=null_key_value,
-            need_weights=False,
-        )
-        null_context = null_context.reshape(batch_size, num_actors, -1).to(
-            dtype=actor_feat.dtype
-        )
-        object_effect = context - null_context
-        has_real_objects = real_object_valid.any(dim=1).to(dtype=actor_feat.dtype)
-        object_effect = object_effect * has_real_objects[:, None, None]
-
-        delta_feat = torch.cat(
-            [object_effect, actor_feat * object_effect],
+        selector_input = torch.cat(
+            [actor_pair, object_pair, actor_pair * object_pair, relation_geometry],
             dim=-1,
         )
-        delta_feat = self.object_relation_delta_norm(delta_feat)
-        delta = self.object_relation_delta(delta_feat)
+        selection_logits = self.object_selector(selector_input).squeeze(-1)
+        selection_logits = selection_logits.masked_fill(
+            ~object_valid_with_null[:, None, :],
+            torch.finfo(selection_logits.dtype).min,
+        )
 
-        interaction_feat = torch.cat(
-            [actor_feat, context, actor_feat * context],
+        object_alpha = torch.softmax(selection_logits.float(), dim=-1).to(
+            dtype=actor_feat.dtype
+        )
+        real_alpha = object_alpha[..., : object_boxes.shape[1]]
+        real_alpha = real_alpha * object_valid[:, None, :].to(dtype=actor_feat.dtype)
+        selected_context = torch.einsum(
+            "bkm,bmd->bkd",
+            real_alpha,
+            object_feat[:, : object_boxes.shape[1], :],
+        )
+        interaction_heatmap = self._build_interaction_heatmap(
+            object_alpha,
+            object_boxes,
+            object_valid,
+            self.net.HW_OUT_CONV,
+        )
+        visual_context = self._pool_interaction_context(
+            spatial_feat,
+            interaction_heatmap,
+        )
+        action_feat = torch.cat(
+            [
+                selected_context,
+                visual_context,
+                actor_feat * selected_context,
+                actor_feat * visual_context,
+            ],
             dim=-1,
         )
-        interaction_feat = self.object_relation_interaction_norm(interaction_feat)
-        interaction_logits = self.interaction_head(interaction_feat)
-        return delta, interaction_logits
+        action_feat = self.object_relation_delta_norm(action_feat)
+        delta = self.object_relation_delta(action_feat)
+        return delta, selection_logits, interaction_heatmap
 
     def forward(
         self,
@@ -604,7 +703,7 @@ class POGUISE(pl.LightningModule):
             object_valid = self._apply_object_dropout(object_valid)
         if self.actor_prompt:
             if self.hparams.n_landmarks > 0 or self.object_prompt:
-                _, x_actor, x_heatmap = self.net(
+                net_data = self.net(
                     x,
                     boxes=boxes,
                     valid=valid,
@@ -612,6 +711,11 @@ class POGUISE(pl.LightningModule):
                     object_valid=object_valid,
                     object_conf=object_conf,
                 )
+                if len(net_data) == 4:
+                    _, x_actor, x_heatmap, x_spatial = net_data
+                else:
+                    _, x_actor, x_heatmap = net_data
+                    x_spatial = None
             else:
                 data = self.net(
                     x,
@@ -623,12 +727,18 @@ class POGUISE(pl.LightningModule):
                 )
                 _, x_actor = data
                 x_heatmap = 0
+                x_spatial = None
             if self.hparams.ret_feat:
                 return x_actor
             action_logits = self.actor_head(x_actor)
             if self.object_prompt:
-                object_delta, interaction_logits = self._object_relation(
+                (
+                    object_delta,
+                    selection_logits,
+                    interaction_heatmap,
+                ) = self._object_relation(
                     x_actor,
+                    spatial_feat=x_spatial,
                     actor_boxes=boxes,
                     object_boxes=object_boxes,
                     object_cls=object_cls,
@@ -641,14 +751,27 @@ class POGUISE(pl.LightningModule):
                 )
                 action_logits = action_logits + gate * object_delta
             else:
-                interaction_logits = None
+                selection_logits = None
+                interaction_heatmap = None
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
                 if self.object_prompt:
-                    return action_logits, x_heatmap, presence_logits, interaction_logits
+                    return (
+                        action_logits,
+                        x_heatmap,
+                        presence_logits,
+                        selection_logits,
+                        interaction_heatmap,
+                    )
                 return action_logits, x_heatmap, presence_logits
             if self.object_prompt:
-                return action_logits, x_heatmap, None, interaction_logits
+                return (
+                    action_logits,
+                    x_heatmap,
+                    None,
+                    selection_logits,
+                    interaction_heatmap,
+                )
             return action_logits, x_heatmap
         if self.hparams.n_landmarks > 0:
             x_class, x_heatmap = self.net(x)
@@ -715,8 +838,12 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--object_relation_hidden_dim", type=int, default=512)
         parser.add_argument("--object_relation_dropout", type=float, default=0.1)
         parser.add_argument("--object_relation_gate_init", type=float, default=0.25)
-        parser.add_argument("--object_relation_heads", type=int, default=8)
         parser.add_argument("--object_relation_only", type=int, default=0)
+        parser.add_argument(
+            "--object_interaction_heatmap_weight",
+            type=float,
+            default=0.0,
+        )
         parser.add_argument("--ret_feat", type=int, default=0)
         parser.add_argument("--linear_probe", type=int, default=0)
 

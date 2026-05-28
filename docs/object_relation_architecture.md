@@ -20,14 +20,16 @@ Use one object path:
 1. Keep actor slots as the main action representation.
 2. Keep detector boxes/classes/confidences as object tokens.
 3. Append an explicit `NONE` object token for objectless or uncertain actions.
-4. Let every actor slot query all object tokens with cross-attention.
-5. Build relation features from `[actor, attended_object_context, actor * attended_object_context]`.
-6. Predict:
-   - an action-logit residual added to the actor logits through one scalar gate;
-   - an auxiliary interacted-object class for each actor slot.
-7. Evaluate object usefulness with real objects, objects-off, and objects-shuffled. A useful object path must make real objects beat both off and shuffled on macro accuracy and F1.
+4. Pool object visual features from the PO-GUISE heatmap-token feature map at each detected object box.
+5. Score every actor/object pair with `[actor, object, actor * object, geometry]`.
+6. Train object selection with a positive object-token set, not a single guessed instance. For example, `Uselaptop` accepts any detected laptop token for that actor.
+7. Build an actor-conditioned interaction heatmap from the selected object distribution.
+8. Pool visual context through that interaction heatmap.
+9. Predict an action-logit residual from object-conditioned features only:
+   `[selected_object_context, interaction_visual_context, actor * selected_object_context, actor * interaction_visual_context]`.
+10. Evaluate object usefulness with real objects, objects-off, and objects-shuffled. A useful object path must make real objects beat both off and shuffled on macro accuracy and F1.
 
-This is intentionally not an action-class prior. The model sees all detected objects and learns relevance from actor features, object class, object location, confidence, and the interacted-object auxiliary target.
+This is intentionally not an action-class prior or object-existence shortcut. The model sees all detected objects, then learns which object token and spatial region explain each actor's action.
 
 ## Training Modes
 
@@ -43,6 +45,7 @@ Suggested settings:
 - `--object_relation_hidden_dim 512`
 - `--object_relation_dropout 0.1`
 - `--object_interaction_loss_weight 0.2`
+- `--object_interaction_heatmap_weight 50`
 - `--object_heatmap_weight 0`
 - `--kp_loss_weight 0`
 - `--lr_head 3e-4`
@@ -53,11 +56,12 @@ Acceptance signal:
 - `val_acc_macro_objects_on > val_acc_macro_objects_off`
 - `val_acc_macro_objects_on > val_acc_macro_objects_shuffled`
 - `val_f1_objects_on >= val_f1_objects_off - 0.003`
+- `val_interaction_select_mass_object` increases for strong object actions.
 - object-related groups improve without a broad F1 collapse.
 
 ### Full fine-tune
 
-Only after the diagnostic passes, unfreeze the normal actor path and keep object heatmap/token-pruning guidance on. This trains the final integrated model rather than another blind architecture experiment.
+Only after the relation-only diagnostic passes, unfreeze the normal actor path and keep visible-object heatmaps/token-pruning guidance on. This trains the final integrated model rather than another blind architecture experiment.
 
 ## Rejected Path
 

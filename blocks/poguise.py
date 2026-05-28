@@ -803,6 +803,7 @@ class VisionTransformer(nn.Module):
         num_object_classes=0,
         object_bbox_prior_weight=0.0,
         object_bbox_prior_expand=1.25,
+        return_heatmap_features=False,
         **kwargs,
     ):
         super().__init__()
@@ -840,6 +841,7 @@ class VisionTransformer(nn.Module):
             raise ValueError("num_object_classes must be non-negative")
         self.object_bbox_prior_weight = float(object_bbox_prior_weight)
         self.object_bbox_prior_expand = float(object_bbox_prior_expand)
+        self.return_heatmap_features = bool(return_heatmap_features)
         if self.object_bbox_prior_weight < 0:
             raise ValueError("object_bbox_prior_weight must be non-negative")
         if self.object_bbox_prior_expand <= 0:
@@ -1216,10 +1218,17 @@ class VisionTransformer(nn.Module):
             if self.n_actor_tokens > 0:
                 return x_class, x_actor
             return x_class
-        x_heatmap = x_heatmap.reshape(B, *self.HW_OUT_CONV, -1).permute(0, 3, 1, 2)
-        x_heatmap = tuple([0, x_heatmap])
+        x_heatmap_feat = x_heatmap.reshape(B, *self.HW_OUT_CONV, -1).permute(
+            0,
+            3,
+            1,
+            2,
+        )
+        x_heatmap = tuple([0, x_heatmap_feat])
         x_heatmap = self.heatmap_head(x_heatmap)
         if self.n_actor_tokens > 0:
+            if self.return_heatmap_features:
+                return x_class, x_actor, x_heatmap, x_heatmap_feat
             return x_class, x_actor, x_heatmap
         return x_class, x_heatmap
 
