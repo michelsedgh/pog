@@ -24,10 +24,11 @@ Use one object path:
 5. Score every actor/object pair with `[actor, object, actor * object, geometry]`.
 6. Train object selection with a positive object-token set, not a single guessed instance. For example, `Uselaptop` accepts any detected laptop token for that actor.
 7. Build an actor-conditioned interaction heatmap from the selected object distribution.
-8. Pool visual context through that interaction heatmap.
-9. Predict an action-logit residual from object-conditioned features only:
+8. Supervise that interaction heatmap at the same 56x56 resolution as the PO-GUISE pose/object heatmaps. Downsample a copy only when pooling from the internal heatmap-token feature grid.
+9. Pool visual context through that interaction heatmap.
+10. Predict an action-logit residual from object-conditioned features only:
    `[selected_object_context, interaction_visual_context, actor * selected_object_context, actor * interaction_visual_context]`.
-10. Evaluate object usefulness with real objects, objects-off, and objects-shuffled. A useful object path must make real objects beat both off and shuffled on macro accuracy and F1.
+11. Evaluate object usefulness with real objects, objects-off, and objects-shuffled. A useful object path must make real objects beat both off and shuffled on macro accuracy and F1.
 
 This is intentionally not an action-class prior or object-existence shortcut. The model sees all detected objects, then learns which object token and spatial region explain each actor's action.
 

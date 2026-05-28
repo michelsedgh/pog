@@ -355,6 +355,13 @@ class POGUISE(pl.LightningModule):
         gate_init = float(self.hparams.get("object_relation_gate_init", 0.25))
         if not 0 < gate_init < 1:
             raise ValueError("object_relation_gate_init must be in (0, 1)")
+        interaction_heatmap_size = int(self.hparams.get("object_heatmap_size", 56))
+        if interaction_heatmap_size != 56:
+            raise ValueError("object interaction heatmaps are trained at 56x56")
+        self.interaction_heatmap_size = (
+            interaction_heatmap_size,
+            interaction_heatmap_size,
+        )
 
         self.object_cls_embed = nn.Embedding(num_object_classes + 1, dim)
         self.object_bbox_mlp = nn.Sequential(
@@ -581,7 +588,7 @@ class POGUISE(pl.LightningModule):
                 (*actor_feat.shape[:2], num_object_tokens + 1)
             )
             zero_heatmap = actor_feat.new_zeros(
-                (*actor_feat.shape[:2], *self.net.HW_OUT_CONV)
+                (*actor_feat.shape[:2], *self.interaction_heatmap_size)
             )
             return zero_delta, zero_selection, zero_heatmap
         if object_cls is None or object_conf is None or object_valid is None:
@@ -668,11 +675,21 @@ class POGUISE(pl.LightningModule):
             object_alpha,
             object_boxes,
             object_valid,
-            self.net.HW_OUT_CONV,
+            self.interaction_heatmap_size,
+        )
+        interaction_heatmap_for_pool = F.interpolate(
+            interaction_heatmap.flatten(0, 1).unsqueeze(1),
+            size=self.net.HW_OUT_CONV,
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(1).reshape(
+            batch_size,
+            num_actors,
+            *self.net.HW_OUT_CONV,
         )
         visual_context = self._pool_interaction_context(
             spatial_feat,
-            interaction_heatmap,
+            interaction_heatmap_for_pool,
         )
         action_feat = torch.cat(
             [

@@ -758,14 +758,10 @@ class HeatmapModule(pl.LightningModule):
                         dtype=interaction_heatmap.dtype,
                     )
                     if target_heatmap.shape[-2:] != interaction_heatmap.shape[-2:]:
-                        target_heatmap = F.interpolate(
-                            target_heatmap.flatten(0, 1).unsqueeze(1),
-                            size=interaction_heatmap.shape[-2:],
-                            mode="bilinear",
-                            align_corners=False,
-                        ).squeeze(1).reshape(
-                            *target_heatmap.shape[:2],
-                            *interaction_heatmap.shape[-2:],
+                        raise RuntimeError(
+                            "interaction_heatmap target/prediction size mismatch: "
+                            f"{target_heatmap.shape[-2:]} vs "
+                            f"{interaction_heatmap.shape[-2:]}"
                         )
                     loss_interaction_heatmap = F.mse_loss(
                         interaction_heatmap[heatmap_valid],
