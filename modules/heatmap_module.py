@@ -1038,6 +1038,55 @@ class HeatmapModule(pl.LightningModule):
         labels = target["actions"].long()
         return preds[valid], labels[valid]
 
+    def _classification_margin(self, logits, labels):
+        true_logits = logits.gather(1, labels[:, None]).squeeze(1)
+        other_logits = logits.clone()
+        other_logits.scatter_(1, labels[:, None], -torch.inf)
+        return true_logits - other_logits.max(dim=1).values
+
+    def _log_object_delta_metrics(self, normal_logits, labels, off=None, shuffled=None):
+        if labels.numel() == 0:
+            return
+
+        normal_true = normal_logits.gather(1, labels[:, None]).squeeze(1)
+        normal_margin = self._classification_margin(normal_logits, labels)
+
+        for mode_name, mode_data in (("off", off), ("shuffled", shuffled)):
+            if mode_data is None:
+                continue
+            mode_logits, mode_labels = mode_data
+            if mode_logits.shape != normal_logits.shape or not torch.equal(
+                mode_labels,
+                labels,
+            ):
+                raise ValueError(
+                    f"Object {mode_name} diagnostic returned misaligned logits/labels"
+                )
+
+            mode_true = mode_logits.gather(1, labels[:, None]).squeeze(1)
+            mode_margin = self._classification_margin(mode_logits, labels)
+            pred_changed = normal_logits.argmax(dim=1) != mode_logits.argmax(dim=1)
+            self._log_scalar(
+                f"val_object_delta_l1_on_vs_{mode_name}",
+                (normal_logits - mode_logits).abs().mean(),
+                normal_logits.numel(),
+            )
+            self._log_scalar(
+                f"val_object_true_logit_gain_on_vs_{mode_name}",
+                (normal_true - mode_true).mean(),
+                labels.numel(),
+            )
+            self._log_scalar(
+                f"val_object_margin_gain_on_vs_{mode_name}",
+                (normal_margin - mode_margin).mean(),
+                labels.numel(),
+            )
+            self._log_scalar(
+                f"val_object_pred_changed_on_vs_{mode_name}",
+                pred_changed.float().mean(),
+                labels.numel(),
+            )
+
     def _log_object_ablation_eval(self, imgs, target, normal_preds, labels):
         if not self.object_prompt:
             return
@@ -1088,6 +1137,9 @@ class HeatmapModule(pl.LightningModule):
                 sync_dist=True,
             )
             self._log_group_metrics("val_{group}_objects_off", off_preds, off_labels)
+        else:
+            off_preds = None
+            off_labels = None
 
         shuffled = self._actor_preds_for_object_mode(imgs, target, "shuffled")
         if shuffled is not None:
@@ -1117,6 +1169,20 @@ class HeatmapModule(pl.LightningModule):
                 shuffled_preds,
                 shuffled_labels,
             )
+        else:
+            shuffled_preds = None
+            shuffled_labels = None
+
+        off_data = None if off_preds is None else (off_preds, off_labels)
+        shuffled_data = (
+            None if shuffled_preds is None else (shuffled_preds, shuffled_labels)
+        )
+        self._log_object_delta_metrics(
+            normal_preds,
+            labels,
+            off=off_data,
+            shuffled=shuffled_data,
+        )
 
     def training_step(self, batch, batch_idx):
         # "batch" is the output of the training data loader.
