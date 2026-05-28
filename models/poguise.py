@@ -9,7 +9,11 @@ import os
 import os.path
 import pickle
 
-from datasets.object_vocab import OBJECT_SUMMARY_FEATURE_DIM
+from datasets.object_vocab import (
+    OBJECT_SUMMARY_FEATURE_DIM,
+    object_summary_action_gate_prior,
+    object_summary_action_object_matrix,
+)
 
 
 from collections import OrderedDict
@@ -376,6 +380,44 @@ class POGUISE(pl.LightningModule):
             torch.logit(torch.tensor(gate_init, dtype=torch.float32))
         )
         self.interaction_head = nn.Linear(dim, num_object_classes + 1)
+        gate_prior = torch.tensor(
+            object_summary_action_gate_prior(
+                task_type=self.hparams.get("task_type", "CS"),
+                num_classes=self.hparams.num_classes,
+            ),
+            dtype=torch.float32,
+        )
+        action_object_matrix = torch.tensor(
+            object_summary_action_object_matrix(
+                task_type=self.hparams.get("task_type", "CS"),
+                num_classes=self.hparams.num_classes,
+            ),
+            dtype=torch.float32,
+        )
+        if gate_prior.numel() != self.hparams.num_classes:
+            raise ValueError(
+                "object summary gate prior size "
+                f"{gate_prior.numel()} does not match num_classes={self.hparams.num_classes}"
+            )
+        if action_object_matrix.shape != (
+            self.hparams.num_classes,
+            num_object_classes,
+        ):
+            raise ValueError(
+                "object summary action-object matrix shape "
+                f"{tuple(action_object_matrix.shape)} does not match "
+                f"({self.hparams.num_classes}, {num_object_classes})"
+            )
+        self.register_buffer(
+            "object_summary_action_gate_prior",
+            gate_prior,
+            persistent=False,
+        )
+        self.register_buffer(
+            "object_summary_action_object_matrix",
+            action_object_matrix,
+            persistent=False,
+        )
 
         nn.init.zeros_(self.object_summary_delta[-1].weight)
         nn.init.zeros_(self.object_summary_delta[-1].bias)
@@ -445,6 +487,27 @@ class POGUISE(pl.LightningModule):
             )
         normalized = self.object_summary_norm(object_summary)
         delta = self.object_summary_delta(normalized)
+        if self.hparams.get("object_summary_action_gate", 1):
+            summary = object_summary.view(
+                object_summary.shape[0],
+                OBJECT_SUMMARY_FEATURE_DIM,
+                self.num_object_classes,
+            )
+            max_conf = summary[:, 1].clamp(0.0, 1.0)
+            frame_frac = summary[:, 3].clamp(0.0, 1.0)
+            object_signal = max_conf * torch.sqrt(frame_frac.clamp_min(1e-6))
+            evidence = (
+                object_signal[:, None, :]
+                * self.object_summary_action_object_matrix.to(
+                    device=object_signal.device,
+                    dtype=object_signal.dtype,
+                )[None, :, :]
+            ).amax(dim=-1)
+            action_gate = self.object_summary_action_gate_prior.to(
+                device=delta.device,
+                dtype=delta.dtype,
+            )
+            delta = delta * evidence.to(dtype=delta.dtype) * action_gate[None, :]
         if action_logits.ndim == 3:
             delta = delta[:, None, :]
         elif action_logits.ndim != 2:
@@ -580,6 +643,7 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--object_summary_dropout", type=float, default=0.15)
         parser.add_argument("--object_summary_gate_init", type=float, default=0.12)
         parser.add_argument("--object_summary_delta_only", type=int, default=0)
+        parser.add_argument("--object_summary_action_gate", type=int, default=1)
         parser.add_argument("--ret_feat", type=int, default=0)
         parser.add_argument("--linear_probe", type=int, default=0)
 
