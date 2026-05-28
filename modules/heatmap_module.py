@@ -126,6 +126,12 @@ class HeatmapModule(pl.LightningModule):
             self.val_acc_macro_objects_shuffled = torchmetrics.Accuracy(
                 task="multiclass", num_classes=hparams.num_classes, average="macro"
             )
+            self.val_acc_macro_summary_off = torchmetrics.Accuracy(
+                task="multiclass", num_classes=hparams.num_classes, average="macro"
+            )
+            self.val_acc_macro_summary_shuffled = torchmetrics.Accuracy(
+                task="multiclass", num_classes=hparams.num_classes, average="macro"
+            )
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
         result = super().load_state_dict(state_dict, strict=strict, assign=assign)
@@ -279,6 +285,9 @@ class HeatmapModule(pl.LightningModule):
             kwargs["object_valid"] = torch.zeros_like(kwargs["object_valid"])
             kwargs["object_summary"] = torch.zeros_like(kwargs["object_summary"])
             return kwargs
+        if mode == "summary_off":
+            kwargs["object_summary"] = torch.zeros_like(kwargs["object_summary"])
+            return kwargs
         if mode == "shuffled":
             batch_size = kwargs["object_valid"].shape[0]
             if batch_size < 2:
@@ -287,6 +296,12 @@ class HeatmapModule(pl.LightningModule):
                 key: value.roll(shifts=1, dims=0)
                 for key, value in kwargs.items()
             }
+        if mode == "summary_shuffled":
+            batch_size = kwargs["object_summary"].shape[0]
+            if batch_size < 2:
+                return None
+            kwargs["object_summary"] = kwargs["object_summary"].roll(shifts=1, dims=0)
+            return kwargs
         raise ValueError(f"Unsupported object mode: {mode}")
 
     def _pose_heatmap_pred(self, hm_preds):
@@ -1062,6 +1077,41 @@ class HeatmapModule(pl.LightningModule):
                 "val_{group}_objects_shuffled",
                 shuffled_preds,
                 shuffled_labels,
+            )
+
+        summary_off = self._actor_preds_for_object_mode(imgs, target, "summary_off")
+        if summary_off is not None:
+            summary_off_preds, summary_off_labels = summary_off
+            self.val_acc_macro_summary_off(summary_off_preds, summary_off_labels)
+            self.log(
+                "val_acc_macro_summary_off",
+                self.val_acc_macro_summary_off,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+
+        summary_shuffled = self._actor_preds_for_object_mode(
+            imgs,
+            target,
+            "summary_shuffled",
+        )
+        if summary_shuffled is not None:
+            summary_shuffled_preds, summary_shuffled_labels = summary_shuffled
+            self.val_acc_macro_summary_shuffled(
+                summary_shuffled_preds,
+                summary_shuffled_labels,
+            )
+            self.log(
+                "val_acc_macro_summary_shuffled",
+                self.val_acc_macro_summary_shuffled,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
             )
 
     def training_step(self, batch, batch_idx):
