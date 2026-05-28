@@ -132,6 +132,12 @@ class HeatmapModule(pl.LightningModule):
             self.val_acc_macro_summary_shuffled = torchmetrics.Accuracy(
                 task="multiclass", num_classes=hparams.num_classes, average="macro"
             )
+            self.val_f1_summary_off = torchmetrics.F1Score(
+                num_classes=hparams.num_classes, average="macro", task="multiclass"
+            )
+            self.val_f1_summary_shuffled = torchmetrics.F1Score(
+                num_classes=hparams.num_classes, average="macro", task="multiclass"
+            )
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
         result = super().load_state_dict(state_dict, strict=strict, assign=assign)
@@ -1092,6 +1098,16 @@ class HeatmapModule(pl.LightningModule):
                 logger=True,
                 sync_dist=True,
             )
+            self.val_f1_summary_off(summary_off_preds, summary_off_labels)
+            self.log(
+                "val_f1_summary_off",
+                self.val_f1_summary_off,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
 
         summary_shuffled = self._actor_preds_for_object_mode(
             imgs,
@@ -1107,6 +1123,19 @@ class HeatmapModule(pl.LightningModule):
             self.log(
                 "val_acc_macro_summary_shuffled",
                 self.val_acc_macro_summary_shuffled,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+            self.val_f1_summary_shuffled(
+                summary_shuffled_preds,
+                summary_shuffled_labels,
+            )
+            self.log(
+                "val_f1_summary_shuffled",
+                self.val_f1_summary_shuffled,
                 on_step=False,
                 on_epoch=True,
                 prog_bar=False,
