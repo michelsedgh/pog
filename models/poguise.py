@@ -9,13 +9,6 @@ import os
 import os.path
 import pickle
 
-from datasets.object_vocab import (
-    OBJECT_SUMMARY_FEATURE_DIM,
-    object_summary_action_gate_prior,
-    object_summary_action_object_matrix,
-)
-
-
 from collections import OrderedDict
 import json
 
@@ -152,11 +145,11 @@ class POGUISE(pl.LightningModule):
         self.object_prompt = bool(self.hparams.get("object_prompt", 0))
         if self.object_prompt and not self.actor_prompt:
             raise ValueError("object_prompt requires actor_prompt")
-        if self.hparams.get("object_summary_delta_only", 0):
+        if self.hparams.get("object_relation_only", 0):
             if not self.object_prompt:
-                raise ValueError("object_summary_delta_only requires object_prompt")
+                raise ValueError("object_relation_only requires object_prompt")
             if not self.hparams.get("freeze_backbone", 0):
-                raise ValueError("object_summary_delta_only requires freeze_backbone")
+                raise ValueError("object_relation_only requires freeze_backbone")
         for prob_name in ("object_dropout_prob", "object_token_dropout_prob"):
             prob_value = float(self.hparams.get(prob_name, 0.0))
             if not 0 <= prob_value <= 1:
@@ -292,17 +285,14 @@ class POGUISE(pl.LightningModule):
         if (
             self.actor_prompt
             and self.object_prompt
-            and self.hparams.get("object_summary_delta_only", 0)
+            and self.hparams.get("object_relation_only", 0)
         ):
             for param in self.parameters():
                 param.requires_grad = False
-            for module in (
-                self.object_summary_norm,
-                self.object_summary_delta,
-            ):
+            for module in self._object_relation_modules():
                 for param in module.parameters():
                     param.requires_grad = True
-            self.object_summary_gate_logit.requires_grad = True
+            self.object_relation_gate_logit.requires_grad = True
             return
 
         # Freeze the backbone
@@ -328,14 +318,10 @@ class POGUISE(pl.LightningModule):
                 for param in self.presence_head.parameters():
                     param.requires_grad = True
             if self.object_prompt:
-                for module in (
-                    self.object_summary_norm,
-                    self.object_summary_delta,
-                    self.interaction_head,
-                ):
+                for module in self._object_relation_modules():
                     for param in module.parameters():
                         param.requires_grad = True
-                self.object_summary_gate_logit.requires_grad = True
+                self.object_relation_gate_logit.requires_grad = True
 
     def _freeze_stages(self):
         if self.frozen_stages >= 0:
@@ -357,72 +343,83 @@ class POGUISE(pl.LightningModule):
             raise ValueError("object_prompt requires num_object_classes > 0")
         dim = self.net.num_features
         self.num_object_classes = num_object_classes
-        summary_dim = OBJECT_SUMMARY_FEATURE_DIM * num_object_classes
-        hidden_dim = int(self.hparams.get("object_summary_hidden_dim", 256))
+        hidden_dim = int(self.hparams.get("object_relation_hidden_dim", 512))
         if hidden_dim <= 0:
-            raise ValueError("object_summary_hidden_dim must be positive")
-        dropout = float(self.hparams.get("object_summary_dropout", 0.15))
+            raise ValueError("object_relation_hidden_dim must be positive")
+        dropout = float(self.hparams.get("object_relation_dropout", 0.1))
         if not 0 <= dropout < 1:
-            raise ValueError("object_summary_dropout must be in [0, 1)")
-        gate_init = float(self.hparams.get("object_summary_gate_init", 0.12))
+            raise ValueError("object_relation_dropout must be in [0, 1)")
+        gate_init = float(self.hparams.get("object_relation_gate_init", 0.25))
         if not 0 < gate_init < 1:
-            raise ValueError("object_summary_gate_init must be in (0, 1)")
+            raise ValueError("object_relation_gate_init must be in (0, 1)")
 
-        self.object_summary_dim = summary_dim
-        self.object_summary_norm = nn.LayerNorm(summary_dim)
-        self.object_summary_delta = nn.Sequential(
-            nn.Linear(summary_dim, hidden_dim),
+        self.object_cls_embed = nn.Embedding(num_object_classes + 1, dim)
+        self.object_bbox_mlp = nn.Sequential(
+            nn.Linear(4, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim),
+        )
+        self.object_conf_mlp = nn.Sequential(
+            nn.Linear(1, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim),
+        )
+        self.object_relation_geom_mlp = nn.Sequential(
+            nn.Linear(10, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim),
+        )
+        self.object_valid_embed = nn.Embedding(2, dim)
+        relation_heads = int(self.hparams.get("object_relation_heads", 8))
+        if dim % relation_heads != 0:
+            raise ValueError(
+                "object_relation_heads must divide model dimension "
+                f"({relation_heads} does not divide {dim})"
+            )
+
+        self.object_relation_query_norm = nn.LayerNorm(dim)
+        self.object_relation_token_norm = nn.LayerNorm(dim)
+        self.object_relation_attn = nn.MultiheadAttention(
+            embed_dim=dim,
+            num_heads=relation_heads,
+            batch_first=True,
+        )
+        self.object_relation_norm = nn.LayerNorm(dim * 3)
+        self.object_relation_delta = nn.Sequential(
+            nn.Linear(dim * 3, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, self.hparams.num_classes),
         )
-        self.object_summary_gate_logit = nn.Parameter(
+        self.object_relation_gate_logit = nn.Parameter(
             torch.logit(torch.tensor(gate_init, dtype=torch.float32))
         )
-        self.interaction_head = nn.Linear(dim, num_object_classes + 1)
-        gate_prior = torch.tensor(
-            object_summary_action_gate_prior(
-                task_type=self.hparams.get("task_type", "CS"),
-                num_classes=self.hparams.num_classes,
-            ),
-            dtype=torch.float32,
-        )
-        action_object_matrix = torch.tensor(
-            object_summary_action_object_matrix(
-                task_type=self.hparams.get("task_type", "CS"),
-                num_classes=self.hparams.num_classes,
-            ),
-            dtype=torch.float32,
-        )
-        if gate_prior.numel() != self.hparams.num_classes:
-            raise ValueError(
-                "object summary gate prior size "
-                f"{gate_prior.numel()} does not match num_classes={self.hparams.num_classes}"
-            )
-        if action_object_matrix.shape != (
-            self.hparams.num_classes,
-            num_object_classes,
-        ):
-            raise ValueError(
-                "object summary action-object matrix shape "
-                f"{tuple(action_object_matrix.shape)} does not match "
-                f"({self.hparams.num_classes}, {num_object_classes})"
-            )
-        self.register_buffer(
-            "object_summary_action_gate_prior",
-            gate_prior,
-            persistent=False,
-        )
-        self.register_buffer(
-            "object_summary_action_object_matrix",
-            action_object_matrix,
-            persistent=False,
+        self.interaction_head = nn.Sequential(
+            nn.LayerNorm(dim * 3),
+            nn.Linear(dim * 3, num_object_classes + 1),
         )
 
-        nn.init.zeros_(self.object_summary_delta[-1].weight)
-        nn.init.zeros_(self.object_summary_delta[-1].bias)
-        nn.init.zeros_(self.interaction_head.weight)
-        nn.init.zeros_(self.interaction_head.bias)
+        nn.init.normal_(self.object_cls_embed.weight, std=0.02)
+        nn.init.normal_(self.object_valid_embed.weight, std=0.02)
+        nn.init.zeros_(self.object_relation_delta[-1].weight)
+        nn.init.zeros_(self.object_relation_delta[-1].bias)
+        nn.init.normal_(self.interaction_head[-1].weight, std=0.02)
+        nn.init.zeros_(self.interaction_head[-1].bias)
+
+    def _object_relation_modules(self):
+        return (
+            self.object_cls_embed,
+            self.object_bbox_mlp,
+            self.object_conf_mlp,
+            self.object_relation_geom_mlp,
+            self.object_valid_embed,
+            self.object_relation_query_norm,
+            self.object_relation_token_norm,
+            self.object_relation_attn,
+            self.object_relation_norm,
+            self.object_relation_delta,
+            self.interaction_head,
+        )
 
     def _apply_object_dropout(self, object_valid):
         if object_valid is None or not self.training:
@@ -443,83 +440,122 @@ class POGUISE(pl.LightningModule):
             object_valid = object_valid & ~drop_each
         return object_valid
 
-    def _apply_object_summary_dropout(self, object_summary):
-        if object_summary is None or not self.training:
-            return object_summary
-        object_summary = object_summary.clone()
-        object_dropout_prob = float(self.hparams.get("object_dropout_prob", 0.0))
-        object_token_dropout_prob = float(
-            self.hparams.get("object_token_dropout_prob", 0.0)
-        )
-        if object_dropout_prob > 0:
-            if torch.rand((), device=object_summary.device) < object_dropout_prob:
-                object_summary.zero_()
-        if object_token_dropout_prob > 0:
-            summary = object_summary.view(
-                object_summary.shape[0],
-                OBJECT_SUMMARY_FEATURE_DIM,
-                self.num_object_classes,
-            )
-            drop_cls = (
-                torch.rand(
-                    summary.shape[0],
-                    1,
-                    summary.shape[2],
-                    device=summary.device,
-                )
-                < object_token_dropout_prob
-            )
-            summary = summary.masked_fill(drop_cls, 0.0)
-            object_summary = summary.reshape(object_summary.shape)
-        return object_summary
+    def _object_relation_geometry(self, actor_boxes, object_boxes):
+        batch_size, num_objects, _ = object_boxes.shape
+        if actor_boxes is None:
+            num_actors = int(self.hparams.get("num_actor_tokens", 0))
+            return object_boxes.new_zeros((batch_size, num_actors, num_objects, 10))
 
-    def _object_summary_fusion(self, action_logits, object_summary=None):
-        if object_summary is None:
-            return action_logits
-        object_summary = object_summary.to(
-            device=action_logits.device,
-            dtype=action_logits.dtype,
+        actor_boxes = actor_boxes.to(
+            device=object_boxes.device,
+            dtype=object_boxes.dtype,
         )
-        if object_summary.ndim != 2 or object_summary.shape[1] != self.object_summary_dim:
-            raise ValueError(
-                "object_summary must have shape "
-                f"[B,{self.object_summary_dim}], got {tuple(object_summary.shape)}"
-            )
-        normalized = self.object_summary_norm(object_summary)
-        delta = self.object_summary_delta(normalized)
-        if self.hparams.get("object_summary_action_gate", 1):
-            summary = object_summary.view(
-                object_summary.shape[0],
-                OBJECT_SUMMARY_FEATURE_DIM,
-                self.num_object_classes,
-            )
-            max_conf = summary[:, 1].clamp(0.0, 1.0)
-            frame_frac = summary[:, 3].clamp(0.0, 1.0)
-            object_signal = max_conf * torch.sqrt(frame_frac.clamp_min(1e-6))
-            evidence = (
-                object_signal[:, None, :]
-                * self.object_summary_action_object_matrix.to(
-                    device=object_signal.device,
-                    dtype=object_signal.dtype,
-                )[None, :, :]
-            ).amax(dim=-1)
-            action_gate = self.object_summary_action_gate_prior.to(
-                device=delta.device,
-                dtype=delta.dtype,
-            )
-            delta = delta * evidence.to(dtype=delta.dtype) * action_gate[None, :]
-        if action_logits.ndim == 3:
-            delta = delta[:, None, :]
-        elif action_logits.ndim != 2:
-            raise ValueError(
-                "action_logits must have shape [B,C] or [B,A,C], "
-                f"got {tuple(action_logits.shape)}"
-            )
-        gate = torch.sigmoid(self.object_summary_gate_logit).to(
-            device=action_logits.device,
-            dtype=action_logits.dtype,
+        actor_boxes = actor_boxes.clamp(0.0, 1.0)
+        object_boxes = object_boxes.clamp(0.0, 1.0)
+
+        actor_center = (actor_boxes[..., :2] + actor_boxes[..., 2:]) * 0.5
+        actor_size = (actor_boxes[..., 2:] - actor_boxes[..., :2]).clamp_min(1e-4)
+        object_center = (object_boxes[..., :2] + object_boxes[..., 2:]) * 0.5
+        object_size = (object_boxes[..., 2:] - object_boxes[..., :2]).clamp_min(1e-4)
+
+        actor_center_pair = actor_center[:, :, None, :]
+        actor_size_pair = actor_size[:, :, None, :]
+        object_center_pair = object_center[:, None, :, :]
+        object_size_pair = object_size[:, None, :, :]
+        return torch.cat(
+            [
+                object_center_pair - actor_center_pair,
+                torch.log(object_size_pair / actor_size_pair),
+                object_center_pair.expand(-1, actor_boxes.shape[1], -1, -1),
+                object_size_pair.expand(-1, actor_boxes.shape[1], -1, -1),
+                actor_center_pair.expand(-1, -1, num_objects, -1),
+            ],
+            dim=-1,
         )
-        return action_logits + gate * delta
+
+    def _object_relation(
+        self,
+        actor_feat,
+        actor_boxes=None,
+        object_boxes=None,
+        object_cls=None,
+        object_conf=None,
+        object_valid=None,
+    ):
+        if object_boxes is None:
+            zero_delta = actor_feat.new_zeros(
+                (*actor_feat.shape[:2], self.hparams.num_classes)
+            )
+            zero_interaction = actor_feat.new_zeros(
+                (*actor_feat.shape[:2], self.num_object_classes + 1)
+            )
+            return zero_delta, zero_interaction
+        if object_cls is None or object_conf is None or object_valid is None:
+            raise ValueError(
+                "object_boxes, object_cls, object_conf, and object_valid must be passed together"
+            )
+
+        object_valid = object_valid.to(device=actor_feat.device, dtype=torch.bool)
+        object_boxes = object_boxes.to(device=actor_feat.device, dtype=actor_feat.dtype)
+        object_cls = object_cls.to(device=actor_feat.device).long()
+        object_conf = object_conf.to(device=actor_feat.device, dtype=actor_feat.dtype)
+
+        batch_size = actor_feat.shape[0]
+        none_boxes = object_boxes.new_zeros((batch_size, 1, 4))
+        none_cls = object_cls.new_full((batch_size, 1), self.num_object_classes)
+        none_conf = object_conf.new_ones((batch_size, 1))
+        none_valid = object_valid.new_ones((batch_size, 1))
+
+        object_boxes = torch.cat([object_boxes, none_boxes], dim=1)
+        object_cls = torch.cat([object_cls, none_cls], dim=1)
+        object_conf = torch.cat([object_conf, none_conf], dim=1)
+        object_valid = torch.cat([object_valid, none_valid], dim=1)
+
+        object_cls = object_cls.clamp(0, self.num_object_classes)
+        object_cls = object_cls.masked_fill(~object_valid, self.num_object_classes)
+        object_feat = (
+            self.object_cls_embed(object_cls).to(dtype=actor_feat.dtype)
+            + self.object_bbox_mlp(object_boxes)
+            + self.object_conf_mlp(object_conf.unsqueeze(-1))
+            + self.object_valid_embed(object_valid.long()).to(dtype=actor_feat.dtype)
+        )
+        relation_geometry = self._object_relation_geometry(actor_boxes, object_boxes)
+        pair_object_feat = object_feat[:, None, :, :] + self.object_relation_geom_mlp(
+            relation_geometry
+        )
+
+        num_actors = actor_feat.shape[1]
+        query = self.object_relation_query_norm(actor_feat).reshape(
+            batch_size * num_actors,
+            1,
+            -1,
+        )
+        key_value = self.object_relation_token_norm(
+            pair_object_feat.to(dtype=query.dtype)
+        ).reshape(batch_size * num_actors, object_valid.shape[1], -1)
+        key_padding_mask = ~object_valid[:, None, :].expand(
+            batch_size,
+            num_actors,
+            object_valid.shape[1],
+        ).reshape(batch_size * num_actors, object_valid.shape[1])
+        context, _ = self.object_relation_attn(
+            query=query,
+            key=key_value,
+            value=key_value,
+            key_padding_mask=key_padding_mask,
+            need_weights=False,
+        )
+        context = context.reshape(batch_size, num_actors, -1).to(
+            dtype=actor_feat.dtype
+        )
+        relation_feat = torch.cat(
+            [actor_feat, context, actor_feat * context],
+            dim=-1,
+        )
+        relation_feat = self.object_relation_norm(relation_feat)
+        delta = self.object_relation_delta(relation_feat)
+        interaction_logits = self.interaction_head(relation_feat)
+        return delta, interaction_logits
 
     def forward(
         self,
@@ -530,13 +566,11 @@ class POGUISE(pl.LightningModule):
         object_cls=None,
         object_conf=None,
         object_valid=None,
-        object_summary=None,
     ):
         # convert to b c t h w
         x = x.permute(0, 2, 1, 3, 4)
         if self.object_prompt:
             object_valid = self._apply_object_dropout(object_valid)
-            object_summary = self._apply_object_summary_dropout(object_summary)
         if self.actor_prompt:
             if self.hparams.n_landmarks > 0 or self.object_prompt:
                 _, x_actor, x_heatmap = self.net(
@@ -562,13 +596,21 @@ class POGUISE(pl.LightningModule):
                 return x_actor
             action_logits = self.actor_head(x_actor)
             if self.object_prompt:
-                action_logits = self._object_summary_fusion(
-                    action_logits,
-                    object_summary=object_summary,
+                object_delta, interaction_logits = self._object_relation(
+                    x_actor,
+                    actor_boxes=boxes,
+                    object_boxes=object_boxes,
+                    object_cls=object_cls,
+                    object_conf=object_conf,
+                    object_valid=object_valid,
                 )
-            interaction_logits = (
-                self.interaction_head(x_actor) if self.object_prompt else None
-            )
+                gate = torch.sigmoid(self.object_relation_gate_logit).to(
+                    device=action_logits.device,
+                    dtype=action_logits.dtype,
+                )
+                action_logits = action_logits + gate * object_delta
+            else:
+                interaction_logits = None
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
                 if self.object_prompt:
@@ -639,11 +681,11 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--object_bbox_prior_expand", type=float, default=1.25)
         parser.add_argument("--object_dropout_prob", type=float, default=0.0)
         parser.add_argument("--object_token_dropout_prob", type=float, default=0.0)
-        parser.add_argument("--object_summary_hidden_dim", type=int, default=256)
-        parser.add_argument("--object_summary_dropout", type=float, default=0.15)
-        parser.add_argument("--object_summary_gate_init", type=float, default=0.12)
-        parser.add_argument("--object_summary_delta_only", type=int, default=0)
-        parser.add_argument("--object_summary_action_gate", type=int, default=1)
+        parser.add_argument("--object_relation_hidden_dim", type=int, default=512)
+        parser.add_argument("--object_relation_dropout", type=float, default=0.1)
+        parser.add_argument("--object_relation_gate_init", type=float, default=0.25)
+        parser.add_argument("--object_relation_heads", type=int, default=8)
+        parser.add_argument("--object_relation_only", type=int, default=0)
         parser.add_argument("--ret_feat", type=int, default=0)
         parser.add_argument("--linear_probe", type=int, default=0)
 

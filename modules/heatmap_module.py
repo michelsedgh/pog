@@ -120,22 +120,19 @@ class HeatmapModule(pl.LightningModule):
             self.val_acc_macro_objects_on = torchmetrics.Accuracy(
                 task="multiclass", num_classes=hparams.num_classes, average="macro"
             )
+            self.val_f1_objects_on = torchmetrics.F1Score(
+                num_classes=hparams.num_classes, average="macro", task="multiclass"
+            )
             self.val_acc_macro_objects_off = torchmetrics.Accuracy(
                 task="multiclass", num_classes=hparams.num_classes, average="macro"
+            )
+            self.val_f1_objects_off = torchmetrics.F1Score(
+                num_classes=hparams.num_classes, average="macro", task="multiclass"
             )
             self.val_acc_macro_objects_shuffled = torchmetrics.Accuracy(
                 task="multiclass", num_classes=hparams.num_classes, average="macro"
             )
-            self.val_acc_macro_summary_off = torchmetrics.Accuracy(
-                task="multiclass", num_classes=hparams.num_classes, average="macro"
-            )
-            self.val_acc_macro_summary_shuffled = torchmetrics.Accuracy(
-                task="multiclass", num_classes=hparams.num_classes, average="macro"
-            )
-            self.val_f1_summary_off = torchmetrics.F1Score(
-                num_classes=hparams.num_classes, average="macro", task="multiclass"
-            )
-            self.val_f1_summary_shuffled = torchmetrics.F1Score(
+            self.val_f1_objects_shuffled = torchmetrics.F1Score(
                 num_classes=hparams.num_classes, average="macro", task="multiclass"
             )
 
@@ -149,9 +146,17 @@ class HeatmapModule(pl.LightningModule):
                 "model.net.bbox_mlp",
                 "model.actor_head",
                 "model.presence_head",
-                "model.object_summary_norm",
-                "model.object_summary_delta",
-                "model.object_summary_gate_logit",
+                "model.object_cls_embed",
+                "model.object_bbox_mlp",
+                "model.object_conf_mlp",
+                "model.object_relation_geom_mlp",
+                "model.object_valid_embed",
+                "model.object_relation_query_norm",
+                "model.object_relation_token_norm",
+                "model.object_relation_attn",
+                "model.object_relation_norm",
+                "model.object_relation_delta",
+                "model.object_relation_gate_logit",
                 "model.interaction_head",
             ]
             if self.model.hparams.get("use_register_tokens", 0):
@@ -191,7 +196,6 @@ class HeatmapModule(pl.LightningModule):
         object_cls=None,
         object_conf=None,
         object_valid=None,
-        object_summary=None,
     ):
         # Forward function that is run when visualizing the graph
         return self.model(
@@ -202,7 +206,6 @@ class HeatmapModule(pl.LightningModule):
             object_cls=object_cls,
             object_conf=object_conf,
             object_valid=object_valid,
-            object_summary=object_summary,
         )
 
     def _actor_prompt_param_name(self, name):
@@ -215,24 +218,34 @@ class HeatmapModule(pl.LightningModule):
             )
         )
 
+    def _object_relation_params(self):
+        return (
+            list(self.model.object_cls_embed.parameters())
+            + list(self.model.object_bbox_mlp.parameters())
+            + list(self.model.object_conf_mlp.parameters())
+            + list(self.model.object_relation_geom_mlp.parameters())
+            + list(self.model.object_valid_embed.parameters())
+            + list(self.model.object_relation_query_norm.parameters())
+            + list(self.model.object_relation_token_norm.parameters())
+            + list(self.model.object_relation_attn.parameters())
+            + list(self.model.object_relation_norm.parameters())
+            + list(self.model.object_relation_delta.parameters())
+            + [self.model.object_relation_gate_logit]
+            + list(self.model.interaction_head.parameters())
+        )
+
     def _head_params(self):
         if not self.actor_prompt:
             return list(self.model.head.parameters())
+
+        if self.object_prompt and self.model.hparams.get("object_relation_only", 0):
+            return self._object_relation_params()
 
         params = list(self.model.actor_head.parameters())
         if self.model.presence_head is not None:
             params += list(self.model.presence_head.parameters())
         if self.object_prompt:
-            if self.model.hparams.get("object_summary_delta_only", 0):
-                return (
-                    list(self.model.object_summary_norm.parameters())
-                    + list(self.model.object_summary_delta.parameters())
-                    + [self.model.object_summary_gate_logit]
-                )
-            params += list(self.model.object_summary_norm.parameters())
-            params += list(self.model.object_summary_delta.parameters())
-            params += [self.model.object_summary_gate_logit]
-            params += list(self.model.interaction_head.parameters())
+            params += self._object_relation_params()
         for name, param in self.model.net.named_parameters():
             if self._actor_prompt_param_name(name):
                 params.append(param)
@@ -272,7 +285,6 @@ class HeatmapModule(pl.LightningModule):
             "object_cls",
             "object_conf",
             "object_valid",
-            "object_summary",
         )
         missing = [key for key in required if key not in target]
         if missing:
@@ -283,16 +295,11 @@ class HeatmapModule(pl.LightningModule):
             "object_cls": target["object_cls"].long(),
             "object_conf": target["object_conf"].float(),
             "object_valid": target["object_valid"].bool(),
-            "object_summary": target["object_summary"].float(),
         }
         if mode == "on":
             return kwargs
         if mode == "off":
             kwargs["object_valid"] = torch.zeros_like(kwargs["object_valid"])
-            kwargs["object_summary"] = torch.zeros_like(kwargs["object_summary"])
-            return kwargs
-        if mode == "summary_off":
-            kwargs["object_summary"] = torch.zeros_like(kwargs["object_summary"])
             return kwargs
         if mode == "shuffled":
             batch_size = kwargs["object_valid"].shape[0]
@@ -302,12 +309,6 @@ class HeatmapModule(pl.LightningModule):
                 key: value.roll(shifts=1, dims=0)
                 for key, value in kwargs.items()
             }
-        if mode == "summary_shuffled":
-            batch_size = kwargs["object_summary"].shape[0]
-            if batch_size < 2:
-                return None
-            kwargs["object_summary"] = kwargs["object_summary"].roll(shifts=1, dims=0)
-            return kwargs
         raise ValueError(f"Unsupported object mode: {mode}")
 
     def _pose_heatmap_pred(self, hm_preds):
@@ -1040,9 +1041,19 @@ class HeatmapModule(pl.LightningModule):
             return
 
         self.val_acc_macro_objects_on(normal_preds, labels)
+        self.val_f1_objects_on(normal_preds, labels)
         self.log(
             "val_acc_macro_objects_on",
             self.val_acc_macro_objects_on,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+        )
+        self.log(
+            "val_f1_objects_on",
+            self.val_f1_objects_on,
             on_step=False,
             on_epoch=True,
             prog_bar=False,
@@ -1055,9 +1066,19 @@ class HeatmapModule(pl.LightningModule):
         if off is not None:
             off_preds, off_labels = off
             self.val_acc_macro_objects_off(off_preds, off_labels)
+            self.val_f1_objects_off(off_preds, off_labels)
             self.log(
                 "val_acc_macro_objects_off",
                 self.val_acc_macro_objects_off,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+            self.log(
+                "val_f1_objects_off",
+                self.val_f1_objects_off,
                 on_step=False,
                 on_epoch=True,
                 prog_bar=False,
@@ -1070,9 +1091,19 @@ class HeatmapModule(pl.LightningModule):
         if shuffled is not None:
             shuffled_preds, shuffled_labels = shuffled
             self.val_acc_macro_objects_shuffled(shuffled_preds, shuffled_labels)
+            self.val_f1_objects_shuffled(shuffled_preds, shuffled_labels)
             self.log(
                 "val_acc_macro_objects_shuffled",
                 self.val_acc_macro_objects_shuffled,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+            self.log(
+                "val_f1_objects_shuffled",
+                self.val_f1_objects_shuffled,
                 on_step=False,
                 on_epoch=True,
                 prog_bar=False,
@@ -1083,64 +1114,6 @@ class HeatmapModule(pl.LightningModule):
                 "val_{group}_objects_shuffled",
                 shuffled_preds,
                 shuffled_labels,
-            )
-
-        summary_off = self._actor_preds_for_object_mode(imgs, target, "summary_off")
-        if summary_off is not None:
-            summary_off_preds, summary_off_labels = summary_off
-            self.val_acc_macro_summary_off(summary_off_preds, summary_off_labels)
-            self.log(
-                "val_acc_macro_summary_off",
-                self.val_acc_macro_summary_off,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-                sync_dist=True,
-            )
-            self.val_f1_summary_off(summary_off_preds, summary_off_labels)
-            self.log(
-                "val_f1_summary_off",
-                self.val_f1_summary_off,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-                sync_dist=True,
-            )
-
-        summary_shuffled = self._actor_preds_for_object_mode(
-            imgs,
-            target,
-            "summary_shuffled",
-        )
-        if summary_shuffled is not None:
-            summary_shuffled_preds, summary_shuffled_labels = summary_shuffled
-            self.val_acc_macro_summary_shuffled(
-                summary_shuffled_preds,
-                summary_shuffled_labels,
-            )
-            self.log(
-                "val_acc_macro_summary_shuffled",
-                self.val_acc_macro_summary_shuffled,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-                sync_dist=True,
-            )
-            self.val_f1_summary_shuffled(
-                summary_shuffled_preds,
-                summary_shuffled_labels,
-            )
-            self.log(
-                "val_f1_summary_shuffled",
-                self.val_f1_summary_shuffled,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-                sync_dist=True,
             )
 
     def training_step(self, batch, batch_idx):

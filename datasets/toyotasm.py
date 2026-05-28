@@ -20,7 +20,6 @@ from datasets.object_vocab import (
     DETECTOR_TO_OBJECT,
     NONE_OBJECT_ID,
     NUM_OBJECT_CLASSES,
-    OBJECT_SUMMARY_FEATURE_DIM,
     OBJECT_TO_ID,
     OBJECTLESS_ACTIONS,
     STRONG_ACTION_OBJECTS,
@@ -1190,12 +1189,6 @@ class ToyotaSMDataset(Dataset):
         )
         object_conf = torch.zeros(self.num_object_tokens, dtype=torch.float32)
         object_valid = torch.zeros(self.num_object_tokens, dtype=torch.bool)
-        object_summary = self._compose_synthetic_object_summary(
-            [target["object_summary"] for target in targets],
-            bounds,
-            canvas_width,
-        )
-
         candidates = []
         for target, (x0, x1) in zip(targets, bounds):
             panel_x0 = x0 / float(canvas_width)
@@ -1268,67 +1261,12 @@ class ToyotaSMDataset(Dataset):
             "object_cls": object_cls,
             "object_conf": object_conf,
             "object_valid": object_valid,
-            "object_summary": object_summary,
             "object_heatmap": object_heatmap,
             "object_heatmap_valid": object_heatmap_valid,
             "object_heatmap_weight": object_heatmap_weight,
             "interaction_cls": interaction_cls,
             "interaction_valid": interaction_valid,
         }
-
-    def _compose_synthetic_object_summary(self, summaries, bounds, canvas_width):
-        parts = [
-            summary.view(OBJECT_SUMMARY_FEATURE_DIM, self.num_object_classes)
-            for summary in summaries
-        ]
-        device = parts[0].device
-        dtype = parts[0].dtype
-        out = torch.zeros(
-            (OBJECT_SUMMARY_FEATURE_DIM, self.num_object_classes),
-            dtype=dtype,
-            device=device,
-        )
-        count_sum = torch.zeros(self.num_object_classes, dtype=dtype, device=device)
-        conf_sum = torch.zeros_like(count_sum)
-        area_sum = torch.zeros_like(count_sum)
-        center_weight_sum = torch.zeros_like(count_sum)
-        cx_sum = torch.zeros_like(count_sum)
-        cy_sum = torch.zeros_like(count_sum)
-
-        for summary, (x0, x1) in zip(parts, bounds):
-            panel_x0 = float(x0) / float(canvas_width)
-            panel_w = float(x1 - x0) / float(canvas_width)
-            present = summary[0].clamp(0.0, 1.0)
-            max_conf = summary[1].clamp_min(0.0)
-            mean_conf = summary[2].clamp_min(0.0)
-            frame_frac = summary[3].clamp(0.0, 1.0)
-            count = torch.expm1(summary[4].clamp_min(0.0))
-            max_area = summary[5].clamp_min(0.0) * panel_w
-            mean_area = summary[6].clamp_min(0.0) * panel_w
-            cx = panel_x0 + summary[7].clamp(0.0, 1.0) * panel_w
-            cy = summary[8].clamp(0.0, 1.0)
-
-            out[0] = torch.maximum(out[0], present)
-            out[1] = torch.maximum(out[1], max_conf)
-            out[3] = torch.maximum(out[3], frame_frac)
-            out[5] = torch.maximum(out[5], max_area)
-            count_sum += count
-            conf_sum += mean_conf * count
-            area_sum += mean_area * count
-
-            center_weight = (max_conf * present).clamp_min(0.0)
-            center_weight_sum += center_weight
-            cx_sum += cx * center_weight
-            cy_sum += cy * center_weight
-
-        count_denom = count_sum.clamp_min(1e-6)
-        center_denom = center_weight_sum.clamp_min(1e-6)
-        out[2] = conf_sum / count_denom
-        out[4] = torch.log1p(count_sum)
-        out[6] = area_sum / count_denom
-        out[7] = cx_sum / center_denom
-        out[8] = cy_sum / center_denom
-        return out.reshape(-1)
 
     def _blur_object_heatmap(self, heatmap, sigma=1.0):
         if sigma <= 0 or heatmap.numel() == 0:
@@ -1390,65 +1328,6 @@ class ToyotaSMDataset(Dataset):
         weight = torch.full_like(heatmap, float(self.object_heatmap_negative_weight))
         weight = torch.where(heatmap > 0, torch.ones_like(weight), weight)
         return heatmap, valid, weight
-
-    def _build_object_summary(self, object_entries, height, width):
-        summary = torch.zeros(
-            (OBJECT_SUMMARY_FEATURE_DIM, self.num_object_classes),
-            dtype=torch.float32,
-        )
-        if not object_entries:
-            return summary.reshape(-1)
-
-        object_count = torch.zeros(self.num_object_classes, dtype=torch.float32)
-        max_conf = torch.zeros(self.num_object_classes, dtype=torch.float32)
-        sum_conf = torch.zeros(self.num_object_classes, dtype=torch.float32)
-        max_area = torch.zeros(self.num_object_classes, dtype=torch.float32)
-        sum_area = torch.zeros(self.num_object_classes, dtype=torch.float32)
-        sum_cx = torch.zeros(self.num_object_classes, dtype=torch.float32)
-        sum_cy = torch.zeros(self.num_object_classes, dtype=torch.float32)
-        frame_hits = [set() for _ in range(self.num_object_classes)]
-
-        width = float(width)
-        height = float(height)
-        for entry in object_entries:
-            cls_id = int(entry["cls_id"])
-            if cls_id < 0 or cls_id >= self.num_object_classes:
-                continue
-            x1, y1, x2, y2 = [float(v) for v in entry["xyxy"].tolist()]
-            if x2 <= x1 or y2 <= y1 or width <= 0 or height <= 0:
-                continue
-
-            conf = float(np.clip(float(entry["conf"]), 0.0, 1.0))
-            area = ((x2 - x1) * (y2 - y1)) / (width * height)
-            cx = ((x1 + x2) * 0.5) / width
-            cy = ((y1 + y2) * 0.5) / height
-
-            object_count[cls_id] += 1.0
-            max_conf[cls_id] = max(float(max_conf[cls_id]), conf)
-            sum_conf[cls_id] += conf
-            max_area[cls_id] = max(float(max_area[cls_id]), float(area))
-            sum_area[cls_id] += float(area)
-            sum_cx[cls_id] += float(cx) * conf
-            sum_cy[cls_id] += float(cy) * conf
-            frame_hits[cls_id].add(int(entry["sample_pos"]))
-
-        present = (object_count > 0).float()
-        count_denom = object_count.clamp_min(1.0)
-        conf_denom = sum_conf.clamp_min(1e-6)
-        frame_frac = torch.tensor(
-            [len(frames) / float(self.n_frames) for frames in frame_hits],
-            dtype=torch.float32,
-        )
-        summary[0] = present
-        summary[1] = max_conf
-        summary[2] = sum_conf / count_denom
-        summary[3] = frame_frac
-        summary[4] = torch.log1p(object_count)
-        summary[5] = max_area
-        summary[6] = sum_area / count_denom
-        summary[7] = sum_cx / conf_denom
-        summary[8] = sum_cy / conf_denom
-        return summary.reshape(-1)
 
     def _box_iou(self, box_a, box_b):
         ax1, ay1, ax2, ay2 = [float(v) for v in box_a]
@@ -1638,7 +1517,6 @@ class ToyotaSMDataset(Dataset):
                 width,
             )
         )
-        object_summary = self._build_object_summary(object_entries, height, width)
         object_boxes, object_cls, object_conf, object_valid = self._pack_object_tokens(
             object_entries,
             height,
@@ -1654,7 +1532,6 @@ class ToyotaSMDataset(Dataset):
             "object_cls": object_cls,
             "object_conf": object_conf,
             "object_valid": object_valid,
-            "object_summary": object_summary,
             "object_heatmap": object_heatmap,
             "object_heatmap_valid": object_heatmap_valid,
             "object_heatmap_weight": object_heatmap_weight,
