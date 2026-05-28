@@ -716,8 +716,6 @@ class POGUISE(pl.LightningModule):
     ):
         # convert to b c t h w
         x = x.permute(0, 2, 1, 3, 4)
-        if self.object_prompt:
-            object_valid = self._apply_object_dropout(object_valid)
         if self.actor_prompt:
             if self.hparams.n_landmarks > 0 or self.object_prompt:
                 net_data = self.net(

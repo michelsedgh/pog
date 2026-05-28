@@ -291,6 +291,9 @@ class HeatmapModule(pl.LightningModule):
             "object_valid": target["object_valid"].bool(),
         }
         if mode == "on":
+            kwargs["object_valid"] = self.model._apply_object_dropout(
+                kwargs["object_valid"]
+            )
             return kwargs
         if mode == "off":
             kwargs["object_valid"] = torch.zeros_like(kwargs["object_valid"])
@@ -706,14 +709,31 @@ class HeatmapModule(pl.LightningModule):
                     if stage != "train":
                         self._log_object_heatmap_metrics(pred_obj, target, stage)
 
+            dropped_positive = None
             if selection_logits is not None and "interaction_positive_mask" in target:
                 inter_valid = target["interaction_valid"].to(
                     device=valid.device, dtype=torch.bool
                 ) & valid
+                original_positive_mask = target["interaction_positive_mask"].to(
+                    device=selection_logits.device, dtype=torch.bool
+                )
+                positive_mask = original_positive_mask.clone()
+                effective_object_valid = object_kwargs["object_valid"].to(
+                    device=selection_logits.device, dtype=torch.bool
+                )
+                real_object_count = min(
+                    effective_object_valid.shape[-1],
+                    positive_mask.shape[-1] - 1,
+                )
+                positive_mask[..., :real_object_count] = (
+                    positive_mask[..., :real_object_count]
+                    & effective_object_valid[:, None, :real_object_count]
+                )
+                dropped_positive = (
+                    original_positive_mask[..., :real_object_count]
+                    & ~effective_object_valid[:, None, :real_object_count]
+                ).any(dim=-1)
                 if inter_valid.any():
-                    positive_mask = target["interaction_positive_mask"].to(
-                        device=selection_logits.device, dtype=torch.bool
-                    )
                     inter_valid = inter_valid & positive_mask.any(dim=-1)
                 if inter_valid.any():
                     log_probs = F.log_softmax(selection_logits.float(), dim=-1)
@@ -752,6 +772,10 @@ class HeatmapModule(pl.LightningModule):
                 heatmap_valid = target["interaction_heatmap_valid"].to(
                     device=valid.device, dtype=torch.bool
                 ) & valid
+                if dropped_positive is not None:
+                    heatmap_valid = heatmap_valid & ~dropped_positive.to(
+                        device=heatmap_valid.device
+                    )
                 if heatmap_valid.any():
                     target_heatmap = target["interaction_heatmap"].to(
                         device=interaction_heatmap.device,
