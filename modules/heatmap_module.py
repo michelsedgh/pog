@@ -417,15 +417,26 @@ class HeatmapModule(pl.LightningModule):
             or "interaction_positive_mask" not in target
         ):
             return
+        valid_count = valid.sum().clamp_min(1)
         inter_valid = target["interaction_valid"].to(
             device=valid.device, dtype=torch.bool
         ) & valid
+        self._log_scalar(
+            f"{stage}_interaction_target_frac",
+            inter_valid.float().sum() / valid_count,
+            int(valid_count.item()),
+        )
         if not inter_valid.any():
             return
         positive_mask = target["interaction_positive_mask"].to(
             device=selection_logits.device, dtype=torch.bool
         )
         inter_valid = inter_valid & positive_mask.any(dim=-1)
+        self._log_scalar(
+            f"{stage}_interaction_target_usable_frac",
+            inter_valid.float().sum() / valid_count,
+            int(valid_count.item()),
+        )
         if not inter_valid.any():
             return
         pred = selection_logits.argmax(dim=-1)
@@ -456,6 +467,11 @@ class HeatmapModule(pl.LightningModule):
                 select_mass[object_mask].mean(),
                 object_mask.sum().item(),
             )
+            self._log_scalar(
+                f"{stage}_interaction_target_object_frac",
+                object_mask.float().sum() / valid_count,
+                int(valid_count.item()),
+            )
         if none_mask.any():
             self._log_scalar(
                 f"{stage}_interaction_select_acc_none",
@@ -467,6 +483,28 @@ class HeatmapModule(pl.LightningModule):
                 select_mass[none_mask].mean(),
                 none_mask.sum().item(),
             )
+            self._log_scalar(
+                f"{stage}_interaction_target_none_frac",
+                none_mask.float().sum() / valid_count,
+                int(valid_count.item()),
+            )
+
+    def _log_object_relation_gate(self, stage):
+        if not (
+            self.object_prompt
+            and hasattr(self.model, "object_relation_gate_logit")
+        ):
+            return
+        gate = torch.sigmoid(self.model.object_relation_gate_logit.detach())
+        self.log(
+            f"{stage}_object_relation_gate",
+            gate,
+            on_step=stage == "train",
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+        )
 
     def _log_group_metrics(self, prefix, preds, labels):
         if not self.group_indices:
@@ -677,6 +715,7 @@ class HeatmapModule(pl.LightningModule):
                 loss = loss + loss_kp * self.model.hparams.kp_loss_weight
 
         if self.object_prompt:
+            self._log_object_relation_gate(stage)
             pred_obj = self._object_heatmap_pred(hm_preds)
             object_heatmap_weight = float(
                 self.model.hparams.get("object_heatmap_weight", 200.0)
