@@ -678,7 +678,14 @@ class HeatmapModule(pl.LightningModule):
 
         if self.object_prompt:
             pred_obj = self._object_heatmap_pred(hm_preds)
-            if pred_obj is not None and "object_heatmap" in target:
+            object_heatmap_weight = float(
+                self.model.hparams.get("object_heatmap_weight", 200.0)
+            )
+            if (
+                object_heatmap_weight > 0.0
+                and pred_obj is not None
+                and "object_heatmap" in target
+            ):
                 target_obj = target["object_heatmap"].to(device=pred_obj.device)
                 if "object_heatmap_weight" in target:
                     object_weight = target["object_heatmap_weight"].to(
@@ -694,9 +701,7 @@ class HeatmapModule(pl.LightningModule):
                     object_weight,
                 )
                 if loss_obj is not None:
-                    loss = loss + loss_obj * self.model.hparams.get(
-                        "object_heatmap_weight", 200.0
-                    )
+                    loss = loss + loss_obj * object_heatmap_weight
                     self.log(
                         f"{stage}_obj_heatmap_loss",
                         loss_obj,
