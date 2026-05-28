@@ -148,6 +148,11 @@ class POGUISE(pl.LightningModule):
         self.object_prompt = bool(self.hparams.get("object_prompt", 0))
         if self.object_prompt and not self.actor_prompt:
             raise ValueError("object_prompt requires actor_prompt")
+        if self.hparams.get("object_summary_delta_only", 0):
+            if not self.object_prompt:
+                raise ValueError("object_summary_delta_only requires object_prompt")
+            if not self.hparams.get("freeze_backbone", 0):
+                raise ValueError("object_summary_delta_only requires freeze_backbone")
         for prob_name in ("object_dropout_prob", "object_token_dropout_prob"):
             prob_value = float(self.hparams.get(prob_name, 0.0))
             if not 0 <= prob_value <= 1:
@@ -280,6 +285,22 @@ class POGUISE(pl.LightningModule):
 
     def _freeze_backbone(self):
         print("Freezing backbone")
+        if (
+            self.actor_prompt
+            and self.object_prompt
+            and self.hparams.get("object_summary_delta_only", 0)
+        ):
+            for param in self.parameters():
+                param.requires_grad = False
+            for module in (
+                self.object_summary_norm,
+                self.object_summary_delta,
+            ):
+                for param in module.parameters():
+                    param.requires_grad = True
+            self.object_summary_gate_logit.requires_grad = True
+            return
+
         # Freeze the backbone
         for param in self.net.parameters():
             param.requires_grad = False
