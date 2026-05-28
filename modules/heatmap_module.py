@@ -707,12 +707,13 @@ class HeatmapModule(pl.LightningModule):
 
             if stage == "train" and self.model.hparams.log_kp_loss_weight:
                 loss_kp = torch.log(loss_kp + 1e-6)
+            kp_loss_weight = float(self.model.hparams.kp_loss_weight)
             if self.model.hparams.get("kp_only", False):
-                loss = loss * 1e-6 + loss_kp * self.model.hparams.kp_loss_weight
+                loss = loss * 1e-6 + loss_kp * kp_loss_weight
             elif stage == "train" and self.model.hparams.grad_weights:
-                loss = torch.stack([loss, loss_kp * self.model.hparams.kp_loss_weight])
-            else:
-                loss = loss + loss_kp * self.model.hparams.kp_loss_weight
+                loss = torch.stack([loss, loss_kp * kp_loss_weight])
+            elif kp_loss_weight > 0.0:
+                loss = loss + loss_kp * kp_loss_weight
 
         if self.object_prompt:
             self._log_object_relation_gate(stage)
@@ -1401,12 +1402,13 @@ class HeatmapModule(pl.LightningModule):
 
             if self.model.hparams.log_kp_loss_weight:
                 loss_kp = torch.log(loss_kp + 1e-6)
+            kp_loss_weight = float(self.model.hparams.kp_loss_weight)
             if self.model.hparams.get("kp_only", False):
-                loss = loss * 1e-6 + loss_kp * self.model.hparams.kp_loss_weight
+                loss = loss * 1e-6 + loss_kp * kp_loss_weight
             elif self.model.hparams.grad_weights:
-                loss = torch.stack([loss, loss_kp * self.model.hparams.kp_loss_weight])
-            else:
-                loss = loss + loss_kp * self.model.hparams.kp_loss_weight
+                loss = torch.stack([loss, loss_kp * kp_loss_weight])
+            elif kp_loss_weight > 0.0:
+                loss = loss + loss_kp * kp_loss_weight
 
             self.log(
                 "train_loss_kp",
