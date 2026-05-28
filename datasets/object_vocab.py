@@ -26,6 +26,18 @@ OBJECT_CLASSES = {
 OBJECT_TO_ID = {name: idx for idx, name in OBJECT_CLASSES.items()}
 NUM_OBJECT_CLASSES = len(OBJECT_CLASSES)
 NONE_OBJECT_ID = NUM_OBJECT_CLASSES
+OBJECT_SUMMARY_FEATURES = (
+    "present",
+    "max_conf",
+    "mean_conf",
+    "frame_frac",
+    "log_count",
+    "max_area",
+    "mean_area",
+    "cx",
+    "cy",
+)
+OBJECT_SUMMARY_FEATURE_DIM = len(OBJECT_SUMMARY_FEATURES)
 
 COCO_TO_OBJECT = {
     "book": "book",

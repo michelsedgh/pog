@@ -9,6 +9,8 @@ import os
 import os.path
 import pickle
 
+from datasets.object_vocab import OBJECT_SUMMARY_FEATURE_DIM
+
 
 from collections import OrderedDict
 import json
@@ -302,17 +304,13 @@ class POGUISE(pl.LightningModule):
                     param.requires_grad = True
             if self.object_prompt:
                 for module in (
-                    self.object_cls_embed,
-                    self.object_bbox_mlp,
-                    self.object_conf_mlp,
-                    self.object_valid_embed,
-                    self.actor_object_attn,
-                    self.actor_object_norm,
+                    self.object_summary_norm,
+                    self.object_summary_delta,
                     self.interaction_head,
                 ):
                     for param in module.parameters():
                         param.requires_grad = True
-                self.actor_object_gate_logit.requires_grad = True
+                self.object_summary_gate_logit.requires_grad = True
 
     def _freeze_stages(self):
         if self.frozen_stages >= 0:
@@ -334,33 +332,32 @@ class POGUISE(pl.LightningModule):
             raise ValueError("object_prompt requires num_object_classes > 0")
         dim = self.net.num_features
         self.num_object_classes = num_object_classes
-        self.object_cls_embed = nn.Embedding(num_object_classes + 1, dim)
-        self.object_bbox_mlp = nn.Sequential(
-            nn.Linear(4, dim),
+        summary_dim = OBJECT_SUMMARY_FEATURE_DIM * num_object_classes
+        hidden_dim = int(self.hparams.get("object_summary_hidden_dim", 256))
+        if hidden_dim <= 0:
+            raise ValueError("object_summary_hidden_dim must be positive")
+        dropout = float(self.hparams.get("object_summary_dropout", 0.15))
+        if not 0 <= dropout < 1:
+            raise ValueError("object_summary_dropout must be in [0, 1)")
+        gate_init = float(self.hparams.get("object_summary_gate_init", 0.12))
+        if not 0 < gate_init < 1:
+            raise ValueError("object_summary_gate_init must be in (0, 1)")
+
+        self.object_summary_dim = summary_dim
+        self.object_summary_norm = nn.LayerNorm(summary_dim)
+        self.object_summary_delta = nn.Sequential(
+            nn.Linear(summary_dim, hidden_dim),
             nn.GELU(),
-            nn.Linear(dim, dim),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, self.hparams.num_classes),
         )
-        self.object_conf_mlp = nn.Sequential(
-            nn.Linear(1, dim),
-            nn.GELU(),
-            nn.Linear(dim, dim),
+        self.object_summary_gate_logit = nn.Parameter(
+            torch.logit(torch.tensor(gate_init, dtype=torch.float32))
         )
-        self.object_valid_embed = nn.Embedding(2, dim)
-        self.actor_object_attn = nn.MultiheadAttention(
-            embed_dim=dim,
-            num_heads=8,
-            batch_first=True,
-        )
-        self.actor_object_norm = nn.LayerNorm(dim)
-        self.actor_object_gate_logit = nn.Parameter(torch.tensor(-4.0))
         self.interaction_head = nn.Linear(dim, num_object_classes + 1)
 
-        nn.init.normal_(self.object_cls_embed.weight, std=0.02)
-        nn.init.zeros_(self.object_valid_embed.weight)
-        nn.init.zeros_(self.object_bbox_mlp[-1].weight)
-        nn.init.zeros_(self.object_bbox_mlp[-1].bias)
-        nn.init.zeros_(self.object_conf_mlp[-1].weight)
-        nn.init.zeros_(self.object_conf_mlp[-1].bias)
+        nn.init.zeros_(self.object_summary_delta[-1].weight)
+        nn.init.zeros_(self.object_summary_delta[-1].bias)
         nn.init.zeros_(self.interaction_head.weight)
         nn.init.zeros_(self.interaction_head.bias)
 
@@ -383,70 +380,55 @@ class POGUISE(pl.LightningModule):
             object_valid = object_valid & ~drop_each
         return object_valid
 
-    def _object_context(
-        self,
-        actor_feat,
-        object_boxes=None,
-        object_cls=None,
-        object_conf=None,
-        object_valid=None,
-    ):
-        if object_boxes is None:
-            return actor_feat
-        if object_cls is None or object_conf is None or object_valid is None:
-            raise ValueError(
-                "object_boxes, object_cls, object_conf, and object_valid must be passed together"
+    def _apply_object_summary_dropout(self, object_summary):
+        if object_summary is None or not self.training:
+            return object_summary
+        object_summary = object_summary.clone()
+        object_dropout_prob = float(self.hparams.get("object_dropout_prob", 0.0))
+        object_token_dropout_prob = float(
+            self.hparams.get("object_token_dropout_prob", 0.0)
+        )
+        if object_dropout_prob > 0:
+            if torch.rand((), device=object_summary.device) < object_dropout_prob:
+                object_summary.zero_()
+        if object_token_dropout_prob > 0:
+            summary = object_summary.view(
+                object_summary.shape[0],
+                OBJECT_SUMMARY_FEATURE_DIM,
+                self.num_object_classes,
             )
+            drop_cls = (
+                torch.rand(
+                    summary.shape[0],
+                    1,
+                    summary.shape[2],
+                    device=summary.device,
+                )
+                < object_token_dropout_prob
+            )
+            summary = summary.masked_fill(drop_cls, 0.0)
+            object_summary = summary.reshape(object_summary.shape)
+        return object_summary
 
-        object_valid = object_valid.to(device=actor_feat.device, dtype=torch.bool)
-        object_boxes = object_boxes.to(device=actor_feat.device)
-        object_cls = object_cls.to(device=actor_feat.device)
-        object_conf = object_conf.to(device=actor_feat.device)
-
-        has_objects = object_valid.any(dim=1)
-        if not has_objects.any():
-            return actor_feat
-
-        object_batch_idx = has_objects.nonzero(as_tuple=False).flatten()
-        actor_subset = actor_feat.index_select(0, object_batch_idx)
-        boxes_subset = object_boxes.index_select(0, object_batch_idx).to(
-            dtype=actor_feat.dtype
+    def _object_summary_fusion(self, action_logits, object_summary=None):
+        if object_summary is None:
+            return action_logits
+        object_summary = object_summary.to(
+            device=action_logits.device,
+            dtype=action_logits.dtype,
         )
-        cls_subset = object_cls.index_select(0, object_batch_idx).long()
-        conf_subset = object_conf.index_select(0, object_batch_idx).to(
-            dtype=actor_feat.dtype
+        if object_summary.ndim != 2 or object_summary.shape[1] != self.object_summary_dim:
+            raise ValueError(
+                "object_summary must have shape "
+                f"[B,{self.object_summary_dim}], got {tuple(object_summary.shape)}"
+            )
+        normalized = self.object_summary_norm(object_summary)
+        delta = self.object_summary_delta(normalized)
+        gate = torch.sigmoid(self.object_summary_gate_logit).to(
+            device=action_logits.device,
+            dtype=action_logits.dtype,
         )
-        valid_subset = object_valid.index_select(0, object_batch_idx)
-
-        cls_subset = cls_subset.clamp(0, self.num_object_classes)
-        cls_subset = cls_subset.masked_fill(~valid_subset, self.num_object_classes)
-        obj_feat = (
-            self.object_cls_embed(cls_subset).to(dtype=actor_feat.dtype)
-            + self.object_bbox_mlp(boxes_subset)
-            + self.object_conf_mlp(conf_subset.unsqueeze(-1))
-            + self.object_valid_embed(valid_subset.long()).to(dtype=actor_feat.dtype)
-        )
-        query = self.actor_object_norm(actor_subset)
-        obj_feat = obj_feat.to(dtype=query.dtype)
-
-        attended, _ = self.actor_object_attn(
-            query=query,
-            key=obj_feat,
-            value=obj_feat,
-            key_padding_mask=~valid_subset,
-            need_weights=False,
-        )
-        context = actor_feat.new_zeros(actor_feat.shape)
-        context = context.index_copy(
-            0,
-            object_batch_idx,
-            attended.to(dtype=actor_feat.dtype),
-        )
-        gate = torch.sigmoid(self.actor_object_gate_logit).to(
-            device=actor_feat.device,
-            dtype=actor_feat.dtype,
-        )
-        return actor_feat + gate * context
+        return action_logits + gate * delta
 
     def forward(
         self,
@@ -457,11 +439,13 @@ class POGUISE(pl.LightningModule):
         object_cls=None,
         object_conf=None,
         object_valid=None,
+        object_summary=None,
     ):
         # convert to b c t h w
         x = x.permute(0, 2, 1, 3, 4)
         if self.object_prompt:
             object_valid = self._apply_object_dropout(object_valid)
+            object_summary = self._apply_object_summary_dropout(object_summary)
         if self.actor_prompt:
             if self.hparams.n_landmarks > 0 or self.object_prompt:
                 _, x_actor, x_heatmap = self.net(
@@ -485,15 +469,12 @@ class POGUISE(pl.LightningModule):
                 x_heatmap = 0
             if self.hparams.ret_feat:
                 return x_actor
-            if self.object_prompt:
-                x_actor = self._object_context(
-                    x_actor,
-                    object_boxes=object_boxes,
-                    object_cls=object_cls,
-                    object_conf=object_conf,
-                    object_valid=object_valid,
-                )
             action_logits = self.actor_head(x_actor)
+            if self.object_prompt:
+                action_logits = self._object_summary_fusion(
+                    action_logits,
+                    object_summary=object_summary,
+                )
             interaction_logits = (
                 self.interaction_head(x_actor) if self.object_prompt else None
             )
@@ -567,6 +548,10 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--object_bbox_prior_expand", type=float, default=1.25)
         parser.add_argument("--object_dropout_prob", type=float, default=0.0)
         parser.add_argument("--object_token_dropout_prob", type=float, default=0.0)
+        parser.add_argument("--object_summary_hidden_dim", type=int, default=256)
+        parser.add_argument("--object_summary_dropout", type=float, default=0.15)
+        parser.add_argument("--object_summary_gate_init", type=float, default=0.12)
+        parser.add_argument("--object_summary_delta_only", type=int, default=0)
         parser.add_argument("--ret_feat", type=int, default=0)
         parser.add_argument("--linear_probe", type=int, default=0)
 

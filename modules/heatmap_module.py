@@ -137,13 +137,9 @@ class HeatmapModule(pl.LightningModule):
                 "model.net.bbox_mlp",
                 "model.actor_head",
                 "model.presence_head",
-                "model.object_cls_embed",
-                "model.object_bbox_mlp",
-                "model.object_conf_mlp",
-                "model.object_valid_embed",
-                "model.actor_object_attn",
-                "model.actor_object_norm",
-                "model.actor_object_gate_logit",
+                "model.object_summary_norm",
+                "model.object_summary_delta",
+                "model.object_summary_gate_logit",
                 "model.interaction_head",
             ]
             if self.model.hparams.get("use_register_tokens", 0):
@@ -183,6 +179,7 @@ class HeatmapModule(pl.LightningModule):
         object_cls=None,
         object_conf=None,
         object_valid=None,
+        object_summary=None,
     ):
         # Forward function that is run when visualizing the graph
         return self.model(
@@ -193,6 +190,7 @@ class HeatmapModule(pl.LightningModule):
             object_cls=object_cls,
             object_conf=object_conf,
             object_valid=object_valid,
+            object_summary=object_summary,
         )
 
     def _actor_prompt_param_name(self, name):
@@ -213,13 +211,15 @@ class HeatmapModule(pl.LightningModule):
         if self.model.presence_head is not None:
             params += list(self.model.presence_head.parameters())
         if self.object_prompt:
-            params += list(self.model.object_cls_embed.parameters())
-            params += list(self.model.object_bbox_mlp.parameters())
-            params += list(self.model.object_conf_mlp.parameters())
-            params += list(self.model.object_valid_embed.parameters())
-            params += list(self.model.actor_object_attn.parameters())
-            params += list(self.model.actor_object_norm.parameters())
-            params += [self.model.actor_object_gate_logit]
+            if self.model.hparams.get("object_summary_delta_only", 0):
+                return (
+                    list(self.model.object_summary_norm.parameters())
+                    + list(self.model.object_summary_delta.parameters())
+                    + [self.model.object_summary_gate_logit]
+                )
+            params += list(self.model.object_summary_norm.parameters())
+            params += list(self.model.object_summary_delta.parameters())
+            params += [self.model.object_summary_gate_logit]
             params += list(self.model.interaction_head.parameters())
         for name, param in self.model.net.named_parameters():
             if self._actor_prompt_param_name(name):
@@ -255,7 +255,13 @@ class HeatmapModule(pl.LightningModule):
     def _object_kwargs(self, target, mode="on"):
         if not self.object_prompt:
             return {}
-        required = ("object_boxes", "object_cls", "object_conf", "object_valid")
+        required = (
+            "object_boxes",
+            "object_cls",
+            "object_conf",
+            "object_valid",
+            "object_summary",
+        )
         missing = [key for key in required if key not in target]
         if missing:
             raise ValueError(f"object_prompt target is missing keys: {missing}")
@@ -265,11 +271,13 @@ class HeatmapModule(pl.LightningModule):
             "object_cls": target["object_cls"].long(),
             "object_conf": target["object_conf"].float(),
             "object_valid": target["object_valid"].bool(),
+            "object_summary": target["object_summary"].float(),
         }
         if mode == "on":
             return kwargs
         if mode == "off":
             kwargs["object_valid"] = torch.zeros_like(kwargs["object_valid"])
+            kwargs["object_summary"] = torch.zeros_like(kwargs["object_summary"])
             return kwargs
         if mode == "shuffled":
             batch_size = kwargs["object_valid"].shape[0]
