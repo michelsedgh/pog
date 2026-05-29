@@ -729,6 +729,9 @@ class POGUISE(pl.LightningModule):
         action_alpha = torch.softmax(selection_logits.float(), dim=-1).to(
             dtype=actor_feat.dtype
         )
+        real_object_mass = action_alpha[..., : object_boxes.shape[1]].sum(
+            dim=-1,
+        )
         interaction_heatmap = None
         if action_labels is not None:
             action_labels = action_labels.to(
@@ -762,6 +765,9 @@ class POGUISE(pl.LightningModule):
             spatial_feat,
             action_heatmap_for_pool,
         )
+        visual_action = visual_action * real_object_mass[..., None]
+        object_value = object_value.clone()
+        object_value[:, -1] = 0
         action_context = torch.einsum(
             "bkcm,bmd->bkcd",
             action_alpha,
@@ -769,12 +775,12 @@ class POGUISE(pl.LightningModule):
         )
         action_feat = torch.cat(
             [
-                actor_action,
-                action_pair,
                 action_context,
                 visual_action,
                 actor_action * action_context,
                 actor_action * visual_action,
+                action_pair * action_context,
+                action_pair * visual_action,
             ],
             dim=-1,
         )
@@ -785,7 +791,7 @@ class POGUISE(pl.LightningModule):
             device=bounded_delta.device,
             dtype=bounded_delta.dtype,
         )
-        residual = bounded_delta * class_gate[None, None, :]
+        residual = bounded_delta * class_gate[None, None, :] * real_object_mass
         return residual, selection_logits, interaction_heatmap
 
     def forward(

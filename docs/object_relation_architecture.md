@@ -28,10 +28,11 @@ Use one object path:
 9. Supervise that interaction heatmap at the same 56x56 resolution as the PO-GUISE pose/object heatmaps. Build an action-conditioned 8x8 copy only for pooling from the internal heatmap-token feature grid.
 10. Pool visual context through each action-conditioned interaction heatmap.
 11. Predict a bounded per-class action-logit residual from action-conditioned features:
-   `[actor, action, selected_object_context, interaction_visual_context, actor * selected_object_context, actor * interaction_visual_context]`.
+   `[selected_object_context, interaction_visual_context, actor * selected_object_context, actor * interaction_visual_context, action * selected_object_context, action * interaction_visual_context]`.
 12. Apply a per-class gate initialized near zero and regularize the residual magnitude.
-13. Train real-object counterfactuals against objects-off and objects-shuffled, and train objectless actions to stay consistent with objects-off.
-14. Evaluate object usefulness with real objects, objects-off, and objects-shuffled. A useful object path must make real objects beat both off and shuffled on macro accuracy and F1.
+13. Force the residual to zero when the selected evidence is `NONE` or when objects are disabled. The object branch must not become a second actor-only classifier.
+14. Train real-object counterfactuals against objects-off and objects-shuffled, and train objectless actions to stay consistent with objects-off.
+15. Evaluate object usefulness with real objects, objects-off, and objects-shuffled. A useful object path must make real objects beat both off and shuffled on macro accuracy and F1.
 
 This is intentionally not an action-class prior or object-existence shortcut. The model sees all detected objects, then learns which object token and spatial region explain each actor's action.
 
