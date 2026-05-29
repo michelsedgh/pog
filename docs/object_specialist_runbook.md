@@ -5,10 +5,10 @@ This runbook starts after the normal Colab setup cell has finished downloading d
 The required implementation commit is:
 
 ```text
-f1b0e08 Train object specialists with focused relation objective
+1490baa Train object specialists with focused relation objective
 ```
 
-Your latest `git log -1` may show a newer documentation commit. That is fine. The required check is that `f1b0e08` is an ancestor of `HEAD`.
+Your latest `git log -1` may show a newer documentation commit. That is fine. The required check is that `1490baa` is an ancestor of `HEAD`.
 
 The setup cell writes `/content/poguise_colab_env.sh`, but the cells below also define the needed paths directly so they can be pasted into Colab without sourcing that shell file.
 
@@ -41,7 +41,7 @@ import subprocess
 import shlex
 
 REPO_DIR = "/content/pog"
-REQUIRED_COMMIT = "f1b0e08"
+REQUIRED_COMMIT = "1490baa"
 
 def run(cmd, cwd=REPO_DIR):
     print("$", " ".join(shlex.quote(str(x)) for x in cmd), flush=True)
@@ -130,7 +130,7 @@ if object_state_keys:
     )
 
 run_stream(["git", "pull", "--ff-only", "origin", "main"], cwd=REPO_DIR)
-run_stream(["git", "merge-base", "--is-ancestor", "f1b0e08", "HEAD"], cwd=REPO_DIR)
+run_stream(["git", "merge-base", "--is-ancestor", "1490baa", "HEAD"], cwd=REPO_DIR)
 
 cmd = [
     sys.executable, "-u", "train.py",
@@ -446,7 +446,7 @@ def require_file(path, name):
     print(f"{name}: {p} ({p.stat().st_size / (1024**2):.1f} MB)", flush=True)
 
 run_stream(["git", "pull", "--ff-only", "origin", "main"], cwd=REPO_DIR)
-run_stream(["git", "merge-base", "--is-ancestor", "f1b0e08", "HEAD"], cwd=REPO_DIR)
+run_stream(["git", "merge-base", "--is-ancestor", "1490baa", "HEAD"], cwd=REPO_DIR)
 
 relation_runs = sorted(
     (Path(DATA_DIR) / "checkpoints").glob("actor_object_specialist_relonly_from_actor_slot_*"),
