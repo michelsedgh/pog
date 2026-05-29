@@ -31,8 +31,8 @@ Use one object path:
    `[selected_object_context, interaction_visual_context, actor * selected_object_context, actor * interaction_visual_context, action * selected_object_context, action * interaction_visual_context]`.
 12. Apply a per-class gate initialized near zero and regularize the residual magnitude.
 13. Force the residual to zero when the selected evidence is `NONE` or when objects are disabled. The object branch must not become a second actor-only classifier.
-14. Train real-object counterfactuals against objects-off and objects-shuffled, and train objectless actions to stay consistent with objects-off.
-15. Evaluate object usefulness with real objects, objects-off, and objects-shuffled. A useful object path must make real objects beat both off and shuffled on macro accuracy and F1.
+14. Train real-object counterfactuals against objects-off and label-mismatched objects-shuffled, and train objectless actions to stay consistent with objects-off.
+15. Evaluate object usefulness with real objects, objects-off, and label-mismatched objects-shuffled. A useful object path must make real objects beat both off and shuffled on macro accuracy and F1.
 
 This is intentionally not an action-class prior or object-existence shortcut. The model sees all detected objects, then learns which object token and spatial region explain each actor's action.
 
@@ -79,3 +79,5 @@ Only after the relation-only diagnostic passes, unfreeze the normal actor path a
 The old object-summary residual path is removed. It used clip-level object statistics and optional hand-coded action evidence gates. That makes it too easy to encode dataset priors, and it does not directly solve actor-object association.
 
 The actor-only selector is also removed. A single `[B, K, M + 1]` object distribution can learn "which object is near this actor," but it is the wrong bottleneck for cluttered scenes where different action hypotheses need different object evidence.
+
+The shuffled-object negative must be label-mismatched, not a simple adjacent batch roll. Toyota validation order is deterministic, so adjacent samples can be correlated by sorted file id, scene, or action family. A valid shuffled negative should break the action/object relationship instead of replacing objects with a nearby similar clip.

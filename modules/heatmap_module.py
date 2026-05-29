@@ -312,11 +312,51 @@ class HeatmapModule(pl.LightningModule):
             batch_size = kwargs["object_valid"].shape[0]
             if batch_size < 2:
                 return None
+            perm = self._label_mismatched_object_indices(
+                target,
+                batch_size,
+                kwargs["object_valid"].device,
+            )
+            if perm is None:
+                return None
             return {
-                key: value.roll(shifts=1, dims=0)
+                key: value.index_select(0, perm.to(device=value.device))
                 for key, value in kwargs.items()
             }
         raise ValueError(f"Unsupported object mode: {mode}")
+
+    def _primary_action_labels(self, target):
+        actions = target["actions"].long()
+        valid = target["valid"].bool()
+        has_actor = valid.any(dim=1)
+        first_slot = valid.long().argmax(dim=1)
+        labels = actions[
+            torch.arange(actions.shape[0], device=actions.device),
+            first_slot,
+        ]
+        return labels.masked_fill(~has_actor, -1)
+
+    def _label_mismatched_object_indices(self, target, batch_size, device):
+        labels = self._primary_action_labels(target).to(device=device)
+        if labels.shape[0] != batch_size:
+            raise ValueError(
+                "Object shuffle batch size does not match target labels: "
+                f"{batch_size} vs {labels.shape[0]}"
+            )
+        indices = torch.arange(batch_size, device=device)
+        valid_label = labels >= 0
+        perm = torch.empty(batch_size, dtype=torch.long, device=device)
+        for i in range(batch_size):
+            if bool(valid_label[i]):
+                candidates = indices[valid_label & (labels != labels[i])]
+            else:
+                candidates = indices[indices != i]
+            if candidates.numel() == 0:
+                return None
+            label_offset = int(labels[i].item()) if bool(valid_label[i]) else 0
+            choice = (i * 9973 + label_offset * 37) % int(candidates.numel())
+            perm[i] = candidates[choice]
+        return perm
 
     def _actor_logits_for_object_mode(self, imgs, target, mode):
         object_kwargs = self._object_kwargs(target, mode=mode)
