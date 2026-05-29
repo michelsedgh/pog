@@ -7,6 +7,7 @@ import numpy as np
 import torchvision
 import torch.nn.functional as F
 from argparse import ArgumentParser
+import hashlib
 import json
 import math
 import re
@@ -139,6 +140,7 @@ class ToyotaSMDataset(Dataset):
                 f"{NUM_OBJECT_CLASSES} classes, got {self.num_object_classes}"
             )
         self.object_detector_cache = kwargs.get("object_detector_cache")
+        self.object_cache_dir = kwargs.get("toyota_object_cache_dir")
         self.object_camera_allowlist = parse_object_camera_allowlist(
             kwargs.get("object_camera_allowlist", None)
         )
@@ -242,6 +244,7 @@ class ToyotaSMDataset(Dataset):
         self.skeleton_zip_path = kwargs.get("toyota_skeleton_zip") or os.path.join(
             self.data_dir, "toyota_smarthome_skeleton_v1.2.zip"
         )
+        self.landmark_cache_dir = kwargs.get("toyota_landmark_cache_dir")
         self.frame_count_cache_path = kwargs.get(
             "toyota_frame_count_cache"
         ) or os.path.join(self.data_dir, "toyota_mp4_frame_counts.json")
@@ -294,6 +297,23 @@ class ToyotaSMDataset(Dataset):
     def setup(self, stage=None):
         print(f"Setting up ToyotaSMDataset for {self.set_type}...")
         if self.needs_skeleton:
+            landmark_cache_path = self._landmark_cache_path()
+            if landmark_cache_path and os.path.exists(landmark_cache_path):
+                self.landmark_list = torch.load(
+                    landmark_cache_path,
+                    map_location="cpu",
+                    weights_only=False,
+                )
+                if len(self.landmark_list) != self.length:
+                    raise RuntimeError(
+                        "Toyota landmark cache length mismatch: "
+                        f"{len(self.landmark_list)} != {self.length}"
+                    )
+                print(
+                    f"Loaded preprocessed Toyota landmark cache: {landmark_cache_path}"
+                )
+                return
+
             self.landmark_list = []
             # read landmarks into memory
             file_folder = "skeleton"
@@ -339,6 +359,11 @@ class ToyotaSMDataset(Dataset):
             finally:
                 if skeleton_zip is not None:
                     skeleton_zip.close()
+            if landmark_cache_path:
+                tmp_path = f"{landmark_cache_path}.{os.getpid()}.tmp"
+                torch.save(self.landmark_list, tmp_path)
+                os.replace(tmp_path, landmark_cache_path)
+                print(f"Saved preprocessed Toyota landmark cache: {landmark_cache_path}")
             # iterate over frames and landmarks in memory
 
     def add_model_specific_args(parent_parser):
@@ -378,6 +403,8 @@ class ToyotaSMDataset(Dataset):
         parser.add_argument("--toyota_mp4_zip", type=str, default=None)
         parser.add_argument("--toyota_video_cache_dir", type=str, default=None)
         parser.add_argument("--toyota_frame_count_cache", type=str, default=None)
+        parser.add_argument("--toyota_object_cache_dir", type=str, default=None)
+        parser.add_argument("--toyota_landmark_cache_dir", type=str, default=None)
         parser.add_argument("--toyota_actor_box_expand", type=float, default=1.15)
         parser.add_argument("--toyota_actor_box_jitter_prob", type=float, default=0.8)
         parser.add_argument("--toyota_actor_box_center_jitter", type=float, default=0.08)
@@ -1962,6 +1989,74 @@ class ToyotaSMDataset(Dataset):
             json.dump(self._frame_count_cache, f)
         os.replace(tmp_path, self.frame_count_cache_path)
 
+    def _cache_digest(self, payload):
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        return hashlib.sha256(encoded).hexdigest()[:20]
+
+    def _path_signature(self, path):
+        if path is None:
+            return None
+        if not os.path.exists(path):
+            return {"path": os.path.abspath(path), "missing": True}
+        stat = os.stat(path)
+        return {
+            "path": os.path.abspath(path),
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+        }
+
+    def _jsonable_mapping(self, value):
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            return {
+                str(key): self._jsonable_mapping(value[key])
+                for key in sorted(value.keys(), key=str)
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [self._jsonable_mapping(item) for item in sorted(value, key=str)]
+        if isinstance(value, np.generic):
+            return value.item()
+        return value
+
+    def _cache_path(self, cache_dir, prefix, payload):
+        if not cache_dir:
+            return None
+        os.makedirs(cache_dir, exist_ok=True)
+        digest = self._cache_digest(payload)
+        return os.path.join(cache_dir, f"{prefix}_{digest}.pt")
+
+    def _object_cache_path(self, file_ids):
+        payload = {
+            "kind": "toyota_object_cache_v2",
+            "set_type": self.set_type,
+            "source": self._path_signature(self.object_detector_cache),
+            "file_ids": sorted(str(file_id) for file_id in file_ids),
+            "object_conf_threshold": self.object_conf_threshold,
+            "object_camera_allowlist": self._jsonable_mapping(
+                self.object_camera_allowlist
+            ),
+            "object_ignore_regions": self._jsonable_mapping(self.object_ignore_regions),
+            "num_object_classes": self.num_object_classes,
+        }
+        return self._cache_path(self.object_cache_dir, "objects", payload)
+
+    def _landmark_cache_path(self):
+        skeleton_source = self.skeleton_zip_path
+        skeleton_folder = os.path.join(self.data_dir, "skeleton")
+        if not os.path.exists(skeleton_source) and os.path.isdir(skeleton_folder):
+            skeleton_source = skeleton_folder
+        payload = {
+            "kind": "toyota_landmark_cache_v1",
+            "set_type": self.set_type,
+            "source": self._path_signature(skeleton_source),
+            "file_ids": [str(file_id) for file_id in self.data_df.file_id.tolist()],
+            "pose_landmarks": self.pose_landmarks,
+        }
+        return self._cache_path(self.landmark_cache_dir, "landmarks", payload)
+
     def _load_object_cache(self, file_ids):
         if not self.object_detector_cache:
             raise ValueError("object_prompt requires --object_detector_cache")
@@ -1969,6 +2064,15 @@ class ToyotaSMDataset(Dataset):
             raise FileNotFoundError(self.object_detector_cache)
 
         file_ids = set(file_ids)
+        cache_path = self._object_cache_path(file_ids)
+        if cache_path and os.path.exists(cache_path):
+            cache = torch.load(cache_path, map_location="cpu", weights_only=False)
+            print(
+                f"Loaded preprocessed Toyota object cache: {cache_path} "
+                f"for {len(file_ids)} clips."
+            )
+            return cache
+
         cache = {file_id: {} for file_id in file_ids}
         loaded_objects = 0
         with open(self.object_detector_cache) as f:
@@ -2006,6 +2110,11 @@ class ToyotaSMDataset(Dataset):
             f"Loaded {loaded_objects} cached Toyota objects from "
             f"{self.object_detector_cache} for {len(file_ids)} clips."
         )
+        if cache_path:
+            tmp_path = f"{cache_path}.{os.getpid()}.tmp"
+            torch.save(cache, tmp_path)
+            os.replace(tmp_path, cache_path)
+            print(f"Saved preprocessed Toyota object cache: {cache_path}")
         return cache
 
     def _parse_cache_object(self, obj, file_id=None, width=None, height=None):
