@@ -782,11 +782,14 @@ class HeatmapModule(pl.LightningModule):
                     inter_valid = inter_valid & positive_mask.any(dim=-1)
                 if inter_valid.any():
                     log_probs = F.log_softmax(selection_logits.float(), dim=-1)
+                    valid_log_probs = log_probs[inter_valid]
+                    valid_positive_mask = positive_mask[inter_valid]
+                    mask_value = torch.finfo(valid_log_probs.dtype).min
                     selected_log_prob = torch.logsumexp(
-                        log_probs.masked_fill(~positive_mask, -torch.inf),
+                        valid_log_probs.masked_fill(~valid_positive_mask, mask_value),
                         dim=-1,
                     )
-                    loss_interaction = -selected_log_prob[inter_valid].mean()
+                    loss_interaction = -selected_log_prob.mean()
                 else:
                     loss_interaction = selection_logits.sum() * 0.0
                 loss = loss + loss_interaction * self.model.hparams.get(
