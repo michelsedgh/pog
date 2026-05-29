@@ -8,6 +8,10 @@ The required implementation commit is:
 68e478e Add scoped object specialist heads
 ```
 
+Your latest `git log -1` may show a newer documentation commit. That is fine. The required check is that `68e478e` is an ancestor of `HEAD`.
+
+The setup cell writes `/content/poguise_colab_env.sh`, but the cells below also define the needed paths directly so they can be pasted into Colab without sourcing that shell file.
+
 The first run is **relation-only**, not full fine-tune. The goal is to prove that scoped object specialists improve the specific object-confusion groups while the base actor model is frozen.
 
 ## What This Architecture Trains
