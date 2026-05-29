@@ -289,9 +289,15 @@ OBJECTLESS_ACTIONS = {
 GROUPS = {
     "laptop_book_tv": ["Uselaptop", "Readbook", "WatchTV"],
     "phone_tablet": ["Usetelephone", "Usetablet"],
+    "phone_tv": ["Usetelephone", "WatchTV"],
     "drink": [
         "Drink.Frombottle",
         "Drink.Fromcan",
+        "Drink.Fromcup",
+        "Drink.Fromglass",
+    ],
+    "drink_cup_bottle_glass": [
+        "Drink.Frombottle",
         "Drink.Fromcup",
         "Drink.Fromglass",
     ],
@@ -306,4 +312,19 @@ GROUPS = {
         "Eat.Snack",
         "Takepills",
     ],
+}
+
+OBJECT_SPECIALIST_GROUPS = {
+    "laptop_book_tv": {
+        "actions": ["Uselaptop", "Readbook", "WatchTV"],
+        "objects": ["laptop", "keyboard_mouse", "book", "tv_monitor", "remote"],
+    },
+    "phone_tv": {
+        "actions": ["Usetelephone", "WatchTV"],
+        "objects": ["phone", "tv_monitor", "remote"],
+    },
+    "drink": {
+        "actions": ["Drink.Frombottle", "Drink.Fromcup", "Drink.Fromglass"],
+        "objects": ["bottle", "cup", "glass"],
+    },
 }

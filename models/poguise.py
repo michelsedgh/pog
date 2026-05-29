@@ -12,6 +12,42 @@ import pickle
 
 from collections import OrderedDict
 import json
+from datasets.object_vocab import OBJECT_SPECIALIST_GROUPS, OBJECT_TO_ID
+
+
+TOYOTA_CS_ACTION_TO_INDEX = {
+    "Cook.Cleandishes": 0,
+    "Cook.Cleanup": 1,
+    "Cook.Cut": 2,
+    "Cook.Stir": 3,
+    "Cook.Usestove": 4,
+    "Cutbread": 5,
+    "Drink.Frombottle": 6,
+    "Drink.Fromcan": 7,
+    "Drink.Fromcup": 8,
+    "Drink.Fromglass": 9,
+    "Eat.Attable": 10,
+    "Eat.Snack": 11,
+    "Enter": 12,
+    "Getup": 13,
+    "Laydown": 14,
+    "Leave": 15,
+    "Makecoffee.Pourgrains": 16,
+    "Makecoffee.Pourwater": 17,
+    "Maketea.Boilwater": 18,
+    "Maketea.Insertteabag": 19,
+    "Pour.Frombottle": 20,
+    "Pour.Fromcan": 21,
+    "Pour.Fromkettle": 22,
+    "Readbook": 23,
+    "Sitdown": 24,
+    "Takepills": 25,
+    "Uselaptop": 26,
+    "Usetablet": 27,
+    "Usetelephone": 28,
+    "Walk": 29,
+    "WatchTV": 30,
+}
 
 
 def load_state_dict(
@@ -358,6 +394,9 @@ class POGUISE(pl.LightningModule):
         self.object_delta_scale = float(self.hparams.get("object_delta_scale", 1.0))
         if self.object_delta_scale <= 0:
             raise ValueError("object_delta_scale must be positive")
+        self.object_specialist_heads_enabled = bool(
+            self.hparams.get("object_specialist_heads", 0)
+        )
         interaction_heatmap_size = int(self.hparams.get("object_heatmap_size", 56))
         if interaction_heatmap_size != 56:
             raise ValueError("object interaction heatmaps are trained at 56x56")
@@ -419,6 +458,8 @@ class POGUISE(pl.LightningModule):
                 torch.logit(torch.tensor(action_gate_init, dtype=torch.float32)),
             )
         )
+        if self.object_specialist_heads_enabled:
+            self._create_object_specialist_modules(dim, hidden_dim, dropout)
 
         nn.init.normal_(self.object_cls_embed.weight, std=0.02)
         nn.init.normal_(self.object_valid_embed.weight, std=0.02)
@@ -426,8 +467,60 @@ class POGUISE(pl.LightningModule):
         nn.init.zeros_(self.object_action_delta[-1].weight)
         nn.init.zeros_(self.object_action_delta[-1].bias)
 
+    def _object_specialist_specs(self):
+        if int(self.hparams.num_classes) != 31:
+            raise ValueError("object_specialist_heads currently requires Toyota CS 31 classes")
+        task_type = str(self.hparams.get("task_type", "CS"))
+        if task_type != "CS":
+            raise ValueError("object_specialist_heads currently supports task_type=CS only")
+
+        specs = []
+        for group_name, group in OBJECT_SPECIALIST_GROUPS.items():
+            action_indices = [
+                TOYOTA_CS_ACTION_TO_INDEX[action_name]
+                for action_name in group["actions"]
+            ]
+            object_indices = [OBJECT_TO_ID[name] for name in group["objects"]]
+            if any(idx >= self.num_object_classes for idx in object_indices):
+                raise ValueError(
+                    f"Specialist group {group_name} references object ids outside "
+                    f"num_object_classes={self.num_object_classes}: {object_indices}"
+                )
+            specs.append((group_name, action_indices, object_indices))
+        return specs
+
+    def _create_object_specialist_modules(self, dim, hidden_dim, dropout):
+        self.object_specialist_specs = self._object_specialist_specs()
+        self.object_specialist_base_mlp = nn.Sequential(
+            nn.Linear(1, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim),
+        )
+        self.object_specialist_delta_norms = nn.ModuleDict()
+        self.object_specialist_delta_heads = nn.ModuleDict()
+        for group_name, action_indices, object_indices in self.object_specialist_specs:
+            self.register_buffer(
+                f"object_specialist_{group_name}_actions",
+                torch.tensor(action_indices, dtype=torch.long),
+                persistent=False,
+            )
+            self.register_buffer(
+                f"object_specialist_{group_name}_objects",
+                torch.tensor(object_indices, dtype=torch.long),
+                persistent=False,
+            )
+            self.object_specialist_delta_norms[group_name] = nn.LayerNorm(dim * 7)
+            self.object_specialist_delta_heads[group_name] = nn.Sequential(
+                nn.Linear(dim * 7, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, 1),
+            )
+            nn.init.zeros_(self.object_specialist_delta_heads[group_name][-1].weight)
+            nn.init.zeros_(self.object_specialist_delta_heads[group_name][-1].bias)
+
     def _object_relation_modules(self):
-        return (
+        modules = [
             self.object_cls_embed,
             self.object_bbox_mlp,
             self.object_conf_mlp,
@@ -440,7 +533,16 @@ class POGUISE(pl.LightningModule):
             self.object_action_geom_bias,
             self.object_action_delta_norm,
             self.object_action_delta,
-        )
+        ]
+        if self.object_specialist_heads_enabled:
+            modules.extend(
+                [
+                    self.object_specialist_base_mlp,
+                    self.object_specialist_delta_norms,
+                    self.object_specialist_delta_heads,
+                ]
+            )
+        return tuple(modules)
 
     def _apply_object_dropout(self, object_valid):
         if object_valid is None or not self.training:
@@ -630,6 +732,7 @@ class POGUISE(pl.LightningModule):
         object_conf=None,
         object_valid=None,
         action_labels=None,
+        base_logits=None,
     ):
         num_classes = int(self.hparams.num_classes)
         if object_boxes is None:
@@ -729,6 +832,21 @@ class POGUISE(pl.LightningModule):
         action_alpha = torch.softmax(selection_logits.float(), dim=-1).to(
             dtype=actor_feat.dtype
         )
+        if self.object_specialist_heads_enabled:
+            return self._object_specialist_relation(
+                actor_feat=actor_feat,
+                spatial_feat=spatial_feat,
+                object_boxes=object_boxes,
+                object_valid=object_valid,
+                object_cls_with_null=object_cls_with_null,
+                object_valid_with_null=object_valid_with_null,
+                object_value=object_value,
+                action_scores=selection_logits,
+                action_alpha=action_alpha,
+                action_embed=action_embed,
+                base_logits=base_logits,
+                action_labels=action_labels,
+            )
         real_object_mass = action_alpha[..., : object_boxes.shape[1]].sum(
             dim=-1,
         )
@@ -794,6 +912,141 @@ class POGUISE(pl.LightningModule):
         residual = bounded_delta * class_gate[None, None, :] * real_object_mass
         return residual, selection_logits, interaction_heatmap
 
+    def _object_specialist_relation(
+        self,
+        actor_feat,
+        spatial_feat,
+        object_boxes,
+        object_valid,
+        object_cls_with_null,
+        object_valid_with_null,
+        object_value,
+        action_scores,
+        action_alpha,
+        action_embed,
+        base_logits,
+        action_labels=None,
+    ):
+        if base_logits is None:
+            raise ValueError("object_specialist_heads requires base_logits")
+
+        batch_size, num_actors, num_classes = base_logits.shape
+        residual = base_logits.new_zeros(base_logits.shape)
+        specialist_selection_logits = action_scores.clone()
+        interaction_heatmap = None
+
+        object_value = object_value.clone()
+        object_value[:, -1] = 0
+        class_gate = torch.sigmoid(self.object_relation_gate_logit).to(
+            device=base_logits.device,
+            dtype=base_logits.dtype,
+        )
+        none_slot = object_cls_with_null.shape[1] - 1
+        slot_ids = torch.arange(
+            object_cls_with_null.shape[1],
+            device=object_cls_with_null.device,
+        )
+
+        for group_name, _, _ in self.object_specialist_specs:
+            action_idx = getattr(self, f"object_specialist_{group_name}_actions").to(
+                device=base_logits.device
+            )
+            object_idx = getattr(self, f"object_specialist_{group_name}_objects").to(
+                device=object_cls_with_null.device
+            )
+            object_allowed = torch.isin(object_cls_with_null, object_idx)
+            object_allowed = object_allowed | (slot_ids[None, :] == none_slot)
+            object_allowed = object_allowed & object_valid_with_null
+
+            group_scores = action_scores.index_select(2, action_idx)
+            group_scores = group_scores.masked_fill(
+                ~object_allowed[:, None, None, :],
+                torch.finfo(group_scores.dtype).min,
+            )
+            group_alpha = torch.softmax(group_scores.float(), dim=-1).to(
+                dtype=actor_feat.dtype
+            )
+            specialist_selection_logits.index_copy_(2, action_idx, group_scores)
+
+            real_mass = group_alpha[..., : object_boxes.shape[1]].sum(dim=-1)
+            group_context = torch.einsum(
+                "bkgm,bmd->bkgd",
+                group_alpha,
+                object_value,
+            )
+            group_heatmap = self._build_interaction_heatmap(
+                group_alpha,
+                object_boxes,
+                object_valid,
+                self.net.HW_OUT_CONV,
+            )
+            group_visual = self._pool_interaction_context(spatial_feat, group_heatmap)
+            group_visual = group_visual * real_mass[..., None]
+
+            actor_group = actor_feat[:, :, None, :].expand(
+                -1,
+                -1,
+                action_idx.numel(),
+                -1,
+            )
+            action_group = action_embed.index_select(0, action_idx)[None, None, :, :]
+            action_group = action_group.expand(batch_size, num_actors, -1, -1)
+            base_group = base_logits.index_select(2, action_idx).to(
+                dtype=actor_feat.dtype
+            )
+            base_group_embed = self.object_specialist_base_mlp(
+                base_group.unsqueeze(-1)
+            )
+            group_feat = torch.cat(
+                [
+                    group_context,
+                    group_visual,
+                    actor_group * group_context,
+                    actor_group * group_visual,
+                    action_group * group_context,
+                    action_group * group_visual,
+                    base_group_embed,
+                ],
+                dim=-1,
+            )
+            group_feat = self.object_specialist_delta_norms[group_name](group_feat)
+            group_raw = self.object_specialist_delta_heads[group_name](
+                group_feat
+            ).squeeze(-1)
+            group_delta = self.object_delta_scale * torch.tanh(group_raw)
+            group_delta = (
+                group_delta
+                * class_gate.index_select(0, action_idx)[None, None, :]
+                * real_mass
+            )
+            residual.index_add_(2, action_idx, group_delta.to(dtype=residual.dtype))
+
+        if action_labels is not None:
+            action_labels = action_labels.to(
+                device=base_logits.device,
+                dtype=torch.long,
+            ).clamp(0, num_classes - 1)
+            gather_idx = action_labels[:, :, None, None].expand(
+                -1,
+                -1,
+                1,
+                action_alpha.shape[-1],
+            )
+            target_action_alpha = torch.softmax(
+                specialist_selection_logits.gather(dim=2, index=gather_idx)
+                .squeeze(2)
+                .float(),
+                dim=-1,
+            ).to(dtype=actor_feat.dtype)
+            interaction_heatmap = self._build_interaction_heatmap(
+                target_action_alpha,
+                object_boxes,
+                object_valid,
+                self.interaction_heatmap_size,
+            )
+
+        return residual, specialist_selection_logits, interaction_heatmap
+
     def forward(
         self,
         x,
@@ -851,6 +1104,7 @@ class POGUISE(pl.LightningModule):
                     object_conf=object_conf,
                     object_valid=object_valid,
                     action_labels=action_labels,
+                    base_logits=action_logits,
                 )
                 action_logits = action_logits + object_delta
             else:
@@ -945,6 +1199,7 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--object_relation_gate_init", type=float, default=0.25)
         parser.add_argument("--object_action_gate_init", type=float, default=0.05)
         parser.add_argument("--object_delta_scale", type=float, default=1.0)
+        parser.add_argument("--object_specialist_heads", type=int, default=0)
         parser.add_argument("--object_relation_only", type=int, default=0)
         parser.add_argument(
             "--object_interaction_heatmap_weight",

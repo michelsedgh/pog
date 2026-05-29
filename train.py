@@ -270,6 +270,7 @@ def _migrate_object_action_head(module, checkpoint):
         if not (
             key == "model.object_relation_gate_logit"
             or key.startswith("model.object_action_")
+            or key.startswith("model.object_specialist_")
         ):
             continue
         if key in current_state and state_dict[key].shape != current_state[key].shape:
@@ -355,6 +356,9 @@ def build_parser():
     parser.add_argument("--object_counterfactual_margin_weight", type=float, default=0.0)
     parser.add_argument("--object_counterfactual_margin", type=float, default=0.05)
     parser.add_argument("--object_objectless_consistency_weight", type=float, default=0.0)
+    parser.add_argument("--object_specialist_group_loss_weight", type=float, default=0.0)
+    parser.add_argument("--object_specialist_no_boost_weight", type=float, default=0.0)
+    parser.add_argument("--object_specialist_no_boost_margin", type=float, default=0.02)
     parser.add_argument("--log_kp_loss_weight", type=int, default=0)
     parser.add_argument("--grad_weights", type=int, default=0)
     parser.add_argument("--deepspeed_optim", type=int, default=0)

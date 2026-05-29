@@ -9,7 +9,7 @@ import os
 from losses.softtarget import SoftTargetCrossEntropy
 from losses.heatmap_loss import KeypointMSELoss
 import pickle
-from datasets.object_vocab import GROUPS
+from datasets.object_vocab import GROUPS, OBJECT_SPECIALIST_GROUPS, OBJECT_TO_ID
 from datasets.toyotasm import CS_DICT, CV_DICT
 
 try:
@@ -116,6 +116,12 @@ class HeatmapModule(pl.LightningModule):
             hparams.get("actor_val_diagnostic_max_pairs", 8)
         )
         self.group_indices = self._build_group_indices()
+        self.object_specialist_specs = (
+            self._build_object_specialist_specs()
+            if self.object_prompt
+            and bool(hparams.get("object_specialist_heads", 0))
+            else {}
+        )
         if self.object_prompt:
             self.val_acc_macro_objects_on = torchmetrics.Accuracy(
                 task="multiclass", num_classes=hparams.num_classes, average="macro"
@@ -158,6 +164,9 @@ class HeatmapModule(pl.LightningModule):
                 "model.object_action_geom_bias",
                 "model.object_action_delta_norm",
                 "model.object_action_delta",
+                "model.object_specialist_base_mlp",
+                "model.object_specialist_delta_norms",
+                "model.object_specialist_delta_heads",
                 "model.object_relation_gate_logit",
             ]
             if self.model.hparams.get("use_register_tokens", 0):
@@ -222,21 +231,11 @@ class HeatmapModule(pl.LightningModule):
         )
 
     def _object_relation_params(self):
-        return (
-            list(self.model.object_cls_embed.parameters())
-            + list(self.model.object_bbox_mlp.parameters())
-            + list(self.model.object_conf_mlp.parameters())
-            + list(self.model.object_visual_mlp.parameters())
-            + list(self.model.object_valid_embed.parameters())
-            + list(self.model.object_action_embed.parameters())
-            + list(self.model.object_action_query.parameters())
-            + list(self.model.object_action_key.parameters())
-            + list(self.model.object_action_value.parameters())
-            + list(self.model.object_action_geom_bias.parameters())
-            + list(self.model.object_action_delta_norm.parameters())
-            + list(self.model.object_action_delta.parameters())
-            + [self.model.object_relation_gate_logit]
-        )
+        params = []
+        for module in self.model._object_relation_modules():
+            params.extend(module.parameters())
+        params.append(self.model.object_relation_gate_logit)
+        return params
 
     def _head_params(self):
         if not self.actor_prompt:
@@ -280,6 +279,28 @@ class HeatmapModule(pl.LightningModule):
             if indices:
                 groups[group_name] = torch.tensor(indices, dtype=torch.long)
         return groups
+
+    def _build_object_specialist_specs(self):
+        label_dict = self._toyota_label_dict()
+        specs = {}
+        for group_name, group in OBJECT_SPECIALIST_GROUPS.items():
+            action_indices = [
+                int(label_dict[action_name]) - 1
+                for action_name in group["actions"]
+                if action_name in label_dict
+            ]
+            object_indices = [
+                int(OBJECT_TO_ID[object_name])
+                for object_name in group["objects"]
+                if object_name in OBJECT_TO_ID
+            ]
+            if len(action_indices) < 2 or not object_indices:
+                continue
+            specs[group_name] = {
+                "actions": torch.tensor(action_indices, dtype=torch.long),
+                "objects": torch.tensor(object_indices, dtype=torch.long),
+            }
+        return specs
 
     def _object_kwargs(self, target, mode="on"):
         if not self.object_prompt:
@@ -495,6 +516,79 @@ class HeatmapModule(pl.LightningModule):
             selection_logits.shape[-1],
         )
         return selection_logits.gather(dim=2, index=gather_index).squeeze(2)
+
+    def _object_specialist_loss(self, preds, object_residual, target, valid, stage):
+        group_weight = float(
+            self.model.hparams.get("object_specialist_group_loss_weight", 0.0)
+        )
+        no_boost_weight = float(
+            self.model.hparams.get("object_specialist_no_boost_weight", 0.0)
+        )
+        if (
+            object_residual is None
+            or not self.object_specialist_specs
+            or (group_weight <= 0.0 and no_boost_weight <= 0.0)
+        ):
+            return preds.new_zeros(())
+
+        actions = target["actions"].to(device=preds.device, dtype=torch.long)
+        object_cls = target["object_cls"].to(device=preds.device, dtype=torch.long)
+        object_valid = target["object_valid"].to(device=preds.device, dtype=torch.bool)
+        total = preds.new_zeros(())
+
+        group_losses = []
+        no_boost_losses = []
+        for group_name, spec in self.object_specialist_specs.items():
+            action_idx = spec["actions"].to(device=preds.device)
+            object_idx = spec["objects"].to(device=preds.device)
+
+            in_group = torch.isin(actions, action_idx) & valid
+            if group_weight > 0.0 and in_group.any():
+                group_logits = preds.index_select(2, action_idx)[in_group]
+                group_labels = actions[in_group]
+                group_targets = (
+                    group_labels[:, None] == action_idx[None, :]
+                ).long().argmax(dim=1)
+                group_losses.append(F.cross_entropy(group_logits, group_targets))
+
+            object_visible = (
+                torch.isin(object_cls, object_idx) & object_valid
+            ).any(dim=1)
+            outside_group_visible = (~torch.isin(actions, action_idx)) & valid
+            outside_group_visible = outside_group_visible & object_visible[:, None]
+            if no_boost_weight > 0.0 and outside_group_visible.any():
+                residual_group = object_residual.index_select(2, action_idx)
+                max_boost = residual_group[outside_group_visible].max(dim=-1).values
+                margin = float(
+                    self.model.hparams.get("object_specialist_no_boost_margin", 0.02)
+                )
+                no_boost_losses.append(F.relu(max_boost - margin).mean())
+
+        if group_losses:
+            loss_group = torch.stack(group_losses).mean()
+            total = total + loss_group * group_weight
+            self.log(
+                f"{stage}_loss_object_specialist_group",
+                loss_group,
+                on_step=stage == "train",
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+        if no_boost_losses:
+            loss_no_boost = torch.stack(no_boost_losses).mean()
+            total = total + loss_no_boost * no_boost_weight
+            self.log(
+                f"{stage}_loss_object_specialist_no_boost",
+                loss_no_boost,
+                on_step=stage == "train",
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+        return total
 
     def _pose_heatmap_pred(self, hm_preds):
         if not torch.is_tensor(hm_preds):
@@ -1086,6 +1180,15 @@ class HeatmapModule(pl.LightningModule):
                     prog_bar=False,
                     logger=True,
                     sync_dist=True,
+                )
+
+            if self.model.hparams.get("object_specialist_heads", 0):
+                loss = loss + self._object_specialist_loss(
+                    preds,
+                    object_residual,
+                    target,
+                    valid,
+                    stage,
                 )
 
             if stage == "train":
