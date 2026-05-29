@@ -1461,8 +1461,8 @@ class HeatmapModule(pl.LightningModule):
             self.val_f1(preds, labels)
             self._log_group_metrics("val_group_{group}_acc", preds, labels)
             self._log_object_ablation_eval(imgs, target, preds, labels)
-            self.validation_step_outputs["preds"].append(preds)
-            self.validation_step_outputs["labels"].append(labels)
+            self.validation_step_outputs["preds"].append(preds.detach())
+            self.validation_step_outputs["labels"].append(labels.detach())
             self.log(
                 "val_loss",
                 loss,
@@ -1550,8 +1550,8 @@ class HeatmapModule(pl.LightningModule):
         self.val_f1(preds, labels)
 
         # save preds and labels for later
-        self.validation_step_outputs["preds"].append(preds)
-        self.validation_step_outputs["labels"].append(labels)
+        self.validation_step_outputs["preds"].append(preds.detach())
+        self.validation_step_outputs["labels"].append(labels.detach())
         # Add sync_dist=True to sync logging across all GPU workers (may have performance impact)
         self.log(
             "val_loss",
@@ -1673,6 +1673,8 @@ class HeatmapModule(pl.LightningModule):
                 )
         self.validation_step_outputs.clear()
         self.validation_step_outputs = {"preds": [], "labels": []}
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         return super().on_validation_epoch_end()
 
     def test_step(self, batch, batch_idx):
