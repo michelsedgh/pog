@@ -329,7 +329,7 @@ class HeatmapModule(pl.LightningModule):
         if weight.ndim == 2:
             weight = weight[:, :, None, None]
         if weight.sum() <= 0:
-            return pred_obj.sum() * 0.0
+            return pred_obj.new_zeros(())
         loss = (pred_obj - target_obj.to(dtype=pred_obj.dtype)) ** 2
         return (loss * weight).sum() / weight.sum().clamp_min(1.0)
 
@@ -791,7 +791,7 @@ class HeatmapModule(pl.LightningModule):
                     )
                     loss_interaction = -selected_log_prob.mean()
                 else:
-                    loss_interaction = selection_logits.sum() * 0.0
+                    loss_interaction = selection_logits.new_zeros(())
                 loss = loss + loss_interaction * self.model.hparams.get(
                     "object_interaction_loss_weight", 0.05
                 )
@@ -840,7 +840,7 @@ class HeatmapModule(pl.LightningModule):
                         target_heatmap[heatmap_valid],
                     )
                 else:
-                    loss_interaction_heatmap = interaction_heatmap.sum() * 0.0
+                    loss_interaction_heatmap = interaction_heatmap.new_zeros(())
                 loss = loss + loss_interaction_heatmap * self.model.hparams.get(
                     "object_interaction_heatmap_weight", 0.0
                 )
