@@ -367,15 +367,15 @@ class HeatmapModule(pl.LightningModule):
 
         off_logits = None
         shuffled_logits = None
-        with torch.no_grad():
-            if margin_weight > 0.0 or consistency_weight > 0.0:
+        if margin_weight > 0.0 or consistency_weight > 0.0:
+            with torch.no_grad():
                 off_logits = self._actor_logits_for_object_mode(imgs, target, "off")
-            if margin_weight > 0.0:
-                shuffled_logits = self._actor_logits_for_object_mode(
-                    imgs,
-                    target,
-                    "shuffled",
-                )
+        if margin_weight > 0.0:
+            shuffled_logits = self._actor_logits_for_object_mode(
+                imgs,
+                target,
+                "shuffled",
+            )
 
         weighted_loss = normal_logits.new_zeros(())
         margin_losses = []
