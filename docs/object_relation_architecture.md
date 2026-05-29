@@ -4,7 +4,7 @@
 
 The model must distinguish actions with similar pose and motion by using the objects near the actor. A global clip-level object summary is not enough: it can learn scene priors, but it cannot answer which object the actor is using when several objects are present.
 
-The concrete failure mode is `Uselaptop` being predicted as `Readbook`. The useful signal is not only "a laptop exists"; it is "this actor token should attend to this detected laptop/book/phone/cup token when forming the action logits."
+The concrete failure mode is `Uselaptop` being predicted as `Readbook`, or `WatchTV` being corrupted by a visible laptop. The useful signal is not only "a laptop exists"; it is "for this actor and this candidate action class, which detected object evidence supports or contradicts that action?"
 
 ## Evidence
 
@@ -21,14 +21,17 @@ Use one object path:
 2. Keep detector boxes/classes/confidences as object tokens.
 3. Append an explicit `NONE` object token for objectless or uncertain actions.
 4. Pool object visual features from the PO-GUISE heatmap-token feature map at each detected object box.
-5. Score every actor/object pair with `[actor, object, actor * object, geometry]`.
-6. Train object selection with a positive object-token set, not a single guessed instance. For example, `Uselaptop` accepts any detected laptop token for that actor.
-7. Build an actor-conditioned interaction heatmap from the selected object distribution.
-8. Supervise that interaction heatmap at the same 56x56 resolution as the PO-GUISE pose/object heatmaps. Downsample a copy only when pooling from the internal heatmap-token feature grid.
-9. Pool visual context through that interaction heatmap.
-10. Predict an action-logit residual from object-conditioned features only:
-   `[selected_object_context, interaction_visual_context, actor * selected_object_context, actor * interaction_visual_context]`.
-11. Evaluate object usefulness with real objects, objects-off, and objects-shuffled. A useful object path must make real objects beat both off and shuffled on macro accuracy and F1.
+5. Score every actor/action/object tuple, not only actor/object pairs. The selection tensor is `[B, K, C, M + 1]`, where `C` is the action class count and the final object slot is `NONE`.
+6. For each action class, attend to object tokens and produce class-specific object context. `Uselaptop` can attend to laptop evidence while `Readbook` attends to book evidence in the same clip.
+7. Train object selection on the true-action slice with a positive object-token set, not a single guessed instance. For example, `Uselaptop` accepts any detected laptop token for that actor.
+8. Build the supervised interaction heatmap from the true-action object distribution.
+9. Supervise that interaction heatmap at the same 56x56 resolution as the PO-GUISE pose/object heatmaps. Build an action-conditioned 8x8 copy only for pooling from the internal heatmap-token feature grid.
+10. Pool visual context through each action-conditioned interaction heatmap.
+11. Predict a bounded per-class action-logit residual from action-conditioned features:
+   `[actor, action, selected_object_context, interaction_visual_context, actor * selected_object_context, actor * interaction_visual_context]`.
+12. Apply a per-class gate initialized near zero and regularize the residual magnitude.
+13. Train real-object counterfactuals against objects-off and objects-shuffled, and train objectless actions to stay consistent with objects-off.
+14. Evaluate object usefulness with real objects, objects-off, and objects-shuffled. A useful object path must make real objects beat both off and shuffled on macro accuracy and F1.
 
 This is intentionally not an action-class prior or object-existence shortcut. The model sees all detected objects, then learns which object token and spatial region explain each actor's action.
 
@@ -42,21 +45,27 @@ Suggested settings:
 
 - `--freeze_backbone 1`
 - `--object_relation_only 1`
-- `--object_relation_gate_init 0.25`
+- `--object_action_gate_init 0.05`
+- `--object_delta_scale 1.0`
 - `--object_relation_hidden_dim 512`
-- `--object_relation_dropout 0.1`
-- `--object_interaction_loss_weight 0.2`
-- `--object_interaction_heatmap_weight 50`
+- `--object_relation_dropout 0.05`
+- `--object_interaction_loss_weight 0.03`
+- `--object_interaction_heatmap_weight 5`
+- `--object_residual_l2_weight 0.03`
+- `--object_counterfactual_margin_weight 0.15`
+- `--object_counterfactual_margin 0.08`
+- `--object_objectless_consistency_weight 0.03`
 - `--object_heatmap_weight 0`
 - `--kp_loss_weight 0`
 - `--lr_head 3e-4`
-- `--max_epochs 6` to `8`
+- `--max_epochs 6`
 
 Acceptance signal:
 
-- `val_acc_macro_objects_on > val_acc_macro_objects_off`
-- `val_acc_macro_objects_on > val_acc_macro_objects_shuffled`
+- `val_acc_macro_objects_on >= val_acc_macro_objects_off + 0.005`
+- `val_acc_macro_objects_on >= val_acc_macro_objects_shuffled + 0.005`
 - `val_f1_objects_on >= val_f1_objects_off - 0.003`
+- `val_f1_objects_on >= val_f1_objects_shuffled - 0.003`
 - `val_interaction_select_mass_object` increases for strong object actions.
 - object-related groups improve without a broad F1 collapse.
 
@@ -67,3 +76,5 @@ Only after the relation-only diagnostic passes, unfreeze the normal actor path a
 ## Rejected Path
 
 The old object-summary residual path is removed. It used clip-level object statistics and optional hand-coded action evidence gates. That makes it too easy to encode dataset priors, and it does not directly solve actor-object association.
+
+The actor-only selector is also removed. A single `[B, K, M + 1]` object distribution can learn "which object is near this actor," but it is the wrong bottleneck for cluttered scenes where different action hypotheses need different object evidence.

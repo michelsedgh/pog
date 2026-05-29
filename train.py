@@ -260,16 +260,26 @@ def _migrate_object_action_head(module, checkpoint):
     if checkpoint is None or not getattr(module.model, "object_prompt", False):
         return
     state_dict = checkpoint.get("state_dict", {})
-    gate_key = "model.object_relation_gate_logit"
-    if gate_key in state_dict:
-        new_gate = module.model.object_relation_gate_logit
-        old_gate = state_dict[gate_key]
-        if old_gate.shape != new_gate.shape:
-            del state_dict[gate_key]
-            print(
-                "Dropped incompatible scalar object gate from checkpoint; "
-                "using current per-class object gate initialization."
-            )
+    current_state = module.state_dict()
+    migrated = []
+    for key in list(state_dict.keys()):
+        if key.startswith("model.object_selector."):
+            del state_dict[key]
+            migrated.append(key)
+            continue
+        if not (
+            key == "model.object_relation_gate_logit"
+            or key.startswith("model.object_action_")
+        ):
+            continue
+        if key in current_state and state_dict[key].shape != current_state[key].shape:
+            del state_dict[key]
+            migrated.append(key)
+    if migrated:
+        print(
+            "Dropped incompatible object action head tensors from checkpoint: "
+            + ", ".join(migrated)
+        )
 
 
 def build_parser():

@@ -150,7 +150,6 @@ class HeatmapModule(pl.LightningModule):
                 "model.object_bbox_mlp",
                 "model.object_conf_mlp",
                 "model.object_visual_mlp",
-                "model.object_selector",
                 "model.object_valid_embed",
                 "model.object_action_embed",
                 "model.object_action_query",
@@ -194,6 +193,7 @@ class HeatmapModule(pl.LightningModule):
         x,
         boxes=None,
         valid=None,
+        action_labels=None,
         object_boxes=None,
         object_cls=None,
         object_conf=None,
@@ -204,6 +204,7 @@ class HeatmapModule(pl.LightningModule):
             x,
             boxes=boxes,
             valid=valid,
+            action_labels=action_labels,
             object_boxes=object_boxes,
             object_cls=object_cls,
             object_conf=object_conf,
@@ -226,7 +227,6 @@ class HeatmapModule(pl.LightningModule):
             + list(self.model.object_bbox_mlp.parameters())
             + list(self.model.object_conf_mlp.parameters())
             + list(self.model.object_visual_mlp.parameters())
-            + list(self.model.object_selector.parameters())
             + list(self.model.object_valid_embed.parameters())
             + list(self.model.object_action_embed.parameters())
             + list(self.model.object_action_query.parameters())
@@ -434,6 +434,27 @@ class HeatmapModule(pl.LightningModule):
             )
 
         return weighted_loss
+
+    def _selection_logits_for_target_action(self, selection_logits, target):
+        if selection_logits is None:
+            return None
+        if selection_logits.ndim != 4:
+            raise RuntimeError(
+                "Action-conditioned object selection must have shape [B, K, C, M+1]; "
+                f"got {tuple(selection_logits.shape)}"
+            )
+        labels = target["actions"].to(
+            device=selection_logits.device,
+            dtype=torch.long,
+        )
+        labels = labels.clamp(0, selection_logits.shape[2] - 1)
+        gather_index = labels[:, :, None, None].expand(
+            -1,
+            -1,
+            1,
+            selection_logits.shape[-1],
+        )
+        return selection_logits.gather(dim=2, index=gather_index).squeeze(2)
 
     def _pose_heatmap_pred(self, hm_preds):
         if not torch.is_tensor(hm_preds):
@@ -796,7 +817,13 @@ class HeatmapModule(pl.LightningModule):
             raise ValueError(f"{stage} actor batch has no valid actor slots")
 
         object_kwargs = self._object_kwargs(target, mode="on")
-        data = self.model(imgs, boxes=boxes, valid=valid, **object_kwargs)
+        data = self.model(
+            imgs,
+            boxes=boxes,
+            valid=valid,
+            action_labels=actions,
+            **object_kwargs,
+        )
         (
             preds,
             hm_preds,
@@ -805,6 +832,10 @@ class HeatmapModule(pl.LightningModule):
             interaction_heatmap,
             object_residual,
         ) = self._unpack_model_data(data)
+        target_action_selection_logits = self._selection_logits_for_target_action(
+            selection_logits,
+            target,
+        )
 
         valid_preds = preds[valid]
         valid_labels = actions[valid]
@@ -895,16 +926,19 @@ class HeatmapModule(pl.LightningModule):
                         self._log_object_heatmap_metrics(pred_obj, target, stage)
 
             dropped_positive = None
-            if selection_logits is not None and "interaction_positive_mask" in target:
+            if (
+                target_action_selection_logits is not None
+                and "interaction_positive_mask" in target
+            ):
                 inter_valid = target["interaction_valid"].to(
                     device=valid.device, dtype=torch.bool
                 ) & valid
                 original_positive_mask = target["interaction_positive_mask"].to(
-                    device=selection_logits.device, dtype=torch.bool
+                    device=target_action_selection_logits.device, dtype=torch.bool
                 )
                 positive_mask = original_positive_mask.clone()
                 effective_object_valid = object_kwargs["object_valid"].to(
-                    device=selection_logits.device, dtype=torch.bool
+                    device=target_action_selection_logits.device, dtype=torch.bool
                 )
                 real_object_count = min(
                     effective_object_valid.shape[-1],
@@ -921,7 +955,10 @@ class HeatmapModule(pl.LightningModule):
                 if inter_valid.any():
                     inter_valid = inter_valid & positive_mask.any(dim=-1)
                 if inter_valid.any():
-                    log_probs = F.log_softmax(selection_logits.float(), dim=-1)
+                    log_probs = F.log_softmax(
+                        target_action_selection_logits.float(),
+                        dim=-1,
+                    )
                     valid_log_probs = log_probs[inter_valid]
                     valid_positive_mask = positive_mask[inter_valid]
                     mask_value = torch.finfo(valid_log_probs.dtype).min
@@ -931,7 +968,7 @@ class HeatmapModule(pl.LightningModule):
                     )
                     loss_interaction = -selected_log_prob.mean()
                 else:
-                    loss_interaction = selection_logits.new_zeros(())
+                    loss_interaction = target_action_selection_logits.new_zeros(())
                 loss = loss + loss_interaction * self.model.hparams.get(
                     "object_interaction_loss_weight", 0.05
                 )
@@ -946,7 +983,7 @@ class HeatmapModule(pl.LightningModule):
                 )
                 if stage != "train":
                     self._log_interaction_metrics(
-                        selection_logits,
+                        target_action_selection_logits,
                         target,
                         valid,
                         stage,

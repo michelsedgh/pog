@@ -383,13 +383,6 @@ class POGUISE(pl.LightningModule):
             nn.GELU(),
             nn.Linear(dim, dim),
         )
-        self.object_selector = nn.Sequential(
-            nn.LayerNorm(dim * 3 + 10),
-            nn.Linear(dim * 3 + 10, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 1),
-        )
         num_classes = int(self.hparams.num_classes)
         self.object_action_embed = nn.Embedding(num_classes, dim)
         self.object_action_query = nn.Sequential(
@@ -412,9 +405,9 @@ class POGUISE(pl.LightningModule):
             nn.GELU(),
             nn.Linear(max(32, hidden_dim // 4), 1),
         )
-        self.object_action_delta_norm = nn.LayerNorm(dim * 5)
+        self.object_action_delta_norm = nn.LayerNorm(dim * 6)
         self.object_action_delta = nn.Sequential(
-            nn.Linear(dim * 5, hidden_dim),
+            nn.Linear(dim * 6, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, 1),
@@ -439,7 +432,6 @@ class POGUISE(pl.LightningModule):
             self.object_bbox_mlp,
             self.object_conf_mlp,
             self.object_visual_mlp,
-            self.object_selector,
             self.object_valid_embed,
             self.object_action_embed,
             self.object_action_query,
@@ -562,7 +554,18 @@ class POGUISE(pl.LightningModule):
         object_boxes = object_boxes.clamp(0.0, 1.0)
         object_valid = object_valid.to(device=object_boxes.device, dtype=torch.bool)
         real_alpha = object_alpha[..., : object_boxes.shape[1]]
-        real_alpha = real_alpha * object_valid[:, None, :].to(dtype=real_alpha.dtype)
+        if real_alpha.shape[0] != object_valid.shape[0]:
+            raise ValueError("object_alpha and object_valid batch dimensions differ")
+        if real_alpha.shape[-1] != object_valid.shape[-1]:
+            raise ValueError("object_alpha and object_valid object dimensions differ")
+        valid_shape = (
+            object_valid.shape[0],
+            *([1] * (real_alpha.ndim - 2)),
+            object_valid.shape[1],
+        )
+        real_alpha = real_alpha * object_valid.reshape(valid_shape).to(
+            dtype=real_alpha.dtype
+        )
 
         y = (
             torch.arange(height, device=object_boxes.device, dtype=object_boxes.dtype)
@@ -573,35 +576,49 @@ class POGUISE(pl.LightningModule):
             + 0.5
         ) / float(width)
         grid_y, grid_x = torch.meshgrid(y, x, indexing="ij")
-        grid_x = grid_x.reshape(1, 1, 1, height, width)
-        grid_y = grid_y.reshape(1, 1, 1, height, width)
+        grid_x = grid_x.reshape(1, 1, height, width)
+        grid_y = grid_y.reshape(1, 1, height, width)
 
         center = (object_boxes[..., :2] + object_boxes[..., 2:]) * 0.5
         size_xy = (object_boxes[..., 2:] - object_boxes[..., :2]).clamp_min(1e-4)
         sigma = (size_xy * 0.5).clamp_min(1.0 / float(max(height, width)))
-        cx = center[:, None, :, 0:1, None]
-        cy = center[:, None, :, 1:2, None]
-        sx = sigma[:, None, :, 0:1, None]
-        sy = sigma[:, None, :, 1:2, None]
+        cx = center[:, :, 0:1, None]
+        cy = center[:, :, 1:2, None]
+        sx = sigma[:, :, 0:1, None]
+        sy = sigma[:, :, 1:2, None]
         object_maps = torch.exp(
             -0.5 * (((grid_x - cx) / sx) ** 2 + ((grid_y - cy) / sy) ** 2)
         )
-        heatmap = (real_alpha[:, :, :, None, None] * object_maps).sum(dim=2)
+        map_shape = (
+            object_maps.shape[0],
+            *([1] * (real_alpha.ndim - 2)),
+            object_maps.shape[1],
+            height,
+            width,
+        )
+        heatmap = (real_alpha[..., None, None] * object_maps.reshape(map_shape)).sum(
+            dim=-3
+        )
         return heatmap.clamp(0.0, 1.0)
 
     def _pool_interaction_context(self, feature_map, interaction_heatmap):
         if feature_map is None:
-            batch_size, num_actors = interaction_heatmap.shape[:2]
+            batch_size = interaction_heatmap.shape[0]
             return interaction_heatmap.new_zeros(
-                (batch_size, num_actors, self.net.num_features)
+                (*interaction_heatmap.shape[:-2], self.net.num_features)
             )
         feature_map = feature_map.to(
             device=interaction_heatmap.device,
             dtype=interaction_heatmap.dtype,
         )
         weights = interaction_heatmap.clamp_min(0.0)
-        denom = weights.flatten(2).sum(dim=-1).clamp_min(1e-6)
-        return torch.einsum("bkhw,bchw->bkc", weights, feature_map) / denom[:, :, None]
+        batch_size = weights.shape[0]
+        prefix_shape = weights.shape[1:-2]
+        weights_flat = weights.reshape(batch_size, -1, *weights.shape[-2:])
+        denom = weights_flat.flatten(2).sum(dim=-1).clamp_min(1e-6)
+        pooled = torch.einsum("bnhw,bdhw->bnd", weights_flat, feature_map)
+        pooled = pooled / denom[:, :, None]
+        return pooled.reshape(batch_size, *prefix_shape, feature_map.shape[1])
 
     def _object_relation(
         self,
@@ -612,19 +629,18 @@ class POGUISE(pl.LightningModule):
         object_cls=None,
         object_conf=None,
         object_valid=None,
+        action_labels=None,
     ):
+        num_classes = int(self.hparams.num_classes)
         if object_boxes is None:
             zero_delta = actor_feat.new_zeros(
-                (*actor_feat.shape[:2], self.hparams.num_classes)
+                (*actor_feat.shape[:2], num_classes)
             )
             num_object_tokens = int(self.hparams.get("num_object_tokens", 0))
             zero_selection = actor_feat.new_zeros(
-                (*actor_feat.shape[:2], num_object_tokens + 1)
+                (*actor_feat.shape[:2], num_classes, num_object_tokens + 1)
             )
-            zero_heatmap = actor_feat.new_zeros(
-                (*actor_feat.shape[:2], *self.interaction_heatmap_size)
-            )
-            return zero_delta, zero_selection, zero_heatmap
+            return zero_delta, zero_selection, None
         if object_cls is None or object_conf is None or object_valid is None:
             raise ValueError(
                 "object_boxes, object_cls, object_conf, and object_valid must be passed together"
@@ -673,52 +689,6 @@ class POGUISE(pl.LightningModule):
             object_boxes_with_null,
         )
         num_actors = actor_feat.shape[1]
-        actor_pair = actor_feat[:, :, None, :].expand(
-            -1,
-            -1,
-            object_feat.shape[1],
-            -1,
-        )
-        object_pair = object_feat[:, None, :, :].expand(
-            -1,
-            num_actors,
-            -1,
-            -1,
-        )
-        selector_input = torch.cat(
-            [actor_pair, object_pair, actor_pair * object_pair, relation_geometry],
-            dim=-1,
-        )
-        selection_logits = self.object_selector(selector_input).squeeze(-1)
-        selection_logits = selection_logits.masked_fill(
-            ~object_valid_with_null[:, None, :],
-            torch.finfo(selection_logits.dtype).min,
-        )
-
-        object_alpha = torch.softmax(selection_logits.float(), dim=-1).to(
-            dtype=actor_feat.dtype
-        )
-        interaction_heatmap = self._build_interaction_heatmap(
-            object_alpha,
-            object_boxes,
-            object_valid,
-            self.interaction_heatmap_size,
-        )
-        interaction_heatmap_for_pool = F.interpolate(
-            interaction_heatmap.flatten(0, 1).unsqueeze(1),
-            size=self.net.HW_OUT_CONV,
-            mode="bilinear",
-            align_corners=False,
-        ).squeeze(1).reshape(
-            batch_size,
-            num_actors,
-            *self.net.HW_OUT_CONV,
-        )
-        visual_context = self._pool_interaction_context(
-            spatial_feat,
-            interaction_heatmap_for_pool,
-        )
-        num_classes = int(self.hparams.num_classes)
         action_embed = self.object_action_embed.weight.to(dtype=actor_feat.dtype)
         actor_action = actor_feat[:, :, None, :].expand(
             -1,
@@ -755,27 +725,56 @@ class POGUISE(pl.LightningModule):
             ~object_valid_with_null[:, None, None, :],
             torch.finfo(action_scores.dtype).min,
         )
-        action_alpha = torch.softmax(action_scores.float(), dim=-1).to(
+        selection_logits = action_scores
+        action_alpha = torch.softmax(selection_logits.float(), dim=-1).to(
             dtype=actor_feat.dtype
+        )
+        interaction_heatmap = None
+        if action_labels is not None:
+            action_labels = action_labels.to(
+                device=actor_feat.device,
+                dtype=torch.long,
+            )
+            action_labels = action_labels.clamp(0, num_classes - 1)
+            gather_idx = action_labels[:, :, None, None].expand(
+                -1,
+                -1,
+                1,
+                action_alpha.shape[-1],
+            )
+            target_action_alpha = action_alpha.gather(dim=2, index=gather_idx).squeeze(
+                2
+            )
+            interaction_heatmap = self._build_interaction_heatmap(
+                target_action_alpha,
+                object_boxes,
+                object_valid,
+                self.interaction_heatmap_size,
+            )
+
+        action_heatmap_for_pool = self._build_interaction_heatmap(
+            action_alpha,
+            object_boxes,
+            object_valid,
+            self.net.HW_OUT_CONV,
+        )
+        visual_action = self._pool_interaction_context(
+            spatial_feat,
+            action_heatmap_for_pool,
         )
         action_context = torch.einsum(
             "bkcm,bmd->bkcd",
             action_alpha,
             object_value,
         )
-        visual_action = visual_context[:, :, None, :].expand(
-            -1,
-            -1,
-            num_classes,
-            -1,
-        )
         action_feat = torch.cat(
             [
+                actor_action,
+                action_pair,
                 action_context,
                 visual_action,
                 actor_action * action_context,
                 actor_action * visual_action,
-                action_pair,
             ],
             dim=-1,
         )
@@ -798,6 +797,7 @@ class POGUISE(pl.LightningModule):
         object_cls=None,
         object_conf=None,
         object_valid=None,
+        action_labels=None,
     ):
         # convert to b c t h w
         x = x.permute(0, 2, 1, 3, 4)
@@ -844,6 +844,7 @@ class POGUISE(pl.LightningModule):
                     object_cls=object_cls,
                     object_conf=object_conf,
                     object_valid=object_valid,
+                    action_labels=action_labels,
                 )
                 action_logits = action_logits + object_delta
             else:
