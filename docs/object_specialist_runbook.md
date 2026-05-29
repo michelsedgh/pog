@@ -5,14 +5,16 @@ This runbook starts after the normal Colab setup cell has finished downloading d
 The required implementation commit is:
 
 ```text
-68e478e Add scoped object specialist heads
+f1b0e08 Train object specialists with focused relation objective
 ```
 
-Your latest `git log -1` may show a newer documentation commit. That is fine. The required check is that `68e478e` is an ancestor of `HEAD`.
+Your latest `git log -1` may show a newer documentation commit. That is fine. The required check is that `f1b0e08` is an ancestor of `HEAD`.
 
 The setup cell writes `/content/poguise_colab_env.sh`, but the cells below also define the needed paths directly so they can be pasted into Colab without sourcing that shell file.
 
 The first run is **relation-only**, not full fine-tune. The goal is to prove that scoped object specialists improve the specific object-confusion groups while the base actor model is frozen.
+
+In this diagnostic, relation-only training uses a specialist-only objective. It does not train the object specialist with global 31-class CE. Samples inside a specialist group train group reranking; samples outside those groups train no-boost/preservation losses.
 
 ## What This Architecture Trains
 
@@ -39,7 +41,7 @@ import subprocess
 import shlex
 
 REPO_DIR = "/content/pog"
-REQUIRED_COMMIT = "68e478e"
+REQUIRED_COMMIT = "f1b0e08"
 
 def run(cmd, cwd=REPO_DIR):
     print("$", " ".join(shlex.quote(str(x)) for x in cmd), flush=True)
@@ -61,6 +63,7 @@ import time
 from pathlib import Path
 
 import pandas as pd
+import torch
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -113,8 +116,21 @@ require_file(SKELETON_ZIP, "Skeleton zip")
 require_file(OBJECT_DETECTOR_CACHE, "Object detector cache")
 require_file(HARD_NEGATIVE_MANIFEST, "Hard-negative manifest")
 
+ckpt = torch.load(START_CKPT, map_location="cpu", weights_only=False)
+state_dict = ckpt.get("state_dict", ckpt)
+object_state_keys = [
+    key for key in state_dict.keys()
+    if "object_" in key or "specialist" in key
+]
+print("object/specialist state_dict keys in START_CKPT:", len(object_state_keys))
+if object_state_keys:
+    print(object_state_keys[:30])
+    raise RuntimeError(
+        "START_CKPT is not a clean actor-slot checkpoint. Use the clean actor checkpoint before running the specialist diagnostic."
+    )
+
 run_stream(["git", "pull", "--ff-only", "origin", "main"], cwd=REPO_DIR)
-run_stream(["git", "merge-base", "--is-ancestor", "68e478e", "HEAD"], cwd=REPO_DIR)
+run_stream(["git", "merge-base", "--is-ancestor", "f1b0e08", "HEAD"], cwd=REPO_DIR)
 
 cmd = [
     sys.executable, "-u", "train.py",
@@ -163,23 +179,26 @@ cmd = [
     "--object_relation_only", "1",
     "--object_relation_hidden_dim", "512",
     "--object_relation_dropout", "0.05",
-    "--object_action_gate_init", "0.03",
-    "--object_delta_scale", "0.5",
-    "--object_interaction_loss_weight", "0.03",
-    "--object_interaction_heatmap_weight", "5",
-    "--object_residual_l2_weight", "0.03",
-    "--object_counterfactual_margin_weight", "0.10",
+    "--object_action_gate_init", "0.20",
+    "--object_delta_scale", "1.0",
+    "--object_interaction_loss_weight", "0.10",
+    "--object_interaction_heatmap_weight", "10",
+    "--object_residual_l2_weight", "0.005",
+    "--object_counterfactual_margin_weight", "0.05",
     "--object_counterfactual_margin", "0.05",
     "--object_objectless_consistency_weight", "0.03",
-    "--object_specialist_group_loss_weight", "0.50",
-    "--object_specialist_no_boost_weight", "0.20",
+    "--object_specialist_group_loss_weight", "1.0",
+    "--object_specialist_no_boost_weight", "0.05",
     "--object_specialist_no_boost_margin", "0.01",
     "--object_dropout_prob", "0.05",
     "--object_token_dropout_prob", "0.02",
-    "--class_balanced_sampler", "1",
+    "--class_balanced_sampler", "0",
+    "--specialist_sampler", "1",
+    "--specialist_positive_prob", "0.55",
     "--hard_negative_sampler", "1",
     "--hard_negative_manifest", HARD_NEGATIVE_MANIFEST,
-    "--hard_negative_prob", "0.15",
+    "--hard_negative_prob", "0.25",
+    "--normal_anchor_prob", "0.20",
     "--keep_rate", "0.6",
     "--keep_rate_merge", "0.3",
     "--merge_type", "tome",
@@ -284,6 +303,24 @@ cols = [
     "val_interaction_select_acc_object",
     "val_loss_object_specialist_group",
     "val_loss_object_specialist_no_boost",
+    "val_laptop_book_tv_objects_on_group_margin",
+    "val_laptop_book_tv_margin_gain_on_vs_off",
+    "val_laptop_book_tv_margin_gain_on_vs_shuffled",
+    "val_laptop_book_tv_pred_changed_on_vs_off",
+    "val_laptop_book_tv_correct_changes_on_vs_off",
+    "val_laptop_book_tv_wrong_changes_on_vs_off",
+    "val_phone_tv_objects_on_group_margin",
+    "val_phone_tv_margin_gain_on_vs_off",
+    "val_phone_tv_margin_gain_on_vs_shuffled",
+    "val_phone_tv_pred_changed_on_vs_off",
+    "val_phone_tv_correct_changes_on_vs_off",
+    "val_phone_tv_wrong_changes_on_vs_off",
+    "val_drink_objects_on_group_margin",
+    "val_drink_margin_gain_on_vs_off",
+    "val_drink_margin_gain_on_vs_shuffled",
+    "val_drink_pred_changed_on_vs_off",
+    "val_drink_correct_changes_on_vs_off",
+    "val_drink_wrong_changes_on_vs_off",
 ]
 cols = [c for c in cols if c in df.columns]
 val = df[df[[c for c in cols if c != "epoch"]].notna().any(axis=1)].copy()
@@ -409,7 +446,7 @@ def require_file(path, name):
     print(f"{name}: {p} ({p.stat().st_size / (1024**2):.1f} MB)", flush=True)
 
 run_stream(["git", "pull", "--ff-only", "origin", "main"], cwd=REPO_DIR)
-run_stream(["git", "merge-base", "--is-ancestor", "68e478e", "HEAD"], cwd=REPO_DIR)
+run_stream(["git", "merge-base", "--is-ancestor", "f1b0e08", "HEAD"], cwd=REPO_DIR)
 
 relation_runs = sorted(
     (Path(DATA_DIR) / "checkpoints").glob("actor_object_specialist_relonly_from_actor_slot_*"),

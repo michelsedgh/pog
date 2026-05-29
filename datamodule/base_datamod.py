@@ -10,6 +10,20 @@ import json
 import os
 
 
+def _toyota_specialist_action_indices():
+    from datasets.object_vocab import OBJECT_SPECIALIST_GROUPS
+    from datasets.toyotasm import CS_DICT
+
+    action_indices = set()
+    for group in OBJECT_SPECIALIST_GROUPS.values():
+        for action_name in group["actions"]:
+            if action_name in CS_DICT:
+                action_indices.add(int(CS_DICT[action_name]) - 1)
+    if not action_indices:
+        raise ValueError("specialist_sampler found no Toyota specialist actions")
+    return torch.tensor(sorted(action_indices), dtype=torch.long)
+
+
 # collate_fn for THUMOS14Dataset
 def thumos_collate_fn(batch):
     """
@@ -197,6 +211,10 @@ class BaseDataModule(pl.LightningDataModule):
         return kwargs
 
     def _class_balanced_train_sampler(self):
+        specialist_sampler = self._specialist_train_sampler()
+        if specialist_sampler is not None:
+            return specialist_sampler
+
         if not getattr(self.hparams, "class_balanced_sampler", 0):
             weights = self._hard_negative_train_sampler(None)
             if weights is None:
@@ -304,6 +322,100 @@ class BaseDataModule(pl.LightningDataModule):
             f"multiplier {multiplier:.3f}"
         )
         return weights
+
+    def _specialist_train_sampler(self):
+        if not getattr(self.hparams, "specialist_sampler", 0):
+            return None
+        if getattr(self.hparams, "class_balanced_sampler", 0):
+            raise ValueError(
+                "specialist_sampler owns train sampling and cannot be combined with "
+                "class_balanced_sampler"
+            )
+
+        labels = getattr(self.train_dataset, "y", None)
+        if labels is None:
+            raise ValueError(
+                "specialist_sampler requires the training dataset to expose y labels"
+            )
+        labels = torch.as_tensor(labels, dtype=torch.long)
+        if labels.numel() == 0:
+            raise ValueError("specialist_sampler received an empty training dataset")
+
+        specialist_actions = _toyota_specialist_action_indices().to(labels.device)
+        positive_mask = torch.isin(labels, specialist_actions)
+        if not positive_mask.any():
+            raise ValueError(
+                "specialist_sampler found no specialist-positive samples in train split"
+            )
+
+        hard_prob = float(getattr(self.hparams, "hard_negative_prob", 0.15))
+        if not getattr(self.hparams, "hard_negative_sampler", 0):
+            hard_prob = 0.0
+            hard_mask = torch.zeros_like(positive_mask)
+        else:
+            data_df = getattr(self.train_dataset, "data_df", None)
+            if data_df is None or "file_id" not in data_df:
+                raise ValueError(
+                    "specialist_sampler with hard_negative_sampler requires "
+                    "train_dataset.data_df.file_id"
+                )
+            hard_file_ids = self._hard_negative_file_ids()
+            hard_mask = torch.tensor(
+                [str(file_id) in hard_file_ids for file_id in data_df.file_id.tolist()],
+                dtype=torch.bool,
+            )
+            if hard_mask.numel() != labels.numel():
+                raise ValueError(
+                    "specialist_sampler hard mask length does not match labels: "
+                    f"{hard_mask.numel()} vs {labels.numel()}"
+                )
+            if hard_prob > 0.0 and not hard_mask.any():
+                raise ValueError(
+                    "specialist_sampler found no hard-negative manifest clips in train split"
+                )
+
+        positive_prob = float(getattr(self.hparams, "specialist_positive_prob", 0.55))
+        anchor_prob = float(getattr(self.hparams, "normal_anchor_prob", 0.30))
+        if min(positive_prob, hard_prob, anchor_prob) < 0.0:
+            raise ValueError(
+                "specialist_positive_prob, hard_negative_prob, and normal_anchor_prob "
+                "must be non-negative"
+            )
+        total_prob = positive_prob + hard_prob + anchor_prob
+        if abs(total_prob - 1.0) > 1e-6:
+            raise ValueError(
+                "specialist sampler probabilities must sum to 1.0: "
+                f"specialist_positive_prob={positive_prob}, "
+                f"hard_negative_prob={hard_prob}, normal_anchor_prob={anchor_prob}"
+            )
+
+        anchor_mask = ~(positive_mask | hard_mask)
+        if anchor_prob > 0.0 and not anchor_mask.any():
+            raise ValueError("specialist_sampler found no normal anchor samples")
+
+        weights = torch.zeros(labels.numel(), dtype=torch.float32)
+        if positive_prob > 0.0:
+            weights[positive_mask] += positive_prob / positive_mask.float().sum()
+        if hard_prob > 0.0:
+            weights[hard_mask] += hard_prob / hard_mask.float().sum()
+        if anchor_prob > 0.0:
+            weights[anchor_mask] += anchor_prob / anchor_mask.float().sum()
+        if weights.sum() <= 0:
+            raise ValueError("specialist_sampler produced non-positive weights")
+
+        overlap = int((positive_mask & hard_mask).sum().item())
+        print(
+            "Specialist sampler: "
+            f"positives {int(positive_mask.sum().item())}/{labels.numel()} "
+            f"mass {positive_prob:.3f}; "
+            f"hard {int(hard_mask.sum().item())}/{labels.numel()} "
+            f"mass {hard_prob:.3f}; "
+            f"anchors {int(anchor_mask.sum().item())}/{labels.numel()} "
+            f"mass {anchor_prob:.3f}; overlap positive&hard {overlap}"
+        )
+        return WeightedRandomSampler(
+            weights.double(), num_samples=len(weights), replacement=True
+        )
 
     def train_dataloader(self):
         # # Balanced batch sampler

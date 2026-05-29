@@ -302,6 +302,13 @@ class HeatmapModule(pl.LightningModule):
             }
         return specs
 
+    def _use_specialist_only_relation_loss(self):
+        return (
+            self.object_prompt
+            and bool(self.model.hparams.get("object_relation_only", 0))
+            and bool(self.model.hparams.get("object_specialist_heads", 0))
+        )
+
     def _object_kwargs(self, target, mode="on"):
         if not self.object_prompt:
             return {}
@@ -973,7 +980,20 @@ class HeatmapModule(pl.LightningModule):
 
         valid_preds = preds[valid]
         valid_labels = actions[valid]
-        loss = loss_fn(valid_preds, valid_labels)
+        loss_action = loss_fn(valid_preds, valid_labels)
+        if self._use_specialist_only_relation_loss():
+            loss = valid_preds.sum() * 0.0
+        else:
+            loss = loss_action
+        self.log(
+            f"{stage}_loss_action",
+            loss_action,
+            on_step=stage == "train",
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+        )
 
         if presence_logits is not None:
             loss_presence = F.binary_cross_entropy_with_logits(
@@ -1555,6 +1575,92 @@ class HeatmapModule(pl.LightningModule):
         other_logits.scatter_(1, labels[:, None], -torch.inf)
         return true_logits - other_logits.max(dim=1).values
 
+    def _group_classification_margin(self, logits, labels, group_idx):
+        group_logits = logits.index_select(1, group_idx)
+        group_targets = (labels[:, None] == group_idx[None, :]).long().argmax(dim=1)
+        true_logits = group_logits.gather(1, group_targets[:, None]).squeeze(1)
+        other_logits = group_logits.clone()
+        other_logits.scatter_(1, group_targets[:, None], -torch.inf)
+        return true_logits - other_logits.max(dim=1).values
+
+    def _log_specialist_ablation_metrics(self, normal_logits, labels, off, shuffled):
+        if not self.object_specialist_specs or labels.numel() == 0:
+            return
+
+        comparisons = []
+        if off is not None:
+            comparisons.append(("off", off[0], off[1]))
+        if shuffled is not None:
+            comparisons.append(("shuffled", shuffled[0], shuffled[1]))
+        if not comparisons:
+            return
+
+        for group_name, spec in self.object_specialist_specs.items():
+            group_idx = spec["actions"].to(device=labels.device)
+            group_mask = torch.isin(labels, group_idx)
+            if not group_mask.any():
+                continue
+
+            normal_group = normal_logits[group_mask]
+            labels_group = labels[group_mask]
+            group_targets = (
+                labels_group[:, None] == group_idx[None, :]
+            ).long().argmax(dim=1)
+            normal_margin = self._group_classification_margin(
+                normal_group,
+                labels_group,
+                group_idx,
+            )
+            normal_pred = normal_group.argmax(dim=1)
+            normal_correct = normal_pred == group_targets
+            self._log_scalar(
+                f"val_{group_name}_objects_on_group_margin",
+                normal_margin.mean(),
+                labels_group.numel(),
+            )
+
+            for mode_name, mode_logits, mode_labels in comparisons:
+                if mode_logits.shape != normal_logits.shape or not torch.equal(
+                    mode_labels,
+                    labels,
+                ):
+                    raise ValueError(
+                        f"Object {mode_name} specialist diagnostic returned "
+                        "misaligned logits/labels"
+                    )
+                mode_group = mode_logits[group_mask]
+                mode_margin = self._group_classification_margin(
+                    mode_group,
+                    labels_group,
+                    group_idx,
+                )
+                mode_pred = mode_group.argmax(dim=1)
+                mode_correct = mode_pred == group_targets
+                changed = normal_pred != mode_pred
+                correct_change = changed & normal_correct & ~mode_correct
+                wrong_change = changed & ~normal_correct & mode_correct
+
+                self._log_scalar(
+                    f"val_{group_name}_margin_gain_on_vs_{mode_name}",
+                    (normal_margin - mode_margin).mean(),
+                    labels_group.numel(),
+                )
+                self._log_scalar(
+                    f"val_{group_name}_pred_changed_on_vs_{mode_name}",
+                    changed.float().mean(),
+                    labels_group.numel(),
+                )
+                self._log_scalar(
+                    f"val_{group_name}_correct_changes_on_vs_{mode_name}",
+                    correct_change.float().mean(),
+                    labels_group.numel(),
+                )
+                self._log_scalar(
+                    f"val_{group_name}_wrong_changes_on_vs_{mode_name}",
+                    wrong_change.float().mean(),
+                    labels_group.numel(),
+                )
+
     def _log_object_delta_metrics(self, normal_logits, labels, off=None, shuffled=None):
         if labels.numel() == 0:
             return
@@ -1693,6 +1799,12 @@ class HeatmapModule(pl.LightningModule):
             labels,
             off=off_data,
             shuffled=shuffled_data,
+        )
+        self._log_specialist_ablation_metrics(
+            normal_preds,
+            labels,
+            off_data,
+            shuffled_data,
         )
 
     def training_step(self, batch, batch_idx):
