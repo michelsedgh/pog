@@ -256,6 +256,22 @@ def _expand_heatmap_head_for_object_prompt(module, checkpoint):
     )
 
 
+def _migrate_object_action_head(module, checkpoint):
+    if checkpoint is None or not getattr(module.model, "object_prompt", False):
+        return
+    state_dict = checkpoint.get("state_dict", {})
+    gate_key = "model.object_relation_gate_logit"
+    if gate_key in state_dict:
+        new_gate = module.model.object_relation_gate_logit
+        old_gate = state_dict[gate_key]
+        if old_gate.shape != new_gate.shape:
+            del state_dict[gate_key]
+            print(
+                "Dropped incompatible scalar object gate from checkpoint; "
+                "using current per-class object gate initialization."
+            )
+
+
 def build_parser():
     parser = ArgumentParser()
     parser = POGUISE.add_model_specific_args(parser)
@@ -325,6 +341,10 @@ def build_parser():
     parser.add_argument("--kp_loss_weight", type=float, default=10000.0)
     parser.add_argument("--object_heatmap_weight", type=float, default=200.0)
     parser.add_argument("--object_interaction_loss_weight", type=float, default=0.05)
+    parser.add_argument("--object_residual_l2_weight", type=float, default=0.0)
+    parser.add_argument("--object_counterfactual_margin_weight", type=float, default=0.0)
+    parser.add_argument("--object_counterfactual_margin", type=float, default=0.05)
+    parser.add_argument("--object_objectless_consistency_weight", type=float, default=0.0)
     parser.add_argument("--log_kp_loss_weight", type=int, default=0)
     parser.add_argument("--grad_weights", type=int, default=0)
     parser.add_argument("--deepspeed_optim", type=int, default=0)
@@ -353,6 +373,7 @@ def main():
 
     if checkpoint is not None:
         _expand_heatmap_head_for_object_prompt(module, checkpoint)
+        _migrate_object_action_head(module, checkpoint)
         strict = (
             bool(hparams.strict_load)
             if hparams.strict_load is not None

@@ -152,8 +152,13 @@ class HeatmapModule(pl.LightningModule):
                 "model.object_visual_mlp",
                 "model.object_selector",
                 "model.object_valid_embed",
-                "model.object_relation_delta_norm",
-                "model.object_relation_delta",
+                "model.object_action_embed",
+                "model.object_action_query",
+                "model.object_action_key",
+                "model.object_action_value",
+                "model.object_action_geom_bias",
+                "model.object_action_delta_norm",
+                "model.object_action_delta",
                 "model.object_relation_gate_logit",
             ]
             if self.model.hparams.get("use_register_tokens", 0):
@@ -223,8 +228,13 @@ class HeatmapModule(pl.LightningModule):
             + list(self.model.object_visual_mlp.parameters())
             + list(self.model.object_selector.parameters())
             + list(self.model.object_valid_embed.parameters())
-            + list(self.model.object_relation_delta_norm.parameters())
-            + list(self.model.object_relation_delta.parameters())
+            + list(self.model.object_action_embed.parameters())
+            + list(self.model.object_action_query.parameters())
+            + list(self.model.object_action_key.parameters())
+            + list(self.model.object_action_value.parameters())
+            + list(self.model.object_action_geom_bias.parameters())
+            + list(self.model.object_action_delta_norm.parameters())
+            + list(self.model.object_action_delta.parameters())
             + [self.model.object_relation_gate_logit]
         )
 
@@ -307,6 +317,123 @@ class HeatmapModule(pl.LightningModule):
                 for key, value in kwargs.items()
             }
         raise ValueError(f"Unsupported object mode: {mode}")
+
+    def _actor_logits_for_object_mode(self, imgs, target, mode):
+        object_kwargs = self._object_kwargs(target, mode=mode)
+        if object_kwargs is None:
+            return None
+        data = self.model(
+            imgs,
+            boxes=target["boxes"].float(),
+            valid=target["valid"].bool(),
+            **object_kwargs,
+        )
+        preds, _, _, _, _, _ = self._unpack_model_data(data)
+        return preds
+
+    def _object_counterfactual_loss(self, imgs, target, normal_logits, valid):
+        valid = valid.to(device=normal_logits.device, dtype=torch.bool)
+        margin_weight = float(
+            self.model.hparams.get("object_counterfactual_margin_weight", 0.0)
+        )
+        consistency_weight = float(
+            self.model.hparams.get("object_objectless_consistency_weight", 0.0)
+        )
+        if margin_weight <= 0.0 and consistency_weight <= 0.0:
+            return normal_logits.new_zeros(())
+        if (
+            "interaction_valid" not in target
+            or "interaction_positive_mask" not in target
+        ):
+            return normal_logits.new_zeros(())
+
+        labels = target["actions"].long()
+        positive_mask = target["interaction_positive_mask"].to(
+            device=normal_logits.device,
+            dtype=torch.bool,
+        )
+        inter_valid = target["interaction_valid"].to(
+            device=normal_logits.device,
+            dtype=torch.bool,
+        ) & valid
+        none_slot = positive_mask.shape[-1] - 1
+        object_interaction = inter_valid & positive_mask[..., :none_slot].any(dim=-1)
+        none_interaction = inter_valid & positive_mask[..., none_slot]
+
+        normal_valid = normal_logits[valid].float()
+        labels_valid = labels.to(device=normal_logits.device)[valid]
+        object_mask = object_interaction[valid]
+        none_mask = none_interaction[valid]
+
+        off_logits = None
+        shuffled_logits = None
+        with torch.no_grad():
+            if margin_weight > 0.0 or consistency_weight > 0.0:
+                off_logits = self._actor_logits_for_object_mode(imgs, target, "off")
+            if margin_weight > 0.0:
+                shuffled_logits = self._actor_logits_for_object_mode(
+                    imgs,
+                    target,
+                    "shuffled",
+                )
+
+        weighted_loss = normal_logits.new_zeros(())
+        margin_losses = []
+        if margin_weight > 0.0 and object_mask.any():
+            normal_object = normal_valid[object_mask]
+            labels_object = labels_valid[object_mask]
+            normal_true = normal_object.gather(
+                1,
+                labels_object[:, None],
+            ).squeeze(1)
+            margin = float(self.model.hparams.get("object_counterfactual_margin", 0.05))
+
+            if off_logits is not None:
+                off_true = off_logits[valid].float()[object_mask].gather(
+                    1,
+                    labels_object[:, None],
+                ).squeeze(1)
+                margin_losses.append(F.relu(margin - (normal_true - off_true)))
+            if shuffled_logits is not None:
+                shuffled_true = shuffled_logits[valid].float()[object_mask].gather(
+                    1,
+                    labels_object[:, None],
+                ).squeeze(1)
+                margin_losses.append(F.relu(margin - (normal_true - shuffled_true)))
+
+        if margin_losses:
+            loss_margin = torch.cat(margin_losses).mean()
+            weighted_loss = weighted_loss + loss_margin * margin_weight
+            self.log(
+                "train_loss_object_counterfactual_margin",
+                loss_margin,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+
+        if consistency_weight > 0.0 and none_mask.any() and off_logits is not None:
+            normal_none = normal_valid[none_mask]
+            off_none = off_logits[valid].float()[none_mask]
+            loss_consistency = F.kl_div(
+                F.log_softmax(normal_none, dim=-1),
+                F.softmax(off_none, dim=-1),
+                reduction="batchmean",
+            )
+            weighted_loss = weighted_loss + loss_consistency * consistency_weight
+            self.log(
+                "train_loss_objectless_consistency",
+                loss_consistency,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+
+        return weighted_loss
 
     def _pose_heatmap_pred(self, hm_preds):
         if not torch.is_tensor(hm_preds):
@@ -496,15 +623,27 @@ class HeatmapModule(pl.LightningModule):
         ):
             return
         gate = torch.sigmoid(self.model.object_relation_gate_logit.detach())
+        gate_mean = gate.mean()
         self.log(
             f"{stage}_object_relation_gate",
-            gate,
+            gate_mean,
             on_step=stage == "train",
             on_epoch=True,
             prog_bar=False,
             logger=True,
             sync_dist=True,
         )
+        if gate.ndim > 0 and stage != "train":
+            self._log_scalar(
+                f"{stage}_object_relation_gate_min",
+                gate.min(),
+                gate.numel(),
+            )
+            self._log_scalar(
+                f"{stage}_object_relation_gate_max",
+                gate.max(),
+                gate.numel(),
+            )
 
     def _log_group_metrics(self, prefix, preds, labels):
         if not self.group_indices:
@@ -664,6 +803,7 @@ class HeatmapModule(pl.LightningModule):
             presence_logits,
             selection_logits,
             interaction_heatmap,
+            object_residual,
         ) = self._unpack_model_data(data)
 
         valid_preds = preds[valid]
@@ -854,6 +994,31 @@ class HeatmapModule(pl.LightningModule):
                     sync_dist=True,
                 )
 
+            residual_weight = float(
+                self.model.hparams.get("object_residual_l2_weight", 0.0)
+            )
+            if object_residual is not None and residual_weight > 0.0:
+                residual_valid = object_residual[valid].float()
+                loss_residual = residual_valid.square().mean()
+                loss = loss + loss_residual * residual_weight
+                self.log(
+                    f"{stage}_loss_object_residual_l2",
+                    loss_residual,
+                    on_step=stage == "train",
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                    sync_dist=True,
+                )
+
+            if stage == "train":
+                loss = loss + self._object_counterfactual_loss(
+                    imgs,
+                    target,
+                    preds,
+                    valid,
+                )
+
         return (
             loss,
             valid_preds,
@@ -865,7 +1030,16 @@ class HeatmapModule(pl.LightningModule):
         )
 
     def _unpack_model_data(self, data):
-        if len(data) == 5:
+        if len(data) == 6:
+            (
+                preds,
+                hm_preds,
+                presence_logits,
+                selection_logits,
+                interaction_heatmap,
+                object_residual,
+            ) = data
+        elif len(data) == 5:
             (
                 preds,
                 hm_preds,
@@ -873,19 +1047,30 @@ class HeatmapModule(pl.LightningModule):
                 selection_logits,
                 interaction_heatmap,
             ) = data
+            object_residual = None
         elif len(data) == 4:
             preds, hm_preds, presence_logits, selection_logits = data
             interaction_heatmap = None
+            object_residual = None
         elif len(data) == 3:
             preds, hm_preds, presence_logits = data
             selection_logits = None
             interaction_heatmap = None
+            object_residual = None
         else:
             preds, hm_preds = data
             presence_logits = None
             selection_logits = None
             interaction_heatmap = None
-        return preds, hm_preds, presence_logits, selection_logits, interaction_heatmap
+            object_residual = None
+        return (
+            preds,
+            hm_preds,
+            presence_logits,
+            selection_logits,
+            interaction_heatmap,
+            object_residual,
+        )
 
     def _first_actor_targets(self, imgs, target):
         valid = target["valid"].bool()
@@ -993,7 +1178,7 @@ class HeatmapModule(pl.LightningModule):
         diag_boxes[:, 0] = boxes
         diag_valid[:, 0] = True
         data = self.model(imgs, boxes=diag_boxes, valid=diag_valid)
-        _, _, presence_logits, _, _ = self._unpack_model_data(data)
+        _, _, presence_logits, _, _, _ = self._unpack_model_data(data)
         if presence_logits is None:
             return
         probs = torch.sigmoid(presence_logits.float())
@@ -1020,7 +1205,7 @@ class HeatmapModule(pl.LightningModule):
             batch_size, num_actor_tokens, device=boxes.device, dtype=torch.bool
         )
         data = self.model(imgs, boxes=diag_boxes, valid=diag_valid)
-        preds, _, _, _, _ = self._unpack_model_data(data)
+        preds, _, _, _, _, _ = self._unpack_model_data(data)
         pred_labels = preds.argmax(dim=-1)
         expanded_labels = labels[:, None].expand(-1, num_actor_tokens)
         slot_correct = (pred_labels == expanded_labels).float()
@@ -1136,7 +1321,7 @@ class HeatmapModule(pl.LightningModule):
                 continue
             pair_imgs, pair_boxes, pair_valid, pair_labels = batch
             data = self.model(pair_imgs, boxes=pair_boxes, valid=pair_valid)
-            preds, _, _, _, _ = self._unpack_model_data(data)
+            preds, _, _, _, _, _ = self._unpack_model_data(data)
             pair_preds = preds[:, :2].argmax(dim=-1)
             correct = (pair_preds == pair_labels).float()
             self._log_scalar(
@@ -1179,7 +1364,7 @@ class HeatmapModule(pl.LightningModule):
             valid=target["valid"].bool(),
             **object_kwargs,
         )
-        preds, _, _, _, _ = self._unpack_model_data(data)
+        preds, _, _, _, _, _ = self._unpack_model_data(data)
         valid = target["valid"].bool()
         labels = target["actions"].long()
         return preds[valid], labels[valid]
@@ -1686,7 +1871,7 @@ class HeatmapModule(pl.LightningModule):
             valid = target["valid"].bool()
             object_kwargs = self._object_kwargs(target, mode="on")
             data = self.model(imgs, boxes=boxes, valid=valid, **object_kwargs)
-            preds, hm, _, _, _ = self._unpack_model_data(data)
+            preds, hm, _, _, _, _ = self._unpack_model_data(data)
             preds = preds.float()
 
             if self.model.hparams.n_landmarks > 0 and "heatmap" in target:
@@ -1745,7 +1930,7 @@ class HeatmapModule(pl.LightningModule):
             with open(filename.format(i), "wb") as f:
                 pickle.dump(labels, f)
         data = self.model(imgs)  # only use class preds
-        preds, hm, _, _, _ = self._unpack_model_data(data)
+        preds, hm, _, _, _, _ = self._unpack_model_data(data)
         # convert preds from bfloat16 to float32
         preds = preds.float()
         if len(batch) == 6:

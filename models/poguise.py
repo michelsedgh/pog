@@ -352,9 +352,12 @@ class POGUISE(pl.LightningModule):
         dropout = float(self.hparams.get("object_relation_dropout", 0.1))
         if not 0 <= dropout < 1:
             raise ValueError("object_relation_dropout must be in [0, 1)")
-        gate_init = float(self.hparams.get("object_relation_gate_init", 0.25))
-        if not 0 < gate_init < 1:
-            raise ValueError("object_relation_gate_init must be in (0, 1)")
+        action_gate_init = float(self.hparams.get("object_action_gate_init", 0.05))
+        if not 0 < action_gate_init < 1:
+            raise ValueError("object_action_gate_init must be in (0, 1)")
+        self.object_delta_scale = float(self.hparams.get("object_delta_scale", 1.0))
+        if self.object_delta_scale <= 0:
+            raise ValueError("object_delta_scale must be positive")
         interaction_heatmap_size = int(self.hparams.get("object_heatmap_size", 56))
         if interaction_heatmap_size != 56:
             raise ValueError("object interaction heatmaps are trained at 56x56")
@@ -387,22 +390,48 @@ class POGUISE(pl.LightningModule):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, 1),
         )
-        self.object_relation_delta_norm = nn.LayerNorm(dim * 4)
-        self.object_relation_delta = nn.Sequential(
-            nn.Linear(dim * 4, hidden_dim),
+        num_classes = int(self.hparams.num_classes)
+        self.object_action_embed = nn.Embedding(num_classes, dim)
+        self.object_action_query = nn.Sequential(
+            nn.LayerNorm(dim * 3),
+            nn.Linear(dim * 3, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim),
+        )
+        self.object_action_key = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, dim),
+        )
+        self.object_action_value = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, dim),
+        )
+        self.object_action_geom_bias = nn.Sequential(
+            nn.LayerNorm(10),
+            nn.Linear(10, max(32, hidden_dim // 4)),
+            nn.GELU(),
+            nn.Linear(max(32, hidden_dim // 4), 1),
+        )
+        self.object_action_delta_norm = nn.LayerNorm(dim * 5)
+        self.object_action_delta = nn.Sequential(
+            nn.Linear(dim * 5, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, self.hparams.num_classes),
+            nn.Linear(hidden_dim, 1),
         )
         self.object_valid_embed = nn.Embedding(2, dim)
         self.object_relation_gate_logit = nn.Parameter(
-            torch.logit(torch.tensor(gate_init, dtype=torch.float32))
+            torch.full(
+                (num_classes,),
+                torch.logit(torch.tensor(action_gate_init, dtype=torch.float32)),
+            )
         )
 
         nn.init.normal_(self.object_cls_embed.weight, std=0.02)
         nn.init.normal_(self.object_valid_embed.weight, std=0.02)
-        nn.init.zeros_(self.object_relation_delta[-1].weight)
-        nn.init.zeros_(self.object_relation_delta[-1].bias)
+        nn.init.normal_(self.object_action_embed.weight, std=0.02)
+        nn.init.zeros_(self.object_action_delta[-1].weight)
+        nn.init.zeros_(self.object_action_delta[-1].bias)
 
     def _object_relation_modules(self):
         return (
@@ -412,8 +441,13 @@ class POGUISE(pl.LightningModule):
             self.object_visual_mlp,
             self.object_selector,
             self.object_valid_embed,
-            self.object_relation_delta_norm,
-            self.object_relation_delta,
+            self.object_action_embed,
+            self.object_action_query,
+            self.object_action_key,
+            self.object_action_value,
+            self.object_action_geom_bias,
+            self.object_action_delta_norm,
+            self.object_action_delta,
         )
 
     def _apply_object_dropout(self, object_valid):
@@ -664,13 +698,6 @@ class POGUISE(pl.LightningModule):
         object_alpha = torch.softmax(selection_logits.float(), dim=-1).to(
             dtype=actor_feat.dtype
         )
-        real_alpha = object_alpha[..., : object_boxes.shape[1]]
-        real_alpha = real_alpha * object_valid[:, None, :].to(dtype=actor_feat.dtype)
-        selected_context = torch.einsum(
-            "bkm,bmd->bkd",
-            real_alpha,
-            object_feat[:, : object_boxes.shape[1], :],
-        )
         interaction_heatmap = self._build_interaction_heatmap(
             object_alpha,
             object_boxes,
@@ -691,18 +718,76 @@ class POGUISE(pl.LightningModule):
             spatial_feat,
             interaction_heatmap_for_pool,
         )
+        num_classes = int(self.hparams.num_classes)
+        action_embed = self.object_action_embed.weight.to(dtype=actor_feat.dtype)
+        actor_action = actor_feat[:, :, None, :].expand(
+            -1,
+            -1,
+            num_classes,
+            -1,
+        )
+        action_pair = action_embed[None, None, :, :].expand(
+            batch_size,
+            num_actors,
+            -1,
+            -1,
+        )
+        action_query = self.object_action_query(
+            torch.cat(
+                [
+                    actor_action,
+                    action_pair,
+                    actor_action * action_pair,
+                ],
+                dim=-1,
+            )
+        )
+        object_key = self.object_action_key(object_feat)
+        object_value = self.object_action_value(object_feat)
+        action_scores = torch.einsum(
+            "bkcd,bmd->bkcm",
+            action_query,
+            object_key,
+        ) / float(actor_feat.shape[-1]) ** 0.5
+        geom_bias = self.object_action_geom_bias(relation_geometry).squeeze(-1)
+        action_scores = action_scores + geom_bias[:, :, None, :]
+        action_scores = action_scores.masked_fill(
+            ~object_valid_with_null[:, None, None, :],
+            torch.finfo(action_scores.dtype).min,
+        )
+        action_alpha = torch.softmax(action_scores.float(), dim=-1).to(
+            dtype=actor_feat.dtype
+        )
+        action_context = torch.einsum(
+            "bkcm,bmd->bkcd",
+            action_alpha,
+            object_value,
+        )
+        visual_action = visual_context[:, :, None, :].expand(
+            -1,
+            -1,
+            num_classes,
+            -1,
+        )
         action_feat = torch.cat(
             [
-                selected_context,
-                visual_context,
-                actor_feat * selected_context,
-                actor_feat * visual_context,
+                action_context,
+                visual_action,
+                actor_action * action_context,
+                actor_action * visual_action,
+                action_pair,
             ],
             dim=-1,
         )
-        action_feat = self.object_relation_delta_norm(action_feat)
-        delta = self.object_relation_delta(action_feat)
-        return delta, selection_logits, interaction_heatmap
+        action_feat = self.object_action_delta_norm(action_feat)
+        raw_delta = self.object_action_delta(action_feat).squeeze(-1)
+        bounded_delta = self.object_delta_scale * torch.tanh(raw_delta)
+        class_gate = torch.sigmoid(self.object_relation_gate_logit).to(
+            device=bounded_delta.device,
+            dtype=bounded_delta.dtype,
+        )
+        residual = bounded_delta * class_gate[None, None, :]
+        return residual, selection_logits, interaction_heatmap
 
     def forward(
         self,
@@ -760,11 +845,7 @@ class POGUISE(pl.LightningModule):
                     object_conf=object_conf,
                     object_valid=object_valid,
                 )
-                gate = torch.sigmoid(self.object_relation_gate_logit).to(
-                    device=action_logits.device,
-                    dtype=action_logits.dtype,
-                )
-                action_logits = action_logits + gate * object_delta
+                action_logits = action_logits + object_delta
             else:
                 selection_logits = None
                 interaction_heatmap = None
@@ -777,6 +858,7 @@ class POGUISE(pl.LightningModule):
                         presence_logits,
                         selection_logits,
                         interaction_heatmap,
+                        object_delta,
                     )
                 return action_logits, x_heatmap, presence_logits
             if self.object_prompt:
@@ -786,6 +868,7 @@ class POGUISE(pl.LightningModule):
                     None,
                     selection_logits,
                     interaction_heatmap,
+                    object_delta,
                 )
             return action_logits, x_heatmap
         if self.hparams.n_landmarks > 0:
@@ -853,6 +936,8 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--object_relation_hidden_dim", type=int, default=512)
         parser.add_argument("--object_relation_dropout", type=float, default=0.1)
         parser.add_argument("--object_relation_gate_init", type=float, default=0.25)
+        parser.add_argument("--object_action_gate_init", type=float, default=0.05)
+        parser.add_argument("--object_delta_scale", type=float, default=1.0)
         parser.add_argument("--object_relation_only", type=int, default=0)
         parser.add_argument(
             "--object_interaction_heatmap_weight",
