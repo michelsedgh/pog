@@ -68,6 +68,8 @@ import torch
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 REPO_DIR = "/content/pog"
+if REPO_DIR not in sys.path:
+    sys.path.insert(0, REPO_DIR)
 SCRATCH_ROOT = "/mnt/local-scratch" if os.path.isdir("/mnt/local-scratch") else "/content"
 DATA_DIR = f"{SCRATCH_ROOT}/poguise_data"
 
