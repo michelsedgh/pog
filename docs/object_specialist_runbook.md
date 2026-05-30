@@ -119,22 +119,11 @@ run_stream(["git", "pull", "--ff-only", "origin", "main"], cwd=REPO_DIR)
 run_stream(["git", "merge-base", "--is-ancestor", "1490baa", "HEAD"], cwd=REPO_DIR)
 
 checkpoint_check = r"""
-import __main__
 import sys
 import torch
 
-class _LegacyCheckpointPlaceholder:
-    def __init__(self, *args, **kwargs):
-        self.args = args
-        self.kwargs = kwargs
-
-    def __call__(self, value):
-        return value
-
-__main__._LegacyCheckpointPlaceholder = _LegacyCheckpointPlaceholder
-
 ckpt_path = sys.argv[1]
-ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
 state_dict = ckpt.get("state_dict", ckpt)
 object_state_keys = [
     key for key in state_dict.keys()
@@ -149,12 +138,17 @@ if object_state_keys:
 """
 check_env = os.environ.copy()
 check_env["PYTHONPATH"] = REPO_DIR + os.pathsep + check_env.get("PYTHONPATH", "")
-subprocess.run(
+check_proc = subprocess.run(
     [sys.executable, "-c", checkpoint_check, START_CKPT],
     cwd=REPO_DIR,
     env=check_env,
-    check=True,
+    text=True,
+    capture_output=True,
 )
+print(check_proc.stdout, end="", flush=True)
+if check_proc.returncode != 0:
+    print(check_proc.stderr, flush=True)
+    raise RuntimeError(f"Checkpoint cleanliness check failed with exit code {check_proc.returncode}")
 
 cmd = [
     sys.executable, "-u", "train.py",
