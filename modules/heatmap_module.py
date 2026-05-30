@@ -1603,16 +1603,14 @@ class HeatmapModule(pl.LightningModule):
 
             normal_group = normal_logits[group_mask]
             labels_group = labels[group_mask]
-            group_targets = (
-                labels_group[:, None] == group_idx[None, :]
-            ).long().argmax(dim=1)
             normal_margin = self._group_classification_margin(
                 normal_group,
                 labels_group,
                 group_idx,
             )
-            normal_pred = normal_group.argmax(dim=1)
-            normal_correct = normal_pred == group_targets
+            normal_full = normal_logits[group_mask]
+            normal_pred = normal_full.argmax(dim=1)
+            normal_correct = normal_pred == labels_group
             self._log_scalar(
                 f"val_{group_name}_objects_on_group_margin",
                 normal_margin.mean(),
@@ -1634,8 +1632,9 @@ class HeatmapModule(pl.LightningModule):
                     labels_group,
                     group_idx,
                 )
-                mode_pred = mode_group.argmax(dim=1)
-                mode_correct = mode_pred == group_targets
+                mode_full = mode_logits[group_mask]
+                mode_pred = mode_full.argmax(dim=1)
+                mode_correct = mode_pred == labels_group
                 changed = normal_pred != mode_pred
                 correct_change = changed & normal_correct & ~mode_correct
                 wrong_change = changed & ~normal_correct & mode_correct
