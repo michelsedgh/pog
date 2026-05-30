@@ -60,6 +60,7 @@ import sys
 import shlex
 import subprocess
 import time
+import __main__
 from pathlib import Path
 
 import pandas as pd
@@ -70,6 +71,18 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 REPO_DIR = "/content/pog"
 if REPO_DIR not in sys.path:
     sys.path.insert(0, REPO_DIR)
+os.chdir(REPO_DIR)
+
+class _LegacyCheckpointPlaceholder:
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+    def __call__(self, value):
+        return value
+
+__main__._LegacyCheckpointPlaceholder = _LegacyCheckpointPlaceholder
+
 SCRATCH_ROOT = "/mnt/local-scratch" if os.path.isdir("/mnt/local-scratch") else "/content"
 DATA_DIR = f"{SCRATCH_ROOT}/poguise_data"
 
