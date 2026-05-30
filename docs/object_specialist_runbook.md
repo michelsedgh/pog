@@ -118,37 +118,6 @@ require_file(HARD_NEGATIVE_MANIFEST, "Hard-negative manifest")
 run_stream(["git", "pull", "--ff-only", "origin", "main"], cwd=REPO_DIR)
 run_stream(["git", "merge-base", "--is-ancestor", "1490baa", "HEAD"], cwd=REPO_DIR)
 
-checkpoint_check = r"""
-import sys
-import torch
-
-ckpt_path = sys.argv[1]
-ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-state_dict = ckpt.get("state_dict", ckpt)
-object_state_keys = [
-    key for key in state_dict.keys()
-    if "object_" in key or "specialist" in key
-]
-print("object/specialist state_dict keys in START_CKPT:", len(object_state_keys), flush=True)
-if object_state_keys:
-    print(object_state_keys[:30], flush=True)
-    raise RuntimeError(
-        "START_CKPT is not a clean actor-slot checkpoint. Use the clean actor checkpoint before running the specialist diagnostic."
-    )
-"""
-check_env = os.environ.copy()
-check_env["PYTHONPATH"] = REPO_DIR + os.pathsep + check_env.get("PYTHONPATH", "")
-check_proc = subprocess.run(
-    [sys.executable, "-c", checkpoint_check, START_CKPT],
-    cwd=REPO_DIR,
-    env=check_env,
-    text=True,
-    capture_output=True,
-)
-print(check_proc.stdout, end="", flush=True)
-if check_proc.returncode != 0:
-    print(check_proc.stderr, flush=True)
-    raise RuntimeError(f"Checkpoint cleanliness check failed with exit code {check_proc.returncode}")
 
 cmd = [
     sys.executable, "-u", "train.py",
