@@ -283,6 +283,25 @@ class HeatmapModule(pl.LightningModule):
                 groups[group_name] = torch.tensor(indices, dtype=torch.long)
         return groups
 
+    def _object_audit_action_indices(self):
+        label_dict = self._toyota_label_dict()
+        action_names = (
+            "Uselaptop",
+            "Readbook",
+            "WatchTV",
+            "Usetelephone",
+            "Drink.Frombottle",
+            "Drink.Fromcup",
+            "Drink.Fromglass",
+        )
+        indices = []
+        for action_name in action_names:
+            if action_name not in label_dict:
+                continue
+            metric_name = action_name.replace(".", "_")
+            indices.append((metric_name, int(label_dict[action_name]) - 1))
+        return indices
+
     def _build_object_specialist_specs(self):
         label_dict = self._toyota_label_dict()
         specs = {}
@@ -885,6 +904,18 @@ class HeatmapModule(pl.LightningModule):
             )
             self._log_scalar(
                 metric_name,
+                (pred_labels[mask] == labels[mask]).float().mean(),
+                mask.sum().item(),
+            )
+
+    def _log_action_metrics(self, prefix, preds, labels):
+        pred_labels = preds.argmax(dim=-1)
+        for metric_name, action_idx in self._object_audit_action_indices():
+            mask = labels == int(action_idx)
+            if not mask.any():
+                continue
+            self._log_scalar(
+                prefix.format(action=metric_name),
                 (pred_labels[mask] == labels[mask]).float().mean(),
                 mask.sum().item(),
             )
@@ -1882,6 +1913,7 @@ class HeatmapModule(pl.LightningModule):
             sync_dist=True,
         )
         self._log_group_metrics("val_{group}_objects_on", normal_preds, labels)
+        self._log_action_metrics("val_action_{action}_objects_on", normal_preds, labels)
 
         positive_erased = self._actor_preds_for_object_mode(
             imgs,
@@ -1892,6 +1924,11 @@ class HeatmapModule(pl.LightningModule):
             erased_preds, erased_labels = positive_erased
             self._log_group_metrics(
                 "val_{group}_objects_positive_erased",
+                erased_preds,
+                erased_labels,
+            )
+            self._log_action_metrics(
+                "val_action_{action}_objects_positive_erased",
                 erased_preds,
                 erased_labels,
             )
@@ -1923,6 +1960,11 @@ class HeatmapModule(pl.LightningModule):
                 sync_dist=True,
             )
             self._log_group_metrics("val_{group}_objects_off", off_preds, off_labels)
+            self._log_action_metrics(
+                "val_action_{action}_objects_off",
+                off_preds,
+                off_labels,
+            )
         else:
             off_preds = None
             off_labels = None
@@ -1952,6 +1994,11 @@ class HeatmapModule(pl.LightningModule):
             )
             self._log_group_metrics(
                 "val_{group}_objects_shuffled",
+                shuffled_preds,
+                shuffled_labels,
+            )
+            self._log_action_metrics(
+                "val_action_{action}_objects_shuffled",
                 shuffled_preds,
                 shuffled_labels,
             )

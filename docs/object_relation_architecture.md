@@ -47,20 +47,25 @@ Suggested settings:
 - `--freeze_backbone 1`
 - `--object_relation_only 0`
 - `--object_warmup_freeze_actor_path 1`
-- `--object_action_gate_init 0.05`
-- `--object_delta_scale 1.0`
+- `--object_action_gate_init 0.02`
+- `--object_delta_scale 0.5`
 - `--object_relation_hidden_dim 512`
 - `--object_relation_dropout 0.05`
 - `--object_heatmap_weight 50`
 - `--object_interaction_loss_weight 0.10`
 - `--object_interaction_heatmap_weight 50`
-- `--object_residual_l2_weight 0.01`
+- `--object_residual_l2_weight 0.03`
 - `--object_counterfactual_margin_weight 0.10`
 - `--object_counterfactual_margin 0.05`
 - `--object_objectless_consistency_weight 0.03`
 - `--kp_loss_weight 1000`
 - `--lr_head 3e-4`
 - `--lr_head_hm 5e-5`
+- `--class_balanced_sampler 0`
+- `--specialist_sampler 1`
+- `--specialist_positive_prob 0.55`
+- `--hard_negative_prob 0.25`
+- `--normal_anchor_prob 0.20`
 - `--max_epochs 4`
 
 Acceptance signal:

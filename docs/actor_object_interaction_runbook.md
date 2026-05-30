@@ -85,7 +85,7 @@ os.makedirs(OBJECT_PREPROC_CACHE_DIR, exist_ok=True)
 os.makedirs(LANDMARK_PREPROC_CACHE_DIR, exist_ok=True)
 
 STAMP = time.strftime("%Y%m%d_%H%M%S")
-MODEL_NAME = f"actor_object_poguiseplus_warmup_from_actor_slot_{STAMP}"
+MODEL_NAME = f"actor_object_poguiseplus_focused_actorfrozen_warmup_from_actor_slot_{STAMP}"
 EPOCH_DIR = f"{DATA_DIR}/checkpoints/{MODEL_NAME}/epoch_checkpoints"
 
 def require_file(path, name):
@@ -168,21 +168,24 @@ cmd = [
     "--object_warmup_freeze_actor_path", "1",
     "--object_relation_hidden_dim", "512",
     "--object_relation_dropout", "0.05",
-    "--object_action_gate_init", "0.05",
-    "--object_delta_scale", "1.0",
+    "--object_action_gate_init", "0.02",
+    "--object_delta_scale", "0.5",
     "--object_interaction_loss_weight", "0.10",
     "--object_interaction_heatmap_weight", "50",
-    "--object_residual_l2_weight", "0.01",
+    "--object_residual_l2_weight", "0.03",
     "--object_counterfactual_margin_weight", "0.10",
     "--object_counterfactual_margin", "0.05",
     "--object_counterfactual_branch_grad", "0",
     "--object_objectless_consistency_weight", "0.03",
     "--object_dropout_prob", "0.05",
     "--object_token_dropout_prob", "0.02",
-    "--class_balanced_sampler", "1",
+    "--class_balanced_sampler", "0",
+    "--specialist_sampler", "1",
+    "--specialist_positive_prob", "0.55",
     "--hard_negative_sampler", "1",
     "--hard_negative_manifest", HARD_NEGATIVE_MANIFEST,
-    "--hard_negative_prob", "0.20",
+    "--hard_negative_prob", "0.25",
+    "--normal_anchor_prob", "0.20",
     "--keep_rate", "0.6",
     "--keep_rate_merge", "0.3",
     "--merge_type", "tome",
@@ -254,7 +257,7 @@ import pandas as pd
 import math
 
 DATA_DIR = "/mnt/local-scratch/poguise_data"
-pattern = "actor_object_poguiseplus_warmup_from_actor_slot_*"
+pattern = "actor_object_poguiseplus_focused_actorfrozen_warmup_from_actor_slot_*"
 
 runs = sorted((Path(DATA_DIR) / "checkpoints").glob(pattern), key=lambda p: p.stat().st_mtime)
 if not runs:
@@ -302,6 +305,34 @@ cols = [
     "val_drink_cup_bottle_glass_objects_on",
     "val_drink_cup_bottle_glass_objects_positive_erased",
     "val_drink_cup_bottle_glass_objects_shuffled",
+    "val_action_Uselaptop_objects_on",
+    "val_action_Uselaptop_objects_positive_erased",
+    "val_action_Uselaptop_objects_off",
+    "val_action_Uselaptop_objects_shuffled",
+    "val_action_Readbook_objects_on",
+    "val_action_Readbook_objects_positive_erased",
+    "val_action_Readbook_objects_off",
+    "val_action_Readbook_objects_shuffled",
+    "val_action_WatchTV_objects_on",
+    "val_action_WatchTV_objects_positive_erased",
+    "val_action_WatchTV_objects_off",
+    "val_action_WatchTV_objects_shuffled",
+    "val_action_Usetelephone_objects_on",
+    "val_action_Usetelephone_objects_positive_erased",
+    "val_action_Usetelephone_objects_off",
+    "val_action_Usetelephone_objects_shuffled",
+    "val_action_Drink_Frombottle_objects_on",
+    "val_action_Drink_Frombottle_objects_positive_erased",
+    "val_action_Drink_Frombottle_objects_off",
+    "val_action_Drink_Frombottle_objects_shuffled",
+    "val_action_Drink_Fromcup_objects_on",
+    "val_action_Drink_Fromcup_objects_positive_erased",
+    "val_action_Drink_Fromcup_objects_off",
+    "val_action_Drink_Fromcup_objects_shuffled",
+    "val_action_Drink_Fromglass_objects_on",
+    "val_action_Drink_Fromglass_objects_positive_erased",
+    "val_action_Drink_Fromglass_objects_off",
+    "val_action_Drink_Fromglass_objects_shuffled",
 ]
 cols = [c for c in cols if c in epoch_df.columns]
 val = epoch_df[df.columns.intersection(["epoch"]).tolist() + [c for c in cols if c != "epoch"]].copy()
