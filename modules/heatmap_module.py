@@ -336,6 +336,33 @@ class HeatmapModule(pl.LightningModule):
         if mode == "off":
             kwargs["object_valid"] = torch.zeros_like(kwargs["object_valid"])
             return kwargs
+        if mode == "positive_erased":
+            if "interaction_positive_mask" not in target:
+                raise ValueError(
+                    "positive_erased object mode requires interaction_positive_mask"
+                )
+            positive_mask = target["interaction_positive_mask"].to(
+                device=kwargs["object_valid"].device,
+                dtype=torch.bool,
+            )
+            actor_valid = target["valid"].to(
+                device=kwargs["object_valid"].device,
+                dtype=torch.bool,
+            )
+            real_object_count = min(
+                kwargs["object_valid"].shape[-1],
+                positive_mask.shape[-1] - 1,
+            )
+            erase_mask = (
+                positive_mask[..., :real_object_count]
+                & actor_valid[..., None]
+            ).any(dim=1)
+            kwargs["object_valid"] = kwargs["object_valid"].clone()
+            kwargs["object_valid"][..., :real_object_count] = (
+                kwargs["object_valid"][..., :real_object_count]
+                & ~erase_mask
+            )
+            return kwargs
         if mode == "shuffled":
             batch_size = kwargs["object_valid"].shape[0]
             if batch_size < 2:
@@ -399,7 +426,14 @@ class HeatmapModule(pl.LightningModule):
         preds, _, _, _, _, _ = self._unpack_model_data(data)
         return preds
 
-    def _object_counterfactual_loss(self, imgs, target, normal_logits, valid):
+    def _object_counterfactual_loss(
+        self,
+        imgs,
+        target,
+        normal_logits,
+        valid,
+        normal_object_valid,
+    ):
         valid = valid.to(device=normal_logits.device, dtype=torch.bool)
         margin_weight = float(
             self.model.hparams.get("object_counterfactual_margin_weight", 0.0)
@@ -420,6 +454,19 @@ class HeatmapModule(pl.LightningModule):
             device=normal_logits.device,
             dtype=torch.bool,
         )
+        normal_object_valid = normal_object_valid.to(
+            device=normal_logits.device,
+            dtype=torch.bool,
+        )
+        real_object_count = min(
+            normal_object_valid.shape[-1],
+            positive_mask.shape[-1] - 1,
+        )
+        positive_mask = positive_mask.clone()
+        positive_mask[..., :real_object_count] = (
+            positive_mask[..., :real_object_count]
+            & normal_object_valid[:, None, :real_object_count]
+        )
         inter_valid = target["interaction_valid"].to(
             device=normal_logits.device,
             dtype=torch.bool,
@@ -434,11 +481,17 @@ class HeatmapModule(pl.LightningModule):
         none_mask = none_interaction[valid]
 
         off_logits = None
+        erased_logits = None
         shuffled_logits = None
-        if margin_weight > 0.0 or consistency_weight > 0.0:
+        if consistency_weight > 0.0:
             with torch.no_grad():
                 off_logits = self._actor_logits_for_object_mode(imgs, target, "off")
         if margin_weight > 0.0:
+            erased_logits = self._actor_logits_for_object_mode(
+                imgs,
+                target,
+                "positive_erased",
+            )
             shuffled_logits = self._actor_logits_for_object_mode(
                 imgs,
                 target,
@@ -456,12 +509,12 @@ class HeatmapModule(pl.LightningModule):
             ).squeeze(1)
             margin = float(self.model.hparams.get("object_counterfactual_margin", 0.05))
 
-            if off_logits is not None:
-                off_true = off_logits[valid].float()[object_mask].gather(
+            if erased_logits is not None:
+                erased_true = erased_logits[valid].float()[object_mask].gather(
                     1,
                     labels_object[:, None],
                 ).squeeze(1)
-                margin_losses.append(F.relu(margin - (normal_true - off_true)))
+                margin_losses.append(F.relu(margin - (normal_true - erased_true)))
             if shuffled_logits is not None:
                 shuffled_true = shuffled_logits[valid].float()[object_mask].gather(
                     1,
@@ -831,15 +884,26 @@ class HeatmapModule(pl.LightningModule):
         # We will support Adam or SGD as optimizers.
         if self.model.hparams.freeze_backbone:
             head_params = self._head_params()
-            optimizer = optim.AdamW(
-                [
+            params = [
+                {
+                    "params": head_params,
+                    "lr": self.lr_head,
+                    "weight_decay": self.weight_decay_head,
+                },
+            ]
+            if (
+                self.object_prompt
+                and getattr(self.model.hparams, "lr_head_hm", None)
+                and self.model.hparams.lr_head_hm
+            ):
+                params.append(
                     {
-                        "params": head_params,
-                        "lr": self.lr_head,
-                        "weight_decay": self.weight_decay_head,
+                        "params": self.model.net.heatmap_head.parameters(),
+                        "lr": self.model.hparams.lr_head_hm,
+                        "weight_decay": self.model.hparams.weight_decay_head_hm,
                     },
-                ],
-            )
+                )
+            optimizer = optim.AdamW(params)
         else:
             if (
                 getattr(self.model.hparams, "lr_head_hm", None)
@@ -1217,6 +1281,7 @@ class HeatmapModule(pl.LightningModule):
                     target,
                     preds,
                     valid,
+                    object_kwargs["object_valid"],
                 )
 
         return (
@@ -1660,14 +1725,25 @@ class HeatmapModule(pl.LightningModule):
                     labels_group.numel(),
                 )
 
-    def _log_object_delta_metrics(self, normal_logits, labels, off=None, shuffled=None):
+    def _log_object_delta_metrics(
+        self,
+        normal_logits,
+        labels,
+        positive_erased=None,
+        off=None,
+        shuffled=None,
+    ):
         if labels.numel() == 0:
             return
 
         normal_true = normal_logits.gather(1, labels[:, None]).squeeze(1)
         normal_margin = self._classification_margin(normal_logits, labels)
 
-        for mode_name, mode_data in (("off", off), ("shuffled", shuffled)):
+        for mode_name, mode_data in (
+            ("positive_erased", positive_erased),
+            ("off", off),
+            ("shuffled", shuffled),
+        ):
             if mode_data is None:
                 continue
             mode_logits, mode_labels = mode_data
@@ -1703,6 +1779,75 @@ class HeatmapModule(pl.LightningModule):
                 labels.numel(),
             )
 
+    def _log_object_interaction_causal_metrics(
+        self,
+        normal_logits,
+        labels,
+        target,
+        positive_erased=None,
+        shuffled=None,
+    ):
+        if labels.numel() == 0 or "interaction_positive_mask" not in target:
+            return
+
+        valid = target["valid"].to(device=normal_logits.device, dtype=torch.bool)
+        positive_mask = target["interaction_positive_mask"].to(
+            device=normal_logits.device,
+            dtype=torch.bool,
+        )
+        inter_valid = target["interaction_valid"].to(
+            device=normal_logits.device,
+            dtype=torch.bool,
+        ) & valid
+        none_slot = positive_mask.shape[-1] - 1
+        object_interaction = (
+            inter_valid
+            & positive_mask[..., :none_slot].any(dim=-1)
+        )
+        object_mask = object_interaction[valid]
+        if not object_mask.any():
+            return
+
+        normal_object = normal_logits[object_mask]
+        labels_object = labels[object_mask]
+        normal_true = normal_object.gather(
+            1,
+            labels_object[:, None],
+        ).squeeze(1)
+        normal_margin = self._classification_margin(normal_object, labels_object)
+
+        for mode_name, mode_data in (
+            ("positive_erased", positive_erased),
+            ("shuffled", shuffled),
+        ):
+            if mode_data is None:
+                continue
+            mode_logits, mode_labels = mode_data
+            if mode_logits.shape != normal_logits.shape or not torch.equal(
+                mode_labels,
+                labels,
+            ):
+                raise ValueError(
+                    f"Object {mode_name} causal diagnostic returned misaligned "
+                    "logits/labels"
+                )
+            mode_object = mode_logits[object_mask]
+            mode_true = mode_object.gather(
+                1,
+                labels_object[:, None],
+            ).squeeze(1)
+            mode_margin = self._classification_margin(mode_object, labels_object)
+            self._log_scalar(
+                f"val_object_interaction_true_logit_gain_on_vs_{mode_name}",
+                (normal_true - mode_true).mean(),
+                labels_object.numel(),
+            )
+            self._log_scalar(
+                f"val_object_interaction_margin_gain_on_vs_{mode_name}",
+                (normal_margin - mode_margin).mean(),
+                labels_object.numel(),
+            )
+
     def _log_object_ablation_eval(self, imgs, target, normal_preds, labels):
         if not self.object_prompt:
             return
@@ -1728,6 +1873,22 @@ class HeatmapModule(pl.LightningModule):
             sync_dist=True,
         )
         self._log_group_metrics("val_{group}_objects_on", normal_preds, labels)
+
+        positive_erased = self._actor_preds_for_object_mode(
+            imgs,
+            target,
+            "positive_erased",
+        )
+        if positive_erased is not None:
+            erased_preds, erased_labels = positive_erased
+            self._log_group_metrics(
+                "val_{group}_objects_positive_erased",
+                erased_preds,
+                erased_labels,
+            )
+        else:
+            erased_preds = None
+            erased_labels = None
 
         off = self._actor_preds_for_object_mode(imgs, target, "off")
         if off is not None:
@@ -1790,13 +1951,24 @@ class HeatmapModule(pl.LightningModule):
             shuffled_labels = None
 
         off_data = None if off_preds is None else (off_preds, off_labels)
+        erased_data = (
+            None if erased_preds is None else (erased_preds, erased_labels)
+        )
         shuffled_data = (
             None if shuffled_preds is None else (shuffled_preds, shuffled_labels)
         )
         self._log_object_delta_metrics(
             normal_preds,
             labels,
+            positive_erased=erased_data,
             off=off_data,
+            shuffled=shuffled_data,
+        )
+        self._log_object_interaction_causal_metrics(
+            normal_preds,
+            labels,
+            target,
+            positive_erased=erased_data,
             shuffled=shuffled_data,
         )
         self._log_specialist_ablation_metrics(

@@ -337,6 +337,13 @@ class POGUISE(pl.LightningModule):
         # Freeze the backbone
         for param in self.net.parameters():
             param.requires_grad = False
+        if (
+            self.object_prompt
+            and float(self.hparams.get("lr_head_hm", 0.0)) > 0.0
+            and hasattr(self.net, "heatmap_head")
+        ):
+            for param in self.net.heatmap_head.parameters():
+                param.requires_grad = True
         # Unfreeze the head
         for param in self.head.parameters():
             param.requires_grad = True

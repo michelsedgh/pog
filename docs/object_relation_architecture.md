@@ -31,35 +31,36 @@ Use one object path:
    `[selected_object_context, interaction_visual_context, actor * selected_object_context, actor * interaction_visual_context, action * selected_object_context, action * interaction_visual_context]`.
 12. Apply a per-class gate initialized near zero and regularize the residual magnitude.
 13. Force the residual to zero when the selected evidence is `NONE` or when objects are disabled. The object branch must not become a second actor-only classifier.
-14. Train real-object counterfactuals against objects-off and label-mismatched objects-shuffled, and train objectless actions to stay consistent with objects-off.
+14. Train real-object counterfactuals against positive-object-erased and label-mismatched objects-shuffled views. The erased view removes only the weak-positive interacted objects while leaving distractors visible, so the model must learn which visible object actually supports the action. Objectless actions are trained to stay consistent with objects-off.
 15. Evaluate object usefulness with real objects, objects-off, and label-mismatched objects-shuffled. A useful object path must make real objects beat both off and shuffled on macro accuracy and F1.
 
-This is intentionally not an action-class prior or object-existence shortcut. The model sees all detected objects, then learns which object token and spatial region explain each actor's action.
+This is intentionally not an action-class prior or object-existence shortcut. The model sees all detected objects, then learns which object token and spatial region explain each actor's action. Training and inference both pass the same RF-DETR object format: boxes, object class ids, confidences, and a valid mask.
 
 ## Training Modes
 
 ### Diagnostic relation-only
 
-Start from a strong actor checkpoint, freeze the video/actor path, and train only the object relation modules. This tests the architecture without spending full-run time or corrupting the actor model.
+Start from a strong actor checkpoint, freeze the video/actor path, and train the actor/object heads plus heatmap head. This tests PO-GUISE+ style object grounding without spending full-run time or corrupting the backbone.
 
 Suggested settings:
 
 - `--freeze_backbone 1`
-- `--object_relation_only 1`
+- `--object_relation_only 0`
 - `--object_action_gate_init 0.05`
 - `--object_delta_scale 1.0`
 - `--object_relation_hidden_dim 512`
 - `--object_relation_dropout 0.05`
-- `--object_interaction_loss_weight 0.03`
-- `--object_interaction_heatmap_weight 5`
-- `--object_residual_l2_weight 0.03`
-- `--object_counterfactual_margin_weight 0.15`
-- `--object_counterfactual_margin 0.08`
+- `--object_heatmap_weight 50`
+- `--object_interaction_loss_weight 0.10`
+- `--object_interaction_heatmap_weight 50`
+- `--object_residual_l2_weight 0.01`
+- `--object_counterfactual_margin_weight 0.10`
+- `--object_counterfactual_margin 0.05`
 - `--object_objectless_consistency_weight 0.03`
-- `--object_heatmap_weight 0`
-- `--kp_loss_weight 0`
-- `--lr_head 3e-4`
-- `--max_epochs 6`
+- `--kp_loss_weight 1000`
+- `--lr_head 5e-5`
+- `--lr_head_hm 1e-4`
+- `--max_epochs 4`
 
 Acceptance signal:
 
@@ -69,6 +70,7 @@ Acceptance signal:
 - `val_f1_objects_on >= val_f1_objects_shuffled - 0.003`
 - `val_interaction_select_mass_object` increases for strong object actions.
 - object-related groups improve without a broad F1 collapse.
+- `val_object_interaction_true_logit_gain_on_vs_positive_erased` and `val_object_interaction_margin_gain_on_vs_positive_erased` are positive for strong object actions.
 
 ### Full fine-tune
 
