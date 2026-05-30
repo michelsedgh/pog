@@ -60,29 +60,13 @@ import sys
 import shlex
 import subprocess
 import time
-import __main__
 from pathlib import Path
 
 import pandas as pd
-import torch
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 REPO_DIR = "/content/pog"
-if REPO_DIR not in sys.path:
-    sys.path.insert(0, REPO_DIR)
-os.chdir(REPO_DIR)
-
-class _LegacyCheckpointPlaceholder:
-    def __init__(self, *args, **kwargs):
-        self.args = args
-        self.kwargs = kwargs
-
-    def __call__(self, value):
-        return value
-
-__main__._LegacyCheckpointPlaceholder = _LegacyCheckpointPlaceholder
-
 SCRATCH_ROOT = "/mnt/local-scratch" if os.path.isdir("/mnt/local-scratch") else "/content"
 DATA_DIR = f"{SCRATCH_ROOT}/poguise_data"
 
@@ -131,21 +115,46 @@ require_file(SKELETON_ZIP, "Skeleton zip")
 require_file(OBJECT_DETECTOR_CACHE, "Object detector cache")
 require_file(HARD_NEGATIVE_MANIFEST, "Hard-negative manifest")
 
-ckpt = torch.load(START_CKPT, map_location="cpu", weights_only=False)
+run_stream(["git", "pull", "--ff-only", "origin", "main"], cwd=REPO_DIR)
+run_stream(["git", "merge-base", "--is-ancestor", "1490baa", "HEAD"], cwd=REPO_DIR)
+
+checkpoint_check = r"""
+import __main__
+import sys
+import torch
+
+class _LegacyCheckpointPlaceholder:
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+    def __call__(self, value):
+        return value
+
+__main__._LegacyCheckpointPlaceholder = _LegacyCheckpointPlaceholder
+
+ckpt_path = sys.argv[1]
+ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
 state_dict = ckpt.get("state_dict", ckpt)
 object_state_keys = [
     key for key in state_dict.keys()
     if "object_" in key or "specialist" in key
 ]
-print("object/specialist state_dict keys in START_CKPT:", len(object_state_keys))
+print("object/specialist state_dict keys in START_CKPT:", len(object_state_keys), flush=True)
 if object_state_keys:
-    print(object_state_keys[:30])
+    print(object_state_keys[:30], flush=True)
     raise RuntimeError(
         "START_CKPT is not a clean actor-slot checkpoint. Use the clean actor checkpoint before running the specialist diagnostic."
     )
-
-run_stream(["git", "pull", "--ff-only", "origin", "main"], cwd=REPO_DIR)
-run_stream(["git", "merge-base", "--is-ancestor", "1490baa", "HEAD"], cwd=REPO_DIR)
+"""
+check_env = os.environ.copy()
+check_env["PYTHONPATH"] = REPO_DIR + os.pathsep + check_env.get("PYTHONPATH", "")
+subprocess.run(
+    [sys.executable, "-c", checkpoint_check, START_CKPT],
+    cwd=REPO_DIR,
+    env=check_env,
+    check=True,
+)
 
 cmd = [
     sys.executable, "-u", "train.py",
