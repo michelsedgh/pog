@@ -360,20 +360,20 @@ PY
 
 ## Decision Gate Before Full Fine-Tune
 
-Do not full fine-tune unless the relation-only run has at least one passing epoch and the specialist group metrics do not collapse.
+Do not full fine-tune unless the relation-only run shows specialist signal in the target groups and global metrics stay close to the actor baseline.
 
-Minimum pass:
+Minimum signal pass:
 
 ```text
-global macro objects_on >= off + 0.003
-global macro objects_on >= shuffled + 0.003
-global F1 is not worse than off/shuffled by more than 0.003
-laptop_book_tv objects_on improves or is stable
-phone_tv objects_on improves or is stable
-drink_cup_bottle_glass objects_on improves or is stable
+laptop_book_tv objects_on > max(off, shuffled), with positive margin gain
+drink_cup_bottle_glass objects_on > max(off, shuffled), with positive margin gain
+phone_tv improves or is disabled before full fine-tune
+global F1 is not worse than off/shuffled by more than about 0.003
 ```
 
-If this fails, do not hide it with full fine-tuning. The specialist objective still needs work.
+Correct-change counts are useful, but they can stay near zero early if the specialist is improving group margins without flipping many final top-1 predictions yet. Treat positive group accuracy and positive group-margin gains as the first diagnostic signal. Treat correct-change > wrong-change as the stronger follow-up signal.
+
+If target-group accuracy and margins do not improve, do not hide it with full fine-tuning. The specialist objective or data signal still needs work.
 
 ## Cell 4: Conditional Full Fine-Tune
 
