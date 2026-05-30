@@ -174,6 +174,7 @@ cmd = [
     "--object_residual_l2_weight", "0.01",
     "--object_counterfactual_margin_weight", "0.10",
     "--object_counterfactual_margin", "0.05",
+    "--object_counterfactual_branch_grad", "0",
     "--object_objectless_consistency_weight", "0.03",
     "--object_dropout_prob", "0.05",
     "--object_token_dropout_prob", "0.02",

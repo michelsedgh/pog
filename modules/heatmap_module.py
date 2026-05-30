@@ -426,6 +426,12 @@ class HeatmapModule(pl.LightningModule):
         preds, _, _, _, _, _ = self._unpack_model_data(data)
         return preds
 
+    def _counterfactual_branch_logits(self, imgs, target, mode):
+        if bool(self.model.hparams.get("object_counterfactual_branch_grad", 0)):
+            return self._actor_logits_for_object_mode(imgs, target, mode)
+        with torch.no_grad():
+            return self._actor_logits_for_object_mode(imgs, target, mode)
+
     def _object_counterfactual_loss(
         self,
         imgs,
@@ -487,12 +493,12 @@ class HeatmapModule(pl.LightningModule):
             with torch.no_grad():
                 off_logits = self._actor_logits_for_object_mode(imgs, target, "off")
         if margin_weight > 0.0:
-            erased_logits = self._actor_logits_for_object_mode(
+            erased_logits = self._counterfactual_branch_logits(
                 imgs,
                 target,
                 "positive_erased",
             )
-            shuffled_logits = self._actor_logits_for_object_mode(
+            shuffled_logits = self._counterfactual_branch_logits(
                 imgs,
                 target,
                 "shuffled",
