@@ -46,6 +46,7 @@ Suggested settings:
 
 - `--freeze_backbone 1`
 - `--object_relation_only 0`
+- `--object_warmup_freeze_actor_path 1`
 - `--object_action_gate_init 0.05`
 - `--object_delta_scale 1.0`
 - `--object_relation_hidden_dim 512`
@@ -58,8 +59,8 @@ Suggested settings:
 - `--object_counterfactual_margin 0.05`
 - `--object_objectless_consistency_weight 0.03`
 - `--kp_loss_weight 1000`
-- `--lr_head 5e-5`
-- `--lr_head_hm 1e-4`
+- `--lr_head 3e-4`
+- `--lr_head_hm 5e-5`
 - `--max_epochs 4`
 
 Acceptance signal:

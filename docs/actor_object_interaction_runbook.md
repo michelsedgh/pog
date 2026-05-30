@@ -56,7 +56,7 @@ run(["git", "log", "-1", "--oneline"])
 
 ## Cell 2: Frozen-Backbone PO-GUISE+ Object Warmup
 
-This is the first real object-interaction run. It is not `object_relation_only`, and it is not `object_specialist_heads`. The backbone stays frozen, but actor/object heads and the heatmap head train.
+This is the first real object-interaction run. It is not `object_relation_only`, and it is not `object_specialist_heads`. The backbone and base actor path stay frozen; only object relation modules and the heatmap head train.
 
 ```python
 import os
@@ -165,6 +165,7 @@ cmd = [
     "--object_bbox_prior_expand", "1.25",
     "--object_heatmap_weight", "50",
     "--object_relation_only", "0",
+    "--object_warmup_freeze_actor_path", "1",
     "--object_relation_hidden_dim", "512",
     "--object_relation_dropout", "0.05",
     "--object_action_gate_init", "0.05",
@@ -210,8 +211,8 @@ cmd = [
     "--max_epochs", "4",
     "--t_max_scheduler", "4",
     "--lr", "0",
-    "--lr_head", "5e-5",
-    "--lr_head_hm", "1e-4",
+    "--lr_head", "3e-4",
+    "--lr_head_hm", "5e-5",
     "--weight_decay", "0.04",
     "--weight_decay_head", "0.01",
     "--weight_decay_head_hm", "0.01",

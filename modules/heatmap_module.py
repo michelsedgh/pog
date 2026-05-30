@@ -241,7 +241,10 @@ class HeatmapModule(pl.LightningModule):
         if not self.actor_prompt:
             return list(self.model.head.parameters())
 
-        if self.object_prompt and self.model.hparams.get("object_relation_only", 0):
+        if self.object_prompt and (
+            self.model.hparams.get("object_relation_only", 0)
+            or self.model.hparams.get("object_warmup_freeze_actor_path", 0)
+        ):
             return self._object_relation_params()
 
         params = list(self.model.actor_head.parameters())

@@ -187,6 +187,15 @@ class POGUISE(pl.LightningModule):
                 raise ValueError("object_relation_only requires object_prompt")
             if not self.hparams.get("freeze_backbone", 0):
                 raise ValueError("object_relation_only requires freeze_backbone")
+        if self.hparams.get("object_warmup_freeze_actor_path", 0):
+            if not (self.actor_prompt and self.object_prompt):
+                raise ValueError(
+                    "object_warmup_freeze_actor_path requires actor_prompt and object_prompt"
+                )
+            if not self.hparams.get("freeze_backbone", 0):
+                raise ValueError(
+                    "object_warmup_freeze_actor_path requires freeze_backbone"
+                )
         for prob_name in ("object_dropout_prob", "object_token_dropout_prob"):
             prob_value = float(self.hparams.get(prob_name, 0.0))
             if not 0 <= prob_value <= 1:
@@ -344,25 +353,37 @@ class POGUISE(pl.LightningModule):
         ):
             for param in self.net.heatmap_head.parameters():
                 param.requires_grad = True
+        object_warmup_freeze_actor_path = (
+            self.actor_prompt
+            and self.object_prompt
+            and bool(self.hparams.get("object_warmup_freeze_actor_path", 0))
+        )
+        if object_warmup_freeze_actor_path:
+            print(
+                "Object warmup: freezing base actor path; training object relation "
+                "modules and heatmap head only."
+            )
         # Unfreeze the head
-        for param in self.head.parameters():
-            param.requires_grad = True
-        if self.actor_prompt:
-            for param in self.actor_head.parameters():
+        if not object_warmup_freeze_actor_path:
+            for param in self.head.parameters():
                 param.requires_grad = True
-            if hasattr(self.net, "actor_token"):
-                self.net.actor_token.requires_grad = True
-            if hasattr(self.net, "actor_slot_embed"):
-                self.net.actor_slot_embed.requires_grad = True
-            if hasattr(self.net, "valid_embed"):
-                for param in self.net.valid_embed.parameters():
+        if self.actor_prompt:
+            if not object_warmup_freeze_actor_path:
+                for param in self.actor_head.parameters():
                     param.requires_grad = True
-            if hasattr(self.net, "bbox_mlp"):
-                for param in self.net.bbox_mlp.parameters():
-                    param.requires_grad = True
-            if self.presence_head is not None:
-                for param in self.presence_head.parameters():
-                    param.requires_grad = True
+                if hasattr(self.net, "actor_token"):
+                    self.net.actor_token.requires_grad = True
+                if hasattr(self.net, "actor_slot_embed"):
+                    self.net.actor_slot_embed.requires_grad = True
+                if hasattr(self.net, "valid_embed"):
+                    for param in self.net.valid_embed.parameters():
+                        param.requires_grad = True
+                if hasattr(self.net, "bbox_mlp"):
+                    for param in self.net.bbox_mlp.parameters():
+                        param.requires_grad = True
+                if self.presence_head is not None:
+                    for param in self.presence_head.parameters():
+                        param.requires_grad = True
             if self.object_prompt:
                 for module in self._object_relation_modules():
                     for param in module.parameters():
