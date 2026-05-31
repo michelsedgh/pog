@@ -71,7 +71,7 @@ from pathlib import Path
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 ENV_FILE = "/content/poguise_colab_env.sh"
-REQUIRED_COMMIT = "70e32b9"
+REQUIRED_COMMIT = "243a083"
 
 def load_colab_env(path=ENV_FILE):
     env = {}
@@ -481,7 +481,7 @@ import pandas as pd
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 ENV_FILE = "/content/poguise_colab_env.sh"
-REQUIRED_COMMIT = "70e32b9"
+REQUIRED_COMMIT = "243a083"
 WARMUP_PATTERN = "actor_object_poguiseplus_clean_actorfrozen_warmup_from_actor_slot_*"
 WARMUP_RUN_DIR_OVERRIDE = ""
 PASS_REQUIRED = True
