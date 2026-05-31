@@ -180,21 +180,6 @@ class POGUISE(pl.LightningModule):
         self.object_prompt = bool(self.hparams.get("object_prompt", 0))
         if self.object_prompt and not self.actor_prompt:
             raise ValueError("object_prompt requires actor_prompt")
-        if self.hparams.get("object_relation_only", 0):
-            raise ValueError(
-                "object_relation_only is deprecated. The clean Actor-Slot PO-GUISE+ "
-                "path trains feature-level actor-object fusion with normal action CE."
-            )
-        if self.hparams.get("object_specialist_heads", 0):
-            raise ValueError(
-                "object_specialist_heads is deprecated. Use clean feature-level "
-                "actor-object fusion, not specialist rerankers."
-            )
-        if str(self.hparams.get("object_residual_action_mask", "none")) != "none":
-            raise ValueError(
-                "object_residual_action_mask is deprecated because the clean object "
-                "path no longer applies logit residuals."
-            )
         if self.hparams.get("object_warmup_freeze_actor_path", 0):
             if not (self.actor_prompt and self.object_prompt):
                 raise ValueError(
@@ -412,10 +397,7 @@ class POGUISE(pl.LightningModule):
         dropout = float(self.hparams.get("object_relation_dropout", 0.1))
         if not 0 <= dropout < 1:
             raise ValueError("object_relation_dropout must be in [0, 1)")
-        fusion_gate_init = self.hparams.get("object_fusion_gate_init", None)
-        if fusion_gate_init is None:
-            fusion_gate_init = self.hparams.get("object_action_gate_init", 0.05)
-        action_gate_init = float(fusion_gate_init)
+        action_gate_init = float(self.hparams.get("object_fusion_gate_init", 0.05))
         if not 0 < action_gate_init < 1:
             raise ValueError("object_fusion_gate_init must be in (0, 1)")
         self.object_delta_scale = float(self.hparams.get("object_delta_scale", 1.0))
@@ -961,13 +943,8 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--object_token_dropout_prob", type=float, default=0.0)
         parser.add_argument("--object_relation_hidden_dim", type=int, default=512)
         parser.add_argument("--object_relation_dropout", type=float, default=0.1)
-        parser.add_argument("--object_relation_gate_init", type=float, default=0.25)
-        parser.add_argument("--object_action_gate_init", type=float, default=0.05)
-        parser.add_argument("--object_fusion_gate_init", type=float, default=None)
+        parser.add_argument("--object_fusion_gate_init", type=float, default=0.05)
         parser.add_argument("--object_delta_scale", type=float, default=1.0)
-        parser.add_argument("--object_residual_action_mask", type=str, default="none")
-        parser.add_argument("--object_specialist_heads", type=int, default=0)
-        parser.add_argument("--object_relation_only", type=int, default=0)
         parser.add_argument(
             "--object_interaction_heatmap_weight",
             type=float,

@@ -256,40 +256,6 @@ def _expand_heatmap_head_for_object_prompt(module, checkpoint):
     )
 
 
-def _migrate_object_interaction_head(module, checkpoint):
-    if checkpoint is None or not getattr(module.model, "object_prompt", False):
-        return
-    state_dict = checkpoint.get("state_dict", {})
-    current_state = module.state_dict()
-    migrated = []
-    for key in list(state_dict.keys()):
-        old_object_prefixes = (
-            "model.object_selector.",
-            "model.object_action_",
-            "model.object_specialist_",
-        )
-        if key.startswith(old_object_prefixes):
-            del state_dict[key]
-            migrated.append(key)
-            continue
-        if not key.startswith(
-            (
-                "model.object_actor_",
-                "model.object_fusion_",
-                "model.object_relation_gate_logit",
-            )
-        ):
-            continue
-        if key in current_state and state_dict[key].shape != current_state[key].shape:
-            del state_dict[key]
-            migrated.append(key)
-    if migrated:
-        print(
-            "Dropped incompatible object interaction tensors from checkpoint: "
-            + ", ".join(migrated)
-        )
-
-
 def build_parser():
     parser = ArgumentParser()
     parser = POGUISE.add_model_specific_args(parser)
@@ -315,9 +281,6 @@ def build_parser():
     parser.add_argument("--hard_negative_sampler", type=int, default=0)
     parser.add_argument("--hard_negative_manifest", type=str, default=None)
     parser.add_argument("--hard_negative_prob", type=float, default=0.15)
-    parser.add_argument("--specialist_sampler", type=int, default=0)
-    parser.add_argument("--specialist_positive_prob", type=float, default=0.55)
-    parser.add_argument("--normal_anchor_prob", type=float, default=0.30)
     parser.add_argument("--max_epochs", type=int, default=None)
     parser.add_argument("--max_nb_epochs", type=int, default=200)
     parser.add_argument("--accum_grad_batches", type=int, default=2)
@@ -368,9 +331,6 @@ def build_parser():
     parser.add_argument("--object_counterfactual_margin", type=float, default=0.05)
     parser.add_argument("--object_counterfactual_branch_grad", type=int, default=0)
     parser.add_argument("--object_objectless_consistency_weight", type=float, default=0.0)
-    parser.add_argument("--object_specialist_group_loss_weight", type=float, default=0.0)
-    parser.add_argument("--object_specialist_no_boost_weight", type=float, default=0.0)
-    parser.add_argument("--object_specialist_no_boost_margin", type=float, default=0.02)
     parser.add_argument("--log_kp_loss_weight", type=int, default=0)
     parser.add_argument("--grad_weights", type=int, default=0)
     parser.add_argument("--deepspeed_optim", type=int, default=0)
@@ -392,20 +352,6 @@ def main():
         raise ValueError("actor_prompt training requires --grad_weights 0")
     if hparams.object_prompt and not hparams.actor_prompt:
         raise ValueError("object_prompt requires actor_prompt")
-    if getattr(hparams, "specialist_sampler", 0):
-        raise ValueError(
-            "specialist_sampler is deprecated for the clean Actor-Slot PO-GUISE+ "
-            "path. Use class_balanced_sampler plus optional hard_negative_sampler."
-        )
-    if (
-        float(getattr(hparams, "object_specialist_group_loss_weight", 0.0)) > 0.0
-        or float(getattr(hparams, "object_specialist_no_boost_weight", 0.0)) > 0.0
-    ):
-        raise ValueError(
-            "object specialist losses are deprecated. The clean path uses action CE, "
-            "object heatmaps, actor-object selection, counterfactual margin, and "
-            "objectless consistency."
-        )
 
     seed_everything(hparams.seed)
     dataset = _dataset_class(hparams.dataset)
@@ -413,7 +359,6 @@ def main():
 
     if checkpoint is not None:
         _expand_heatmap_head_for_object_prompt(module, checkpoint)
-        _migrate_object_interaction_head(module, checkpoint)
         strict = (
             bool(hparams.strict_load)
             if hparams.strict_load is not None

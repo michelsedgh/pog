@@ -56,8 +56,6 @@ def main():
     hparams.dataset = "toyotasm"
     hparams.dataset_artifact = "toyotasm"
     hparams.object_prompt = 0
-    hparams.object_specialist_heads = 0
-    hparams.object_relation_only = 0
     hparams.object_heatmap_weight = 0.0
     hparams.object_interaction_loss_weight = 0.0
     hparams.object_interaction_heatmap_weight = 0.0

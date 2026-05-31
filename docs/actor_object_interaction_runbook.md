@@ -1,6 +1,6 @@
 # Actor Object Interaction Runbook
 
-This runbook is for the PO-GUISE+ style actor-object training path, not the old frozen object-specialist reranker diagnostic.
+This runbook is for the PO-GUISE+ style actor-object training path.
 
 The model is trained and evaluated with the same object interface used at inference:
 
@@ -56,7 +56,7 @@ run(["git", "log", "-1", "--oneline"])
 
 ## Cell 2: Frozen-Backbone PO-GUISE+ Object Warmup
 
-This is the clean Actor-Slot PO-GUISE+ warmup. It does not use `object_relation_only`, `object_specialist_heads`, `specialist_sampler`, or any logit residual mask. The backbone and base actor path stay frozen; only the actor-object feature fusion modules and the heatmap head train.
+This is the clean Actor-Slot PO-GUISE+ warmup. The backbone and base actor path stay frozen; only the actor-object feature fusion modules and the heatmap head train.
 
 ```python
 import os
