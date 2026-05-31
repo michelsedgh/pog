@@ -51,13 +51,36 @@ python object_actor_live/export_object_actor_tensorrt.py \
 
 This script delegates to `utils/export_actor_tensorrt.py`, verifies that the checkpoint is an object-prompt checkpoint, builds a fixed-shape ONNX file, builds a TensorRT engine with `trtexec`, and smoke-tests the object inputs.
 
-## 4. Run Live Dashboard
+## 4. Export RF-DETR TensorRT
+
+The dashboard can run RF-DETR through PyTorch or direct TensorRT. The TensorRT path follows RF-DETR's official ONNX export flow and NVIDIA's `trtexec --onnx ... --saveEngine ...` engine build flow.
+
+```bash
+python object_actor_live/export_rfdetr_tensorrt.py \
+  --model-size nano \
+  --out-dir object_actor_live/exports/rfdetr_nano \
+  --precision fp16 \
+  --workspace-mib 1024 \
+  --benchmark \
+  --force
+```
+
+This writes:
+
+```text
+object_actor_live/exports/rfdetr_nano/inference_model.onnx
+object_actor_live/exports/rfdetr_nano/inference_model_fp16.engine
+```
+
+## 5. Run Live Dashboard
 
 Use the engine printed by the export step:
 
 ```bash
 python object_actor_live/live_object_actor_dashboard.py \
   --engine object_actor_live/exports/epoch004/epoch=004_b1_t16_k8_m24_224_fp16.engine \
+  --detector-backend tensorrt \
+  --detector-engine object_actor_live/exports/rfdetr_nano/inference_model_fp16.engine \
   --camera 0 \
   --host 0.0.0.0 \
   --port 7861 \

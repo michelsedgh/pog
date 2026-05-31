@@ -52,6 +52,8 @@ def parse_args():
         choices=["nano", "small", "medium", "base", "large", "xlarge", "2xlarge"],
     )
     parser.add_argument("--detector-weights", type=str, default=None)
+    parser.add_argument("--detector-backend", choices=["torch", "tensorrt"], default="torch")
+    parser.add_argument("--detector-engine", type=str, default=None)
     parser.add_argument("--detector-device", type=str, default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--detector-optimize", type=int, default=1, choices=[0, 1])
     parser.add_argument("--detector-compile", type=int, default=1, choices=[0, 1])
@@ -179,6 +181,13 @@ def load_rfdetr(model_size, weights, detector_device, optimize=True, compile_mod
     return detector, class_names, person_ids
 
 
+class SimpleDetections:
+    def __init__(self, xyxy, confidence, class_id):
+        self.xyxy = xyxy.astype(np.float32, copy=False)
+        self.confidence = confidence.astype(np.float32, copy=False)
+        self.class_id = class_id.astype(np.int64, copy=False)
+
+
 def detector_class_names(detector):
     class_names = getattr(detector, "class_names", None)
     if isinstance(class_names, dict):
@@ -193,6 +202,14 @@ def detector_class_names(detector):
     return {int(class_id): str(name).lower() for class_id, name in enumerate(COCO_CLASSES)}
 
 
+def coco_class_names():
+    from rfdetr.util.coco_classes import COCO_CLASSES
+
+    if hasattr(COCO_CLASSES, "items"):
+        return {int(class_id): str(name).lower() for class_id, name in COCO_CLASSES.items()}
+    return {int(class_id): str(name).lower() for class_id, name in enumerate(COCO_CLASSES)}
+
+
 def detector_person_ids(class_names, explicit_id=None):
     if explicit_id is not None:
         return {int(explicit_id)}
@@ -200,6 +217,170 @@ def detector_person_ids(class_names, explicit_id=None):
     if not person_ids:
         raise RuntimeError("Detector class map did not expose a 'person' class.")
     return person_ids
+
+
+def finite_float(value):
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
+def json_safe(value):
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return json_safe(value.tolist())
+    if isinstance(value, (np.floating, float)):
+        return finite_float(value)
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, (np.bool_, bool)):
+        return bool(value)
+    return value
+
+
+class TensorRTRFDETRDetector:
+    def __init__(self, engine_path, topk=300):
+        if not torch.cuda.is_available():
+            raise RuntimeError("TensorRT RF-DETR backend requires CUDA.")
+        import tensorrt as trt
+
+        engine_path = Path(engine_path)
+        if not engine_path.is_file():
+            raise FileNotFoundError(f"RF-DETR TensorRT engine not found: {engine_path}")
+
+        self.logger = trt.Logger(trt.Logger.WARNING)
+        self.runtime = trt.Runtime(self.logger)
+        self.engine = self.runtime.deserialize_cuda_engine(engine_path.read_bytes())
+        if self.engine is None:
+            raise RuntimeError(f"Failed to deserialize RF-DETR TensorRT engine: {engine_path}")
+        self.context = self.engine.create_execution_context()
+        if self.context is None:
+            raise RuntimeError("Failed to create RF-DETR TensorRT execution context.")
+
+        self.device = torch.device("cuda")
+        self.stream = torch.cuda.Stream()
+        self.shapes = {}
+        self.dtypes = {}
+        self.input_names = []
+        self.output_names = []
+        for index in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(index)
+            mode = self.engine.get_tensor_mode(name)
+            shape = tuple(int(dim) for dim in self.engine.get_tensor_shape(name))
+            dtype = self._torch_dtype(self.engine.get_tensor_dtype(name))
+            self.shapes[name] = shape
+            self.dtypes[name] = dtype
+            if mode == trt.TensorIOMode.INPUT:
+                self.input_names.append(name)
+            elif mode == trt.TensorIOMode.OUTPUT:
+                self.output_names.append(name)
+        if len(self.input_names) != 1:
+            raise RuntimeError(f"RF-DETR TensorRT engine must have one input, got {self.input_names}")
+        if len(self.output_names) != 2:
+            raise RuntimeError(f"RF-DETR TensorRT engine must have two outputs, got {self.output_names}")
+
+        self.input_name = self.input_names[0]
+        input_shape = self.shapes[self.input_name]
+        if len(input_shape) != 4 or input_shape[0] != 1 or input_shape[1] != 3:
+            raise RuntimeError(f"Unsupported RF-DETR input shape: {input_shape}")
+        self.height = int(input_shape[2])
+        self.width = int(input_shape[3])
+        self.topk = int(topk)
+        self.mean = np.asarray([0.485, 0.456, 0.406], dtype=np.float32)
+        self.std = np.asarray([0.229, 0.224, 0.225], dtype=np.float32)
+        print(
+            "RF-DETR TensorRT engine:",
+            {
+                "engine": str(engine_path),
+                "input": self.input_name,
+                "input_shape": input_shape,
+                "outputs": {name: self.shapes[name] for name in self.output_names},
+            },
+            flush=True,
+        )
+
+    @staticmethod
+    def _torch_dtype(trt_dtype):
+        import tensorrt as trt
+
+        mapping = {
+            trt.float32: torch.float32,
+            trt.float16: torch.float16,
+            trt.int32: torch.int32,
+            trt.int64: torch.int64,
+            trt.bool: torch.bool,
+        }
+        if trt_dtype not in mapping:
+            raise TypeError(f"Unsupported TensorRT dtype: {trt_dtype}")
+        return mapping[trt_dtype]
+
+    def _preprocess(self, image):
+        if isinstance(image, Image.Image):
+            image = np.asarray(image.convert("RGB"))
+        image = np.asarray(image)
+        resized = cv2.resize(image, (self.width, self.height), interpolation=cv2.INTER_LINEAR)
+        array = resized.astype(np.float32) / 255.0
+        array = (array - self.mean) / self.std
+        array = np.transpose(array, (2, 0, 1))[None]
+        return torch.from_numpy(array).to(device=self.device, dtype=self.dtypes[self.input_name])
+
+    def _split_outputs(self, output_tensors):
+        outputs = [tensor.detach().float().cpu().numpy() for tensor in output_tensors]
+        first, second = outputs
+        if first.shape[-1] == 4:
+            return first, second
+        if second.shape[-1] == 4:
+            return second, first
+        raise RuntimeError(f"Could not identify RF-DETR TensorRT outputs: {[o.shape for o in outputs]}")
+
+    def predict(self, image, threshold=0.5):
+        original = np.asarray(image.convert("RGB") if isinstance(image, Image.Image) else image)
+        model_input = self._preprocess(original).contiguous()
+        output_tensors = {
+            name: torch.empty(self.shapes[name], dtype=self.dtypes[name], device=self.device)
+            for name in self.output_names
+        }
+        tensors = {self.input_name: model_input, **output_tensors}
+        current_stream = torch.cuda.current_stream()
+        self.stream.wait_stream(current_stream)
+        with torch.cuda.stream(self.stream):
+            for name, tensor in tensors.items():
+                self.context.set_tensor_address(name, tensor.data_ptr())
+            ok = self.context.execute_async_v3(stream_handle=self.stream.cuda_stream)
+        if not ok:
+            raise RuntimeError("RF-DETR TensorRT execution failed.")
+        current_stream.wait_stream(self.stream)
+        boxes, logits = self._split_outputs([output_tensors[name] for name in self.output_names])
+        return self._postprocess_single(boxes[0], logits[0], original.shape[:2], threshold)
+
+    def _postprocess_single(self, boxes_cxcywh, logits, image_shape, threshold):
+        scores = 1.0 / (1.0 + np.exp(-logits.astype(np.float32)))
+        flat = scores.reshape(-1)
+        k = min(max(self.topk, 1), flat.size)
+        top_idx = np.argpartition(flat, -k)[-k:]
+        top_idx = top_idx[np.argsort(flat[top_idx])[::-1]]
+        conf = flat[top_idx]
+        keep = conf > float(threshold)
+        top_idx = top_idx[keep]
+        conf = conf[keep]
+        labels = (top_idx % scores.shape[1]).astype(np.int64)
+        query_idx = top_idx // scores.shape[1]
+        boxes = boxes_cxcywh[query_idx].astype(np.float32, copy=False)
+
+        cx, cy, bw, bh = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+        xyxy = np.stack(
+            [cx - 0.5 * bw, cy - 0.5 * bh, cx + 0.5 * bw, cy + 0.5 * bh],
+            axis=1,
+        )
+        height, width = image_shape[:2]
+        scale = np.asarray([width, height, width, height], dtype=np.float32)
+        xyxy = xyxy * scale[None]
+        xyxy[:, [0, 2]] = np.clip(xyxy[:, [0, 2]], 0.0, float(width))
+        xyxy[:, [1, 3]] = np.clip(xyxy[:, [1, 3]], 0.0, float(height))
+        valid = (xyxy[:, 2] > xyxy[:, 0]) & (xyxy[:, 3] > xyxy[:, 1])
+        return SimpleDetections(xyxy[valid], conf[valid], labels[valid])
 
 
 def detections_to_people_and_objects(
@@ -533,11 +714,11 @@ def draw_overlay(frame_bgr, actors, objects, message):
         det_conf = actor.get("det_conf")
         presence = actor.get("presence")
         text = label
-        if action_conf is not None:
+        if action_conf is not None and math.isfinite(float(action_conf)):
             text += f" {action_conf:.2f}"
-        if presence is not None:
+        if presence is not None and math.isfinite(float(presence)):
             text += f" pres={presence:.2f}"
-        if det_conf is not None:
+        if det_conf is not None and math.isfinite(float(det_conf)):
             text += f" det={det_conf:.2f}"
         cv2.rectangle(out, (x1, y1), (x2, y2), (0, 220, 0), 2)
         cv2.putText(
@@ -585,17 +766,24 @@ class LiveRunner:
             raise RuntimeError(f"--input-size must match actor input size={self.actor.input_size}")
 
         self.object_thresholds = parse_object_thresholds(args.object_threshold)
-        self.detector, self.class_names, detected_person_ids = load_rfdetr(
-            args.detector_model_size,
-            args.detector_weights,
-            args.detector_device,
-            optimize=bool(args.detector_optimize),
-            compile_model=bool(args.detector_compile),
-            fp16=bool(args.detector_fp16),
-        )
-        self.person_ids = detector_person_ids(self.class_names, args.person_class_id)
-        if args.person_class_id is None:
-            self.person_ids = detected_person_ids
+        if args.detector_backend == "tensorrt":
+            if not args.detector_engine:
+                raise ValueError("--detector-engine is required with --detector-backend tensorrt")
+            self.detector = TensorRTRFDETRDetector(args.detector_engine)
+            self.class_names = coco_class_names()
+            self.person_ids = detector_person_ids(self.class_names, args.person_class_id)
+        else:
+            self.detector, self.class_names, detected_person_ids = load_rfdetr(
+                args.detector_model_size,
+                args.detector_weights,
+                args.detector_device,
+                optimize=bool(args.detector_optimize),
+                compile_model=bool(args.detector_compile),
+                fp16=bool(args.detector_fp16),
+            )
+            self.person_ids = detector_person_ids(self.class_names, args.person_class_id)
+            if args.person_class_id is None:
+                self.person_ids = detected_person_ids
 
         self.buffer = deque(maxlen=args.buffer_frames)
         self.frame_count = 0
@@ -612,6 +800,7 @@ class LiveRunner:
             actor_backend=self.actor.backend_name,
             actor_device=str(self.actor.device),
             detector_device=args.detector_device,
+            detector_backend=args.detector_backend,
             object_thresholds=self.object_thresholds,
         )
 
@@ -798,35 +987,50 @@ class LiveRunner:
                             object_valid,
                         )
                         self.last_actor_ms = (time.perf_counter() - started) * 1000.0
-                        action_probs = torch.softmax(logits[0], dim=-1).detach().cpu().numpy()
-                        presence_probs = (
-                            torch.sigmoid(presence_logits[0]).detach().cpu().numpy()
-                        )
-                        kept_actor_idx = np.flatnonzero(keep)[: self.args.max_actors]
-                        for slot, actor_idx in enumerate(kept_actor_idx):
-                            if actor_idx >= len(self.current_track_ids):
-                                continue
-                            track_id = self.current_track_ids[int(actor_idx)]
-                            track = self.tracks.get(track_id)
-                            if track is None:
-                                continue
-                            track.update_action(action_probs[slot], presence_probs[slot])
-                            action_id = int(action_probs[slot].argmax())
-                            actors[int(actor_idx)].update(track.action_payload())
-                            actors[int(actor_idx)].update(
-                                {
-                                    "raw_label": ACTION_CLASSES[action_id],
-                                    "raw_action_conf": float(action_probs[slot, action_id]),
-                                }
+                        if torch.isfinite(logits).all() and torch.isfinite(presence_logits).all():
+                            action_probs = (
+                                torch.softmax(logits[0], dim=-1).detach().cpu().numpy()
                             )
-                        message = (
-                            f"{self.actor.backend_name} actors={int(valid.sum().item())} "
-                            f"objects={int(object_valid.sum().item())} "
-                            f"det={self.last_detector_ms:.0f}ms "
-                            f"actor={self.last_actor_ms:.0f}ms "
-                            f"det_age={det_age} "
-                            f"crop={self.args.crop_mode} frame={self.frame_count}"
-                        )
+                            presence_probs = (
+                                torch.sigmoid(presence_logits[0]).detach().cpu().numpy()
+                            )
+                            kept_actor_idx = np.flatnonzero(keep)[: self.args.max_actors]
+                            for slot, actor_idx in enumerate(kept_actor_idx):
+                                if actor_idx >= len(self.current_track_ids):
+                                    continue
+                                if not np.isfinite(action_probs[slot]).all():
+                                    continue
+                                track_id = self.current_track_ids[int(actor_idx)]
+                                track = self.tracks.get(track_id)
+                                if track is None:
+                                    continue
+                                presence_value = finite_float(presence_probs[slot])
+                                track.update_action(action_probs[slot], presence_value or 0.0)
+                                action_id = int(action_probs[slot].argmax())
+                                actors[int(actor_idx)].update(track.action_payload())
+                                actors[int(actor_idx)].update(
+                                    {
+                                        "raw_label": ACTION_CLASSES[action_id],
+                                        "raw_action_conf": finite_float(
+                                            action_probs[slot, action_id]
+                                        ),
+                                    }
+                                )
+                            message = (
+                                f"{self.actor.backend_name} actors={int(valid.sum().item())} "
+                                f"objects={int(object_valid.sum().item())} "
+                                f"det={self.last_detector_ms:.0f}ms "
+                                f"actor={self.last_actor_ms:.0f}ms "
+                                f"det_age={det_age} "
+                                f"crop={self.args.crop_mode} frame={self.frame_count}"
+                            )
+                        else:
+                            message = (
+                                f"{self.actor.backend_name} non-finite actor output; "
+                                f"skipped action update objects={int(object_valid.sum().item())} "
+                                f"det={self.last_detector_ms:.0f}ms "
+                                f"actor={self.last_actor_ms:.0f}ms"
+                            )
                     else:
                         message = "detections outside model crop"
                 elif len(self.last_boxes_xyxy) == 0:
@@ -902,7 +1106,7 @@ setInterval(poll, 1000); poll();
             return
         if self.path == "/status.json":
             _, status = self.state.snapshot()
-            body = json.dumps(status).encode("utf-8")
+            body = json.dumps(json_safe(status), allow_nan=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
