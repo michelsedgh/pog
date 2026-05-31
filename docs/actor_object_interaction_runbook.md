@@ -71,7 +71,7 @@ from pathlib import Path
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 ENV_FILE = "/content/poguise_colab_env.sh"
-REQUIRED_COMMIT = "243a083"
+REQUIRED_COMMIT = "70e32b9"
 
 def load_colab_env(path=ENV_FILE):
     env = {}
@@ -195,7 +195,7 @@ cmd = [
     "--object_counterfactual_margin_weight", "0.10",
     "--object_counterfactual_margin", "0.05",
     "--object_counterfactual_branch_grad", "0",
-    "--object_objectless_consistency_weight", "0.02",
+    "--object_objectless_consistency_weight", "0.03",
     "--object_dropout_prob", "0.05",
     "--object_token_dropout_prob", "0.02",
     "--class_balanced_sampler", "1",
@@ -230,7 +230,7 @@ cmd = [
     "--max_epochs", "4",
     "--t_max_scheduler", "4",
     "--lr", "0",
-    "--lr_head", "5e-5",
+    "--lr_head", "1e-4",
     "--lr_head_hm", "5e-5",
     "--weight_decay", "0.04",
     "--weight_decay_head", "0.01",
@@ -481,7 +481,7 @@ import pandas as pd
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 ENV_FILE = "/content/poguise_colab_env.sh"
-REQUIRED_COMMIT = "243a083"
+REQUIRED_COMMIT = "70e32b9"
 WARMUP_PATTERN = "actor_object_poguiseplus_clean_actorfrozen_warmup_from_actor_slot_*"
 WARMUP_RUN_DIR_OVERRIDE = ""
 PASS_REQUIRED = True
@@ -766,8 +766,8 @@ cmd = [
     "--toyota_actor_background_box_prob", "0",
     "--batch_size", "32",
     "--accum_grad_batches", "2",
-    "--max_epochs", "4",
-    "--t_max_scheduler", "4",
+    "--max_epochs", "6",
+    "--t_max_scheduler", "6",
     "--lr", "1e-6",
     "--lr_head", "5e-5",
     "--lr_head_hm", "5e-5",
