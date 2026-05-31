@@ -240,6 +240,36 @@ def json_safe(value):
     return value
 
 
+def action_topk(probs, k=5):
+    probs = np.asarray(probs, dtype=np.float32)
+    if probs.ndim != 1 or not np.isfinite(probs).all():
+        return []
+    top_idx = np.argsort(probs)[::-1][: int(k)]
+    return [
+        {"label": ACTION_CLASSES[int(idx)], "conf": finite_float(probs[int(idx)])}
+        for idx in top_idx
+    ]
+
+
+def action_mode_summary(probs):
+    top = action_topk(probs, k=5)
+    label = top[0]["label"] if top else None
+    conf = top[0]["conf"] if top else None
+    laptop_idx = ACTION_CLASSES.index("Uselaptop")
+    readbook_idx = ACTION_CLASSES.index("Readbook")
+    phone_idx = ACTION_CLASSES.index("Usetelephone")
+    watch_idx = ACTION_CLASSES.index("WatchTV")
+    return {
+        "label": label,
+        "conf": conf,
+        "p_uselaptop": finite_float(probs[laptop_idx]),
+        "p_readbook": finite_float(probs[readbook_idx]),
+        "p_usetelephone": finite_float(probs[phone_idx]),
+        "p_watchtv": finite_float(probs[watch_idx]),
+        "top5": top,
+    }
+
+
 class TensorRTRFDETRDetector:
     def __init__(self, engine_path, topk=300):
         if not torch.cuda.is_available():
@@ -994,6 +1024,54 @@ class LiveRunner:
                             presence_probs = (
                                 torch.sigmoid(presence_logits[0]).detach().cpu().numpy()
                             )
+                            ablation_probs = {"objects_on": action_probs}
+                            with torch.inference_mode():
+                                off_valid = torch.zeros_like(object_valid)
+                                off_logits, _off_presence = self.actor(
+                                    clip,
+                                    boxes,
+                                    valid,
+                                    object_boxes,
+                                    object_cls,
+                                    object_conf,
+                                    off_valid,
+                                )
+                                if torch.isfinite(off_logits).all():
+                                    ablation_probs["objects_off"] = (
+                                        torch.softmax(off_logits[0], dim=-1)
+                                        .detach()
+                                        .cpu()
+                                        .numpy()
+                                    )
+
+                                laptop_ids = torch.tensor(
+                                    [
+                                        OBJECT_TO_ID["laptop"],
+                                        OBJECT_TO_ID["keyboard_mouse"],
+                                    ],
+                                    dtype=object_cls.dtype,
+                                    device=object_cls.device,
+                                )
+                                laptop_valid = object_valid & torch.isin(
+                                    object_cls, laptop_ids
+                                )
+                                if laptop_valid.any():
+                                    laptop_logits, _laptop_presence = self.actor(
+                                        clip,
+                                        boxes,
+                                        valid,
+                                        object_boxes,
+                                        object_cls,
+                                        object_conf,
+                                        laptop_valid,
+                                    )
+                                    if torch.isfinite(laptop_logits).all():
+                                        ablation_probs["laptop_only"] = (
+                                            torch.softmax(laptop_logits[0], dim=-1)
+                                            .detach()
+                                            .cpu()
+                                            .numpy()
+                                        )
                             kept_actor_idx = np.flatnonzero(keep)[: self.args.max_actors]
                             for slot, actor_idx in enumerate(kept_actor_idx):
                                 if actor_idx >= len(self.current_track_ids):
@@ -1014,6 +1092,11 @@ class LiveRunner:
                                         "raw_action_conf": finite_float(
                                             action_probs[slot, action_id]
                                         ),
+                                        "action_modes": {
+                                            mode: action_mode_summary(mode_probs[slot])
+                                            for mode, mode_probs in ablation_probs.items()
+                                            if slot < mode_probs.shape[0]
+                                        },
                                     }
                                 )
                             message = (
