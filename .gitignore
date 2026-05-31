@@ -186,6 +186,7 @@ toyota_frame_counts.json
 # Local model/export outputs.
 checkpoints_smoke/
 exports/
+object_actor_live/exports/
 toyota_actor_visualizations/
 rf-detr-*.pth
 *.engine

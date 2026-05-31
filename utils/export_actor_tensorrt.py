@@ -188,11 +188,13 @@ def export_onnx(model, onnx_out, args, clip_frames, max_actors, max_objects, dev
                 object_conf=object_conf,
                 object_valid=object_valid,
             )
-            if len(output) == 4:
-                logits, _heatmap, presence, _interaction = output
-            elif len(output) == 3:
-                logits, _heatmap, presence = output
-            else:
+            if not isinstance(output, (tuple, list)) or len(output) < 3:
+                raise RuntimeError(
+                    "Actor TensorRT export requires presence-head checkpoints."
+                )
+            logits = output[0]
+            presence = output[2]
+            if presence is None:
                 raise RuntimeError(
                     "Actor TensorRT export requires presence-head checkpoints."
                 )
