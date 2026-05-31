@@ -4,7 +4,7 @@ from argparse import ArgumentParser
 from blocks.poguise import vit_base_patch16_224
 from blocks.poguise import vit_small_patch16_224
 from blocks.poguise import vit_large_patch16_224
-from models.object_interaction import ObjectInteractionModule
+from models.object_interaction import ObjectInteractionHead
 import torch
 import os
 import os.path
@@ -237,7 +237,7 @@ class POGUISE(pl.LightningModule):
                 object_bbox_prior_expand=self.hparams.get(
                     "object_bbox_prior_expand", 1.25
                 ),
-                return_heatmap_features=self.object_prompt,
+                return_heatmap_features=False,
             )
         else:
             self.net = vit_base_patch16_224(
@@ -274,7 +274,7 @@ class POGUISE(pl.LightningModule):
                 object_bbox_prior_expand=self.hparams.get(
                     "object_bbox_prior_expand", 1.25
                 ),
-                return_heatmap_features=self.object_prompt,
+                return_heatmap_features=False,
             )
         if self.hparams.pretrained == "DEFAULT":
             if os.path.exists("vit_b_k710_dl_from_giant.pth"):
@@ -337,8 +337,8 @@ class POGUISE(pl.LightningModule):
         )
         if object_warmup_freeze_actor_path:
             print(
-                "Object warmup: freezing base actor path; training actor-object "
-                "feature fusion modules and heatmap head only."
+                "Object warmup: freezing base actor path; training object tokens, "
+                "actor-object selection, and heatmap head only."
             )
         # Unfreeze the head
         if not object_warmup_freeze_actor_path:
@@ -364,6 +364,9 @@ class POGUISE(pl.LightningModule):
             if self.object_prompt:
                 for param in self.object_interaction.parameters():
                     param.requires_grad = True
+                for name, param in self.net.named_parameters():
+                    if self._object_prompt_param_name(name):
+                        param.requires_grad = True
 
     def _freeze_stages(self):
         if self.frozen_stages >= 0:
@@ -389,24 +392,24 @@ class POGUISE(pl.LightningModule):
         dropout = float(self.hparams.get("object_interaction_dropout", 0.1))
         if not 0 <= dropout < 1:
             raise ValueError("object_interaction_dropout must be in [0, 1)")
-        fusion_gate_init = float(self.hparams.get("object_fusion_gate_init", 0.05))
-        if not 0 < fusion_gate_init < 1:
-            raise ValueError("object_fusion_gate_init must be in (0, 1)")
-        feature_scale = float(self.hparams.get("object_feature_scale", 1.0))
-        if feature_scale <= 0:
-            raise ValueError("object_feature_scale must be positive")
         interaction_heatmap_size = int(self.hparams.get("object_heatmap_size", 56))
-        self.object_interaction = ObjectInteractionModule(
+        self.object_interaction = ObjectInteractionHead(
             feature_dim=self.net.num_features,
-            num_object_classes=num_object_classes,
             hidden_dim=hidden_dim,
             dropout=dropout,
-            fusion_gate_init=fusion_gate_init,
-            feature_scale=feature_scale,
             interaction_heatmap_size=interaction_heatmap_size,
         )
-        print(
-            "Object interaction path: actor-conditioned feature fusion."
+        print("Object interaction path: transformer object tokens + selection head.")
+
+    def _object_prompt_param_name(self, name):
+        return name.startswith(
+            (
+                "object_slot_embed",
+                "object_cls_embed",
+                "object_valid_embed",
+                "object_bbox_mlp",
+                "object_conf_mlp",
+            )
         )
 
     def _apply_object_dropout(self, object_valid):
@@ -448,50 +451,50 @@ class POGUISE(pl.LightningModule):
                     boxes=boxes,
                     valid=valid,
                     object_boxes=object_boxes,
+                    object_cls=object_cls,
                     object_valid=object_valid,
                     object_conf=object_conf,
                 )
-                if len(net_data) == 4:
-                    _, x_actor, x_heatmap, x_spatial = net_data
+                if self.object_prompt:
+                    if len(net_data) == 4:
+                        _, x_actor, x_object, x_heatmap = net_data
+                    else:
+                        raise RuntimeError(
+                            "object_prompt backbone must return actor, object, "
+                            "and heatmap tokens"
+                        )
+                elif len(net_data) == 4:
+                    _, x_actor, x_heatmap, _ = net_data
                 else:
                     _, x_actor, x_heatmap = net_data
-                    x_spatial = None
             else:
                 data = self.net(
                     x,
                     boxes=boxes,
                     valid=valid,
                     object_boxes=object_boxes,
+                    object_cls=object_cls,
                     object_valid=object_valid,
                     object_conf=object_conf,
                 )
-                _, x_actor = data
+                _, x_actor = data[:2]
                 x_heatmap = 0
-                x_spatial = None
+                x_object = None
             if self.hparams.ret_feat:
                 return x_actor
-            action_feat = x_actor
             if self.object_prompt:
-                (
-                    object_feature_update,
-                    selection_logits,
-                    interaction_heatmap,
-                ) = self.object_interaction(
-                    action_feat,
-                    spatial_feat=x_spatial,
+                selection_logits, interaction_heatmap = self.object_interaction(
+                    x_actor,
+                    x_object,
                     actor_boxes=boxes,
                     object_boxes=object_boxes,
-                    object_cls=object_cls,
-                    object_conf=object_conf,
                     object_valid=object_valid,
-                    spatial_heatmap_size=self.net.HW_OUT_CONV,
+                    heatmap_size=(56, 56),
                 )
-                action_feat = action_feat + object_feature_update
             else:
                 selection_logits = None
                 interaction_heatmap = None
-                object_feature_update = None
-            action_logits = self.actor_head(action_feat)
+            action_logits = self.actor_head(x_actor)
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
                 if self.object_prompt:
@@ -501,7 +504,6 @@ class POGUISE(pl.LightningModule):
                         presence_logits,
                         selection_logits,
                         interaction_heatmap,
-                        object_feature_update,
                     )
                 return action_logits, x_heatmap, presence_logits
             if self.object_prompt:
@@ -511,7 +513,6 @@ class POGUISE(pl.LightningModule):
                     None,
                     selection_logits,
                     interaction_heatmap,
-                    object_feature_update,
                 )
             return action_logits, x_heatmap
         if self.hparams.n_landmarks > 0:
@@ -578,8 +579,6 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--object_token_dropout_prob", type=float, default=0.0)
         parser.add_argument("--object_interaction_hidden_dim", type=int, default=512)
         parser.add_argument("--object_interaction_dropout", type=float, default=0.1)
-        parser.add_argument("--object_fusion_gate_init", type=float, default=0.05)
-        parser.add_argument("--object_feature_scale", type=float, default=1.0)
         parser.add_argument(
             "--object_interaction_heatmap_weight",
             type=float,

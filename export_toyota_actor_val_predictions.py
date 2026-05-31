@@ -31,9 +31,7 @@ def _move_target(target, device):
 
 
 def _unpack_model_data(data):
-    if len(data) == 6:
-        preds, hm_preds, presence_logits, selection_logits, interaction_heatmap, object_feature_update = data
-    elif len(data) == 5:
+    if len(data) == 5:
         preds, hm_preds, presence_logits, selection_logits, interaction_heatmap = data
     elif len(data) == 4:
         preds, hm_preds, presence_logits, selection_logits = data

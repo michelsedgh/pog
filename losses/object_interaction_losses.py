@@ -27,12 +27,6 @@ def interaction_heatmap_loss(pred_heatmap, target_heatmap, valid):
     return F.mse_loss(pred_heatmap[valid], target_heatmap[valid])
 
 
-def feature_update_l2(feature_update, valid):
-    if feature_update is None or not valid.any():
-        return None
-    return feature_update[valid].float().square().mean()
-
-
 def positive_erased_margin_loss(
     normal_logits,
     labels,

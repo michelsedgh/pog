@@ -201,6 +201,42 @@ def _initialize_actor_prompt_from_checkpoint(module, checkpoint):
                 torch.nn.init.zeros_(last.bias)
                 initialized.append("bbox_mlp_final")
 
+        if hasattr(net, "object_slot_embed") and not _checkpoint_has_key(
+            checkpoint, "model.net.object_slot_embed"
+        ):
+            net.object_slot_embed.zero_()
+            initialized.append("object_slot_embed")
+
+        if hasattr(net, "object_cls_embed") and not _checkpoint_has_key(
+            checkpoint, "model.net.object_cls_embed.weight"
+        ):
+            net.object_cls_embed.weight.zero_()
+            initialized.append("object_cls_embed")
+
+        if hasattr(net, "object_valid_embed") and not _checkpoint_has_key(
+            checkpoint, "model.net.object_valid_embed.weight"
+        ):
+            net.object_valid_embed.weight.zero_()
+            initialized.append("object_valid_embed")
+
+        if hasattr(net, "object_bbox_mlp") and not _checkpoint_has_key(
+            checkpoint, "model.net.object_bbox_mlp.2.weight"
+        ):
+            last = net.object_bbox_mlp[-1]
+            if isinstance(last, torch.nn.Linear):
+                torch.nn.init.zeros_(last.weight)
+                torch.nn.init.zeros_(last.bias)
+                initialized.append("object_bbox_mlp_final")
+
+        if hasattr(net, "object_conf_mlp") and not _checkpoint_has_key(
+            checkpoint, "model.net.object_conf_mlp.2.weight"
+        ):
+            last = net.object_conf_mlp[-1]
+            if isinstance(last, torch.nn.Linear):
+                torch.nn.init.zeros_(last.weight)
+                torch.nn.init.zeros_(last.bias)
+                initialized.append("object_conf_mlp_final")
+
     if initialized:
         print(
             "Initialized actor-prompt modules from current class path: "
@@ -326,7 +362,6 @@ def build_parser():
     parser.add_argument("--object_heatmap_weight", type=float, default=200.0)
     parser.add_argument("--object_interaction_loss_weight", type=float, default=0.05)
     parser.add_argument("--object_warmup_freeze_actor_path", type=int, default=0)
-    parser.add_argument("--object_feature_l2_weight", type=float, default=0.0)
     parser.add_argument("--object_counterfactual_margin_weight", type=float, default=0.0)
     parser.add_argument("--object_counterfactual_margin", type=float, default=0.05)
     parser.add_argument("--object_counterfactual_branch_grad", type=int, default=0)
