@@ -58,7 +58,7 @@ The next cells intentionally read `/content/poguise_colab_env.sh` instead of red
 
 ## Cell 2: Frozen-Backbone PO-GUISE+ Object Warmup
 
-This is the clean Actor-Slot PO-GUISE+ warmup. The backbone and base actor path stay frozen; only the actor-object feature fusion modules and the heatmap head train.
+This is the clean Actor-Object Token PO-GUISE+ warmup. The backbone and base actor path stay frozen; only the object token embeddings, actor-object selection head, and heatmap head train.
 
 ```python
 import os
@@ -71,7 +71,7 @@ from pathlib import Path
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 ENV_FILE = "/content/poguise_colab_env.sh"
-REQUIRED_COMMIT = "109efd5"
+REQUIRED_COMMIT = "70e32b9"
 
 def load_colab_env(path=ENV_FILE):
     env = {}
@@ -190,11 +190,8 @@ cmd = [
     "--object_warmup_freeze_actor_path", "1",
     "--object_interaction_hidden_dim", "512",
     "--object_interaction_dropout", "0.05",
-    "--object_fusion_gate_init", "0.04",
-    "--object_feature_scale", "0.5",
     "--object_interaction_loss_weight", "0.10",
     "--object_interaction_heatmap_weight", "50",
-    "--object_feature_l2_weight", "0.02",
     "--object_counterfactual_margin_weight", "0.10",
     "--object_counterfactual_margin", "0.05",
     "--object_counterfactual_branch_grad", "0",
@@ -343,7 +340,6 @@ cols = [
     "val_f1_objects_on",
     "val_f1_objects_off",
     "val_f1_objects_shuffled",
-    "val_object_fusion_gate",
     "val_interaction_select_mass_object",
     "val_interaction_select_acc_object",
     "val_object_true_logit_gain_on_vs_positive_erased",
@@ -439,7 +435,6 @@ def show_row(name, row):
         "val_obj_heatmap_loss",
         "val_loss_interaction",
         "val_loss_interaction_heatmap",
-        "val_object_fusion_gate",
         "val_interaction_select_mass_object",
         "val_interaction_select_acc_object",
         "val_object_true_logit_gain_on_vs_positive_erased",
@@ -486,7 +481,7 @@ import pandas as pd
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 ENV_FILE = "/content/poguise_colab_env.sh"
-REQUIRED_COMMIT = "109efd5"
+REQUIRED_COMMIT = "70e32b9"
 WARMUP_PATTERN = "actor_object_poguiseplus_clean_actorfrozen_warmup_from_actor_slot_*"
 WARMUP_RUN_DIR_OVERRIDE = ""
 PASS_REQUIRED = True
@@ -734,11 +729,8 @@ cmd = [
     "--object_warmup_freeze_actor_path", "0",
     "--object_interaction_hidden_dim", "512",
     "--object_interaction_dropout", "0.05",
-    "--object_fusion_gate_init", "0.04",
-    "--object_feature_scale", "0.5",
     "--object_interaction_loss_weight", "0.10",
     "--object_interaction_heatmap_weight", "50",
-    "--object_feature_l2_weight", "0.02",
     "--object_counterfactual_margin_weight", "0.10",
     "--object_counterfactual_margin", "0.05",
     "--object_counterfactual_branch_grad", "0",

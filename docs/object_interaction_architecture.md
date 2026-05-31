@@ -1,62 +1,98 @@
-# Object Interaction Architecture
+# Object-Token PO-GUISE+ Architecture
 
 ## Problem
 
-The model must distinguish actions with similar pose and motion by using the objects near the actor. A global clip-level object summary is not enough: it can learn scene priors, but it cannot answer which object the actor is using when several objects are present.
+The actor-slot model must distinguish actions with similar pose and motion by using object evidence around the actor. The live failure is `Uselaptop` collapsing into `Readbook`, `WatchTV`, or `Usetelephone` even when RF-DETR detects the laptop.
 
-The concrete failure mode is `Uselaptop` being predicted as `Readbook`, or `WatchTV` being corrupted by a visible laptop. The useful signal is not only "a laptop exists"; it is "for this actor, which detected object region explains the action?"
+The previous object path was cleaner than the old specialist experiments, but it still fused object information after the video transformer had already produced actor features. That made object evidence a late correction instead of part of the token-selection and actor-feature formation process.
 
-## Evidence
+## Final Design
 
-- PO-GUISE uses semantic heatmap tokens to guide token selection and preserve actor-relevant visual evidence. Its later PO-GUISE+ variant explicitly adds interacting-object prediction as a task for driver action recognition: https://arxiv.org/abs/2407.13750.
-- Actor-Centric Relation Network models actor-to-context/object relations for action recognition instead of relying on global scene features: https://arxiv.org/abs/1807.10982.
-- Skeleton/interacted-object work frames action recognition and interacted-object localization as mutually helpful tasks, which matches our available weak labels from detector cache plus action labels: https://arxiv.org/abs/2110.14994.
-- Object ablations showed real object features contain signal, but final action quality should only be trusted when real objects beat object-off and label-mismatched shuffled objects.
+There is one active object path:
 
-## Design
+1. Feed all RF-DETR object detections during training and inference.
+2. Embed object boxes, classes, confidences, and validity as transformer tokens.
+3. Protect class, actor, object, register, and heatmap tokens from pruning.
+4. Let actor tokens attend to object tokens inside the PO-GUISE transformer blocks.
+5. Use the final actor tokens directly for action classification.
+6. Predict actor/object selection and actor-conditioned interaction heatmaps from the final actor/object tokens.
+7. Train with visible-object heatmaps, strong-object selection targets, interaction heatmaps, positive-erased counterfactuals, shuffled-object counterfactuals, and objectless consistency.
 
-Use one object path:
+The model no longer has a post-backbone object adapter, a free logit residual, specialist rerankers, or relation-only modes. Object evidence must enter through transformer tokens and affect the actor token before `actor_head`.
 
-1. Keep actor slots as the main action representation.
-2. Keep detector boxes/classes/confidences as object tokens.
-3. Append an explicit `NONE` object token for objectless or uncertain actions.
-4. Pool object visual features from the PO-GUISE heatmap-token feature map at each detected object box.
-5. Score every actor/object pair. The selection tensor is `[B, K, M + 1]`, where the final object slot is `NONE`.
-6. Train object selection with a positive object-token set, not a single guessed instance. For example, `Uselaptop` accepts any detected laptop or keyboard/mouse token for that actor.
-7. Build the actor-conditioned interaction heatmap from the selected object distribution.
-8. Supervise that interaction heatmap at the same 56x56 resolution as the PO-GUISE pose/object heatmaps. Build an 8x8 copy only for pooling from the internal heatmap-token feature grid.
-9. Pool visual context through the actor-conditioned interaction heatmap.
-10. Predict a bounded actor-feature adapter from:
-   `[selected_object_context, interaction_visual_context, actor * selected_object_context, actor * interaction_visual_context]`.
-11. Fuse at the actor feature level:
-   `fused_actor = actor_feature + gamma * tanh(adapter) * real_object_mass`.
-12. Reuse the normal actor action head on `fused_actor`.
-13. Train real-object counterfactuals against positive-object-erased and label-mismatched objects-shuffled views. The erased view removes only the weak-positive interacted objects while leaving distractors visible, so the model must learn which visible object actually supports the action. Objectless actions are trained to stay consistent with objects-off.
-14. Evaluate object usefulness with real objects, objects-off, and label-mismatched objects-shuffled. A useful object path must keep real objects competitive globally and improve the targeted object-sensitive classes.
+## Runtime Inputs
 
-This is intentionally not an action-class prior or object-existence shortcut. The model sees all detected objects, then learns which object token and spatial region explain each actor's action. Training and inference both pass the same RF-DETR object format: boxes, object class ids, confidences, and a valid mask.
+Training and inference use the same object contract:
 
-## Training Modes
+```text
+video:        [B, T, 3, 224, 224]
+actor_boxes:  [B, K, 4]
+actor_valid:  [B, K]
+object_boxes: [B, M, 4]
+object_cls:   [B, M]
+object_conf:  [B, M]
+object_valid: [B, M]
+```
 
-### Frozen object warmup
+The current Toyota/live configuration uses `K=8`, `M=24`, and 19 COCO-derived object classes.
 
-Start from a strong actor checkpoint, freeze the video/actor path, and train only the actor-object feature-fusion modules plus heatmap head. This tests PO-GUISE+ style object grounding without spending full-run time or corrupting the actor model.
+## Transformer Token Order
 
-Suggested settings:
+```text
+[class]
+[actor tokens]
+[object tokens]
+[register tokens]
+[heatmap tokens]
+[video tokens]
+```
 
+Class, actor, object, register, and heatmap tokens are semantic tokens. They are not pruned. Video-token pruning scores visual tokens using attention from all semantic tokens when `topk_type=1`.
+
+## Strong Object Targets
+
+Strong interaction supervision is only used for reliable pairs:
+
+```text
+Uselaptop        -> laptop, keyboard_mouse
+Readbook         -> book
+Usetelephone     -> phone
+Drink.Fromcup    -> cup
+Drink.Frombottle -> bottle
+Drink.Fromglass  -> glass
+```
+
+All other detected objects remain visible as context/distractors. They are not treated as positive interacted-object targets.
+
+## Losses
+
+Use the normal action CE as the main task, plus:
+
+- pose heatmap loss
+- visible object heatmap loss
+- actor/object selection loss
+- actor-conditioned interaction heatmap loss
+- positive-erased and shuffled-object margin loss
+- objectless consistency loss
+- actor presence loss
+
+Positive-erased removes only the positive interacted-object candidates and leaves distractors visible. This is the key counterfactual test for whether the model learned the interacted object rather than a general object prior.
+
+## Training Schedule
+
+Start from a clean actor-slot checkpoint.
+
+Frozen object-token warmup:
+
+- `--object_prompt 1`
 - `--freeze_backbone 1`
 - `--object_warmup_freeze_actor_path 1`
-- `--object_fusion_gate_init 0.04`
-- `--object_feature_scale 0.5`
-- `--object_interaction_hidden_dim 512`
-- `--object_interaction_dropout 0.05`
 - `--object_heatmap_weight 50`
 - `--object_interaction_loss_weight 0.10`
 - `--object_interaction_heatmap_weight 50`
-- `--object_feature_l2_weight 0.02`
 - `--object_counterfactual_margin_weight 0.10`
 - `--object_counterfactual_margin 0.05`
-- `--object_objectless_consistency_weight 0.03`
+- `--object_objectless_consistency_weight 0.02`
 - `--kp_loss_weight 1000`
 - `--lr_head 1e-4`
 - `--lr_head_hm 5e-5`
@@ -65,18 +101,25 @@ Suggested settings:
 - `--hard_negative_prob 0.15`
 - `--max_epochs 4`
 
-Acceptance signal:
+Only after the frozen warmup passes, run a short integrated fine-tune:
 
-- `val_acc_macro_objects_on >= val_acc_macro_objects_off + 0.005`
-- `val_acc_macro_objects_on >= val_acc_macro_objects_shuffled + 0.005`
-- `val_f1_objects_on >= val_f1_objects_off - 0.003`
-- `val_f1_objects_on >= val_f1_objects_shuffled - 0.003`
-- `val_interaction_select_mass_object` increases for strong object actions.
-- object-related groups improve without a broad F1 collapse.
-- `val_object_interaction_true_logit_gain_on_vs_positive_erased` and `val_object_interaction_margin_gain_on_vs_positive_erased` are positive for strong object actions.
+- `--freeze_backbone 0`
+- `--object_warmup_freeze_actor_path 0`
+- `--lr 5e-7` to `1e-6`
+- `--lr_head 5e-5`
+- `--lr_head_hm 5e-5`
+- `--max_epochs 4` to `8`
 
-### Full fine-tune
+## Acceptance Criteria
 
-Only after the frozen warmup passes, unfreeze the normal actor path and keep visible-object heatmaps/token-pruning guidance on. This trains the final integrated model.
+Do not judge only raw global macro/F1. A pass requires:
 
-The shuffled-object negative must be label-mismatched, not a simple adjacent batch roll. Toyota validation order is deterministic, so adjacent samples can be correlated by sorted file id, scene, or action family. A valid shuffled negative should break the action/object relationship instead of replacing objects with a nearby similar clip.
+- real objects beat or match objects-off and shuffled globally
+- positive-erased margin gain is positive for strong object actions
+- shuffled-object margin gain is positive
+- selection mass and selection accuracy are sane
+- object heatmap IoU/recall are nonzero
+- objectless classes remain stable
+- per-class checks for `Uselaptop`, `Readbook`, `WatchTV`, `Usetelephone`, and drink classes do not reveal a hidden regression
+
+Toyota validation cannot fully prove the live couch-laptop case because `Uselaptop` is often already saturated there. The real live A/B remains necessary, but the model architecture must pass the object counterfactual metrics first.
