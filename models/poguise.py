@@ -406,8 +406,7 @@ class POGUISE(pl.LightningModule):
             interaction_heatmap_size=interaction_heatmap_size,
         )
         print(
-            "Object interaction path: actor-conditioned feature fusion "
-            "(no action-logit residual)."
+            "Object interaction path: actor-conditioned feature fusion."
         )
 
     def _apply_object_dropout(self, object_valid):
@@ -474,7 +473,7 @@ class POGUISE(pl.LightningModule):
             action_feat = x_actor
             if self.object_prompt:
                 (
-                    object_feature_delta,
+                    object_feature_update,
                     selection_logits,
                     interaction_heatmap,
                 ) = self.object_interaction(
@@ -487,11 +486,11 @@ class POGUISE(pl.LightningModule):
                     object_valid=object_valid,
                     spatial_heatmap_size=self.net.HW_OUT_CONV,
                 )
-                action_feat = action_feat + object_feature_delta
+                action_feat = action_feat + object_feature_update
             else:
                 selection_logits = None
                 interaction_heatmap = None
-                object_feature_delta = None
+                object_feature_update = None
             action_logits = self.actor_head(action_feat)
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
@@ -502,7 +501,7 @@ class POGUISE(pl.LightningModule):
                         presence_logits,
                         selection_logits,
                         interaction_heatmap,
-                        object_feature_delta,
+                        object_feature_update,
                     )
                 return action_logits, x_heatmap, presence_logits
             if self.object_prompt:
@@ -512,7 +511,7 @@ class POGUISE(pl.LightningModule):
                     None,
                     selection_logits,
                     interaction_heatmap,
-                    object_feature_delta,
+                    object_feature_update,
                 )
             return action_logits, x_heatmap
         if self.hparams.n_landmarks > 0:

@@ -11,7 +11,7 @@ The concrete failure mode is `Uselaptop` being predicted as `Readbook`, or `Watc
 - PO-GUISE uses semantic heatmap tokens to guide token selection and preserve actor-relevant visual evidence. Its later PO-GUISE+ variant explicitly adds interacting-object prediction as a task for driver action recognition: https://arxiv.org/abs/2407.13750.
 - Actor-Centric Relation Network models actor-to-context/object relations for action recognition instead of relying on global scene features: https://arxiv.org/abs/1807.10982.
 - Skeleton/interacted-object work frames action recognition and interacted-object localization as mutually helpful tasks, which matches our available weak labels from detector cache plus action labels: https://arxiv.org/abs/2110.14994.
-- Our object-only and frozen-logit probes showed real object features contain signal, but the previous global summary residual did not reliably beat object-off/shuffled evaluations in full training.
+- Object ablations showed real object features contain signal, but final action quality should only be trusted when real objects beat object-off and label-mismatched shuffled objects.
 
 ## Design
 
@@ -31,9 +31,8 @@ Use one object path:
 11. Fuse at the actor feature level:
    `fused_actor = actor_feature + gamma * tanh(adapter) * real_object_mass`.
 12. Reuse the normal actor action head on `fused_actor`.
-13. Do not apply an object logit residual. The object path modifies representation, not final class logits directly.
-14. Train real-object counterfactuals against positive-object-erased and label-mismatched objects-shuffled views. The erased view removes only the weak-positive interacted objects while leaving distractors visible, so the model must learn which visible object actually supports the action. Objectless actions are trained to stay consistent with objects-off.
-15. Evaluate object usefulness with real objects, objects-off, and label-mismatched objects-shuffled. A useful object path must keep real objects competitive globally and improve the targeted object-sensitive classes.
+13. Train real-object counterfactuals against positive-object-erased and label-mismatched objects-shuffled views. The erased view removes only the weak-positive interacted objects while leaving distractors visible, so the model must learn which visible object actually supports the action. Objectless actions are trained to stay consistent with objects-off.
+14. Evaluate object usefulness with real objects, objects-off, and label-mismatched objects-shuffled. A useful object path must keep real objects competitive globally and improve the targeted object-sensitive classes.
 
 This is intentionally not an action-class prior or object-existence shortcut. The model sees all detected objects, then learns which object token and spatial region explain each actor's action. Training and inference both pass the same RF-DETR object format: boxes, object class ids, confidences, and a valid mask.
 
@@ -78,12 +77,6 @@ Acceptance signal:
 
 ### Full fine-tune
 
-Only after the frozen warmup passes, unfreeze the normal actor path and keep visible-object heatmaps/token-pruning guidance on. This trains the final integrated model rather than another blind architecture experiment.
-
-## Rejected Path
-
-The old object-summary residual path is removed. It used clip-level object statistics and optional hand-coded action evidence gates. That makes it too easy to encode dataset priors, and it does not directly solve actor-object association.
-
-The old action-logit residual path is also removed. It did find object signal, but it could still push final class logits in unstable ways. The clean path uses actor-conditioned object selection plus feature-level fusion and lets the normal actor head decide the action.
+Only after the frozen warmup passes, unfreeze the normal actor path and keep visible-object heatmaps/token-pruning guidance on. This trains the final integrated model.
 
 The shuffled-object negative must be label-mismatched, not a simple adjacent batch roll. Toyota validation order is deterministic, so adjacent samples can be correlated by sorted file id, scene, or action family. A valid shuffled negative should break the action/object relationship instead of replacing objects with a nearby similar clip.

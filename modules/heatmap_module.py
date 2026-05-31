@@ -9,7 +9,7 @@ import os
 from losses.softtarget import SoftTargetCrossEntropy
 from losses.heatmap_loss import KeypointMSELoss
 from losses.object_interaction_losses import (
-    feature_delta_l2,
+    feature_update_l2,
     interaction_heatmap_loss,
     objectless_consistency_loss,
     positive_erased_margin_loss,
@@ -937,7 +937,7 @@ class HeatmapModule(pl.LightningModule):
             presence_logits,
             selection_logits,
             interaction_heatmap,
-            object_feature_delta,
+            object_feature_update,
         ) = self._unpack_model_data(data)
         target_action_selection_logits = self._selection_logits_for_target_action(
             selection_logits,
@@ -1137,8 +1137,8 @@ class HeatmapModule(pl.LightningModule):
             feature_l2_weight = float(
                 self.model.hparams.get("object_feature_l2_weight", 0.0)
             )
-            if object_feature_delta is not None and feature_l2_weight > 0.0:
-                loss_feature_l2 = feature_delta_l2(object_feature_delta, valid)
+            if object_feature_update is not None and feature_l2_weight > 0.0:
+                loss_feature_l2 = feature_update_l2(object_feature_update, valid)
                 loss = loss + loss_feature_l2 * feature_l2_weight
                 self.log(
                     f"{stage}_loss_object_feature_l2",
@@ -1177,7 +1177,7 @@ class HeatmapModule(pl.LightningModule):
                 presence_logits,
                 selection_logits,
                 interaction_heatmap,
-                object_feature_delta,
+                object_feature_update,
             ) = data
         elif len(data) == 5:
             (
@@ -1187,29 +1187,29 @@ class HeatmapModule(pl.LightningModule):
                 selection_logits,
                 interaction_heatmap,
             ) = data
-            object_feature_delta = None
+            object_feature_update = None
         elif len(data) == 4:
             preds, hm_preds, presence_logits, selection_logits = data
             interaction_heatmap = None
-            object_feature_delta = None
+            object_feature_update = None
         elif len(data) == 3:
             preds, hm_preds, presence_logits = data
             selection_logits = None
             interaction_heatmap = None
-            object_feature_delta = None
+            object_feature_update = None
         else:
             preds, hm_preds = data
             presence_logits = None
             selection_logits = None
             interaction_heatmap = None
-            object_feature_delta = None
+            object_feature_update = None
         return (
             preds,
             hm_preds,
             presence_logits,
             selection_logits,
             interaction_heatmap,
-            object_feature_delta,
+            object_feature_update,
         )
 
     def _first_actor_targets(self, imgs, target):

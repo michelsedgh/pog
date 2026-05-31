@@ -275,9 +275,9 @@ class ObjectInteractionModule(nn.Module):
         spatial_heatmap_size: Optional[Tuple[int, int]] = None,
     ):
         if object_boxes is None:
-            feature_delta = actor_feat.new_zeros(actor_feat.shape)
+            feature_update = actor_feat.new_zeros(actor_feat.shape)
             selection_logits = actor_feat.new_zeros((*actor_feat.shape[:2], 1))
-            return feature_delta, selection_logits, None
+            return feature_update, selection_logits, None
         if object_cls is None or object_conf is None or object_valid is None:
             raise ValueError(
                 "object_boxes, object_cls, object_conf, and object_valid must be passed together"
@@ -380,11 +380,11 @@ class ObjectInteractionModule(nn.Module):
             ],
             dim=-1,
         )
-        raw_delta = self.feature_adapter(self.fusion_norm(fusion_feat))
-        bounded_delta = self.feature_scale * torch.tanh(raw_delta)
+        raw_update = self.feature_adapter(self.fusion_norm(fusion_feat))
+        bounded_update = self.feature_scale * torch.tanh(raw_update)
         feature_gate = torch.sigmoid(self.fusion_gate_logit).to(
-            device=bounded_delta.device,
-            dtype=bounded_delta.dtype,
+            device=bounded_update.device,
+            dtype=bounded_update.dtype,
         )
-        feature_delta = bounded_delta * feature_gate * real_object_mass[..., None]
-        return feature_delta, selection_logits, interaction_heatmap
+        feature_update = bounded_update * feature_gate * real_object_mass[..., None]
+        return feature_update, selection_logits, interaction_heatmap
