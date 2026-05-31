@@ -256,21 +256,28 @@ def _expand_heatmap_head_for_object_prompt(module, checkpoint):
     )
 
 
-def _migrate_object_action_head(module, checkpoint):
+def _migrate_object_interaction_head(module, checkpoint):
     if checkpoint is None or not getattr(module.model, "object_prompt", False):
         return
     state_dict = checkpoint.get("state_dict", {})
     current_state = module.state_dict()
     migrated = []
     for key in list(state_dict.keys()):
-        if key.startswith("model.object_selector."):
+        old_object_prefixes = (
+            "model.object_selector.",
+            "model.object_action_",
+            "model.object_specialist_",
+        )
+        if key.startswith(old_object_prefixes):
             del state_dict[key]
             migrated.append(key)
             continue
-        if not (
-            key == "model.object_relation_gate_logit"
-            or key.startswith("model.object_action_")
-            or key.startswith("model.object_specialist_")
+        if not key.startswith(
+            (
+                "model.object_actor_",
+                "model.object_fusion_",
+                "model.object_relation_gate_logit",
+            )
         ):
             continue
         if key in current_state and state_dict[key].shape != current_state[key].shape:
@@ -278,7 +285,7 @@ def _migrate_object_action_head(module, checkpoint):
             migrated.append(key)
     if migrated:
         print(
-            "Dropped incompatible object action head tensors from checkpoint: "
+            "Dropped incompatible object interaction tensors from checkpoint: "
             + ", ".join(migrated)
         )
 
@@ -385,6 +392,20 @@ def main():
         raise ValueError("actor_prompt training requires --grad_weights 0")
     if hparams.object_prompt and not hparams.actor_prompt:
         raise ValueError("object_prompt requires actor_prompt")
+    if getattr(hparams, "specialist_sampler", 0):
+        raise ValueError(
+            "specialist_sampler is deprecated for the clean Actor-Slot PO-GUISE+ "
+            "path. Use class_balanced_sampler plus optional hard_negative_sampler."
+        )
+    if (
+        float(getattr(hparams, "object_specialist_group_loss_weight", 0.0)) > 0.0
+        or float(getattr(hparams, "object_specialist_no_boost_weight", 0.0)) > 0.0
+    ):
+        raise ValueError(
+            "object specialist losses are deprecated. The clean path uses action CE, "
+            "object heatmaps, actor-object selection, counterfactual margin, and "
+            "objectless consistency."
+        )
 
     seed_everything(hparams.seed)
     dataset = _dataset_class(hparams.dataset)
@@ -392,7 +413,7 @@ def main():
 
     if checkpoint is not None:
         _expand_heatmap_head_for_object_prompt(module, checkpoint)
-        _migrate_object_action_head(module, checkpoint)
+        _migrate_object_interaction_head(module, checkpoint)
         strict = (
             bool(hparams.strict_load)
             if hparams.strict_load is not None

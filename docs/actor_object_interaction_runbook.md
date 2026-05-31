@@ -18,7 +18,7 @@ For a `Uselaptop` clip with laptop, book, TV, couch, and cup visible:
 - all objects are passed as candidates
 - laptop/keyboard tokens are weak positives
 - book/TV/cup/couch remain distractors
-- the selection loss encourages the true-action attention slice to put mass on laptop/keyboard tokens
+- the selection loss encourages the actor-object selector to put mass on laptop/keyboard tokens
 - the interaction heatmap target covers the laptop/keyboard boxes
 - the positive-erased counterfactual removes laptop/keyboard tokens but leaves distractors visible
 - the shuffled counterfactual replaces objects with label-mismatched objects from another clip
@@ -56,7 +56,7 @@ run(["git", "log", "-1", "--oneline"])
 
 ## Cell 2: Frozen-Backbone PO-GUISE+ Object Warmup
 
-This is the first real object-interaction run. It is not `object_relation_only`, and it is not `object_specialist_heads`. The backbone and base actor path stay frozen; only object relation modules and the heatmap head train.
+This is the clean Actor-Slot PO-GUISE+ warmup. It does not use `object_relation_only`, `object_specialist_heads`, `specialist_sampler`, or any logit residual mask. The backbone and base actor path stay frozen; only the actor-object feature fusion modules and the heatmap head train.
 
 ```python
 import os
@@ -85,7 +85,7 @@ os.makedirs(OBJECT_PREPROC_CACHE_DIR, exist_ok=True)
 os.makedirs(LANDMARK_PREPROC_CACHE_DIR, exist_ok=True)
 
 STAMP = time.strftime("%Y%m%d_%H%M%S")
-MODEL_NAME = f"actor_object_poguiseplus_focused_actorfrozen_warmup_from_actor_slot_{STAMP}"
+MODEL_NAME = f"actor_object_poguiseplus_clean_actorfrozen_warmup_from_actor_slot_{STAMP}"
 EPOCH_DIR = f"{DATA_DIR}/checkpoints/{MODEL_NAME}/epoch_checkpoints"
 
 def require_file(path, name):
@@ -150,7 +150,6 @@ cmd = [
     "--actor_val_diagnostics", "1",
     "--actor_val_diagnostic_max_pairs", "32",
     "--object_prompt", "1",
-    "--object_specialist_heads", "0",
     "--num_object_tokens", "24",
     "--num_object_classes", "19",
     "--object_detector_cache", OBJECT_DETECTOR_CACHE,
@@ -164,28 +163,24 @@ cmd = [
     "--object_bbox_prior_weight", "0.05",
     "--object_bbox_prior_expand", "1.25",
     "--object_heatmap_weight", "50",
-    "--object_relation_only", "0",
     "--object_warmup_freeze_actor_path", "1",
     "--object_relation_hidden_dim", "512",
     "--object_relation_dropout", "0.05",
-    "--object_action_gate_init", "0.02",
+    "--object_fusion_gate_init", "0.04",
     "--object_delta_scale", "0.5",
     "--object_interaction_loss_weight", "0.10",
     "--object_interaction_heatmap_weight", "50",
-    "--object_residual_l2_weight", "0.03",
+    "--object_residual_l2_weight", "0.02",
     "--object_counterfactual_margin_weight", "0.10",
     "--object_counterfactual_margin", "0.05",
     "--object_counterfactual_branch_grad", "0",
     "--object_objectless_consistency_weight", "0.03",
     "--object_dropout_prob", "0.05",
     "--object_token_dropout_prob", "0.02",
-    "--class_balanced_sampler", "0",
-    "--specialist_sampler", "1",
-    "--specialist_positive_prob", "0.55",
+    "--class_balanced_sampler", "1",
     "--hard_negative_sampler", "1",
     "--hard_negative_manifest", HARD_NEGATIVE_MANIFEST,
-    "--hard_negative_prob", "0.25",
-    "--normal_anchor_prob", "0.20",
+    "--hard_negative_prob", "0.15",
     "--keep_rate", "0.6",
     "--keep_rate_merge", "0.3",
     "--merge_type", "tome",
@@ -214,7 +209,7 @@ cmd = [
     "--max_epochs", "4",
     "--t_max_scheduler", "4",
     "--lr", "0",
-    "--lr_head", "3e-4",
+    "--lr_head", "1e-4",
     "--lr_head_hm", "5e-5",
     "--weight_decay", "0.04",
     "--weight_decay_head", "0.01",
@@ -231,9 +226,9 @@ cmd = [
     "--check_val_every_n_epoch", "1",
     "--num_sanity_val_steps", "0",
     "--log_every_n_steps", "50",
-    "--checkpoint_monitor", "val_object_interaction_margin_gain_on_vs_positive_erased",
+    "--checkpoint_monitor", "val_f1_objects_on",
     "--checkpoint_mode", "max",
-    "--checkpoint_filename", "{epoch:03d}-{val_object_interaction_margin_gain_on_vs_positive_erased:.4f}-{val_acc_macro_objects_on:.4f}-{val_loss:.4f}",
+    "--checkpoint_filename", "{epoch:03d}-{val_f1_objects_on:.4f}-{val_acc_macro_objects_on:.4f}-{val_loss:.4f}",
     "--save_top_k", "3",
     "--save_every_epoch_checkpoints", "1",
     "--epoch_checkpoint_dir", EPOCH_DIR,
@@ -257,7 +252,7 @@ import pandas as pd
 import math
 
 DATA_DIR = "/mnt/local-scratch/poguise_data"
-pattern = "actor_object_poguiseplus_focused_actorfrozen_warmup_from_actor_slot_*"
+pattern = "actor_object_poguiseplus_clean_actorfrozen_warmup_from_actor_slot_*"
 
 runs = sorted((Path(DATA_DIR) / "checkpoints").glob(pattern), key=lambda p: p.stat().st_mtime)
 if not runs:

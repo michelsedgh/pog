@@ -1,5 +1,7 @@
 # Object Specialist Runbook
 
+Deprecated: do not use this runbook for current training. The active object path is the clean Actor-Slot PO-GUISE+ feature-fusion path in `docs/actor_object_interaction_runbook.md`. Specialist rerankers, relation-only training, and specialist sampling now raise errors in the main training code.
+
 This runbook starts after the normal Colab setup cell has finished downloading data, mounting frames, installing dependencies, and writing `/content/poguise_colab_env.sh`.
 
 The required implementation commit is:

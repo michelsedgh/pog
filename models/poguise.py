@@ -12,7 +12,6 @@ import pickle
 
 from collections import OrderedDict
 import json
-from datasets.object_vocab import OBJECT_SPECIALIST_GROUPS, OBJECT_TO_ID
 
 
 TOYOTA_CS_ACTION_TO_INDEX = {
@@ -48,28 +47,6 @@ TOYOTA_CS_ACTION_TO_INDEX = {
     "Walk": 29,
     "WatchTV": 30,
 }
-
-OBJECT_RESIDUAL_ACTION_MASKS = {
-    "none": [],
-    "strong": [
-        "Drink.Frombottle",
-        "Drink.Fromcup",
-        "Drink.Fromglass",
-        "Readbook",
-        "Uselaptop",
-        "Usetelephone",
-    ],
-    "strong_plus_watchtv": [
-        "Drink.Frombottle",
-        "Drink.Fromcup",
-        "Drink.Fromglass",
-        "Readbook",
-        "Uselaptop",
-        "Usetelephone",
-        "WatchTV",
-    ],
-}
-
 
 def load_state_dict(
     model, state_dict, prefix="", ignore_missing="relative_position_index"
@@ -204,10 +181,20 @@ class POGUISE(pl.LightningModule):
         if self.object_prompt and not self.actor_prompt:
             raise ValueError("object_prompt requires actor_prompt")
         if self.hparams.get("object_relation_only", 0):
-            if not self.object_prompt:
-                raise ValueError("object_relation_only requires object_prompt")
-            if not self.hparams.get("freeze_backbone", 0):
-                raise ValueError("object_relation_only requires freeze_backbone")
+            raise ValueError(
+                "object_relation_only is deprecated. The clean Actor-Slot PO-GUISE+ "
+                "path trains feature-level actor-object fusion with normal action CE."
+            )
+        if self.hparams.get("object_specialist_heads", 0):
+            raise ValueError(
+                "object_specialist_heads is deprecated. Use clean feature-level "
+                "actor-object fusion, not specialist rerankers."
+            )
+        if str(self.hparams.get("object_residual_action_mask", "none")) != "none":
+            raise ValueError(
+                "object_residual_action_mask is deprecated because the clean object "
+                "path no longer applies logit residuals."
+            )
         if self.hparams.get("object_warmup_freeze_actor_path", 0):
             if not (self.actor_prompt and self.object_prompt):
                 raise ValueError(
@@ -351,19 +338,6 @@ class POGUISE(pl.LightningModule):
 
     def _freeze_backbone(self):
         print("Freezing backbone")
-        if (
-            self.actor_prompt
-            and self.object_prompt
-            and self.hparams.get("object_relation_only", 0)
-        ):
-            for param in self.parameters():
-                param.requires_grad = False
-            for module in self._object_relation_modules():
-                for param in module.parameters():
-                    param.requires_grad = True
-            self.object_relation_gate_logit.requires_grad = True
-            return
-
         # Freeze the backbone
         for param in self.net.parameters():
             param.requires_grad = False
@@ -381,8 +355,8 @@ class POGUISE(pl.LightningModule):
         )
         if object_warmup_freeze_actor_path:
             print(
-                "Object warmup: freezing base actor path; training object relation "
-                "modules and heatmap head only."
+                "Object warmup: freezing base actor path; training actor-object "
+                "feature fusion modules and heatmap head only."
             )
         # Unfreeze the head
         if not object_warmup_freeze_actor_path:
@@ -438,45 +412,15 @@ class POGUISE(pl.LightningModule):
         dropout = float(self.hparams.get("object_relation_dropout", 0.1))
         if not 0 <= dropout < 1:
             raise ValueError("object_relation_dropout must be in [0, 1)")
-        action_gate_init = float(self.hparams.get("object_action_gate_init", 0.05))
+        fusion_gate_init = self.hparams.get("object_fusion_gate_init", None)
+        if fusion_gate_init is None:
+            fusion_gate_init = self.hparams.get("object_action_gate_init", 0.05)
+        action_gate_init = float(fusion_gate_init)
         if not 0 < action_gate_init < 1:
-            raise ValueError("object_action_gate_init must be in (0, 1)")
+            raise ValueError("object_fusion_gate_init must be in (0, 1)")
         self.object_delta_scale = float(self.hparams.get("object_delta_scale", 1.0))
         if self.object_delta_scale <= 0:
             raise ValueError("object_delta_scale must be positive")
-        self.object_specialist_heads_enabled = bool(
-            self.hparams.get("object_specialist_heads", 0)
-        )
-        residual_action_mask = str(
-            self.hparams.get("object_residual_action_mask", "none")
-        )
-        if residual_action_mask not in OBJECT_RESIDUAL_ACTION_MASKS:
-            raise ValueError(
-                "object_residual_action_mask must be one of "
-                + ", ".join(sorted(OBJECT_RESIDUAL_ACTION_MASKS))
-            )
-        if residual_action_mask != "none" and int(self.hparams.num_classes) != 31:
-            raise ValueError(
-                "object_residual_action_mask currently supports Toyota CS 31 classes"
-            )
-        residual_mask = torch.ones(num_classes, dtype=torch.float32)
-        masked_actions = OBJECT_RESIDUAL_ACTION_MASKS[residual_action_mask]
-        if masked_actions:
-            residual_mask.zero_()
-            residual_mask[
-                [TOYOTA_CS_ACTION_TO_INDEX[action] for action in masked_actions]
-            ] = 1.0
-            print(
-                "Object residual action mask: "
-                + residual_action_mask
-                + " -> "
-                + ", ".join(masked_actions)
-            )
-        self.register_buffer(
-            "object_residual_action_mask",
-            residual_mask,
-            persistent=False,
-        )
         interaction_heatmap_size = int(self.hparams.get("object_heatmap_size", 56))
         if interaction_heatmap_size != 56:
             raise ValueError("object interaction heatmaps are trained at 56x56")
@@ -502,101 +446,46 @@ class POGUISE(pl.LightningModule):
             nn.GELU(),
             nn.Linear(dim, dim),
         )
-        self.object_action_embed = nn.Embedding(num_classes, dim)
-        self.object_action_query = nn.Sequential(
-            nn.LayerNorm(dim * 3),
-            nn.Linear(dim * 3, dim),
+        self.object_actor_query = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, dim),
             nn.GELU(),
             nn.Linear(dim, dim),
         )
-        self.object_action_key = nn.Sequential(
+        self.object_actor_key = nn.Sequential(
             nn.LayerNorm(dim),
             nn.Linear(dim, dim),
         )
-        self.object_action_value = nn.Sequential(
+        self.object_actor_value = nn.Sequential(
             nn.LayerNorm(dim),
             nn.Linear(dim, dim),
         )
-        self.object_action_geom_bias = nn.Sequential(
+        self.object_actor_geom_bias = nn.Sequential(
             nn.LayerNorm(10),
             nn.Linear(10, max(32, hidden_dim // 4)),
             nn.GELU(),
             nn.Linear(max(32, hidden_dim // 4), 1),
         )
-        self.object_action_delta_norm = nn.LayerNorm(dim * 6)
-        self.object_action_delta = nn.Sequential(
-            nn.Linear(dim * 6, hidden_dim),
+        self.object_fusion_norm = nn.LayerNorm(dim * 4)
+        self.object_fusion_adapter = nn.Sequential(
+            nn.Linear(dim * 4, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(hidden_dim, dim),
         )
         self.object_valid_embed = nn.Embedding(2, dim)
         self.object_relation_gate_logit = nn.Parameter(
-            torch.full(
-                (num_classes,),
-                torch.logit(torch.tensor(action_gate_init, dtype=torch.float32)),
-            )
+            torch.logit(torch.tensor(action_gate_init, dtype=torch.float32))
         )
-        if self.object_specialist_heads_enabled:
-            self._create_object_specialist_modules(dim, hidden_dim, dropout)
+        print(
+            "Object interaction path: actor-conditioned feature fusion "
+            "(no action-logit residual)."
+        )
 
         nn.init.normal_(self.object_cls_embed.weight, std=0.02)
         nn.init.normal_(self.object_valid_embed.weight, std=0.02)
-        nn.init.normal_(self.object_action_embed.weight, std=0.02)
-        nn.init.zeros_(self.object_action_delta[-1].weight)
-        nn.init.zeros_(self.object_action_delta[-1].bias)
-
-    def _object_specialist_specs(self):
-        if int(self.hparams.num_classes) != 31:
-            raise ValueError("object_specialist_heads currently requires Toyota CS 31 classes")
-        task_type = str(self.hparams.get("task_type", "CS"))
-        if task_type != "CS":
-            raise ValueError("object_specialist_heads currently supports task_type=CS only")
-
-        specs = []
-        for group_name, group in OBJECT_SPECIALIST_GROUPS.items():
-            action_indices = [
-                TOYOTA_CS_ACTION_TO_INDEX[action_name]
-                for action_name in group["actions"]
-            ]
-            object_indices = [OBJECT_TO_ID[name] for name in group["objects"]]
-            if any(idx >= self.num_object_classes for idx in object_indices):
-                raise ValueError(
-                    f"Specialist group {group_name} references object ids outside "
-                    f"num_object_classes={self.num_object_classes}: {object_indices}"
-                )
-            specs.append((group_name, action_indices, object_indices))
-        return specs
-
-    def _create_object_specialist_modules(self, dim, hidden_dim, dropout):
-        self.object_specialist_specs = self._object_specialist_specs()
-        self.object_specialist_base_mlp = nn.Sequential(
-            nn.Linear(1, dim),
-            nn.GELU(),
-            nn.Linear(dim, dim),
-        )
-        self.object_specialist_delta_norms = nn.ModuleDict()
-        self.object_specialist_delta_heads = nn.ModuleDict()
-        for group_name, action_indices, object_indices in self.object_specialist_specs:
-            self.register_buffer(
-                f"object_specialist_{group_name}_actions",
-                torch.tensor(action_indices, dtype=torch.long),
-                persistent=False,
-            )
-            self.register_buffer(
-                f"object_specialist_{group_name}_objects",
-                torch.tensor(object_indices, dtype=torch.long),
-                persistent=False,
-            )
-            self.object_specialist_delta_norms[group_name] = nn.LayerNorm(dim * 7)
-            self.object_specialist_delta_heads[group_name] = nn.Sequential(
-                nn.Linear(dim * 7, hidden_dim),
-                nn.GELU(),
-                nn.Dropout(dropout),
-                nn.Linear(hidden_dim, 1),
-            )
-            nn.init.zeros_(self.object_specialist_delta_heads[group_name][-1].weight)
-            nn.init.zeros_(self.object_specialist_delta_heads[group_name][-1].bias)
+        nn.init.zeros_(self.object_fusion_adapter[-1].weight)
+        nn.init.zeros_(self.object_fusion_adapter[-1].bias)
 
     def _object_relation_modules(self):
         modules = [
@@ -605,22 +494,13 @@ class POGUISE(pl.LightningModule):
             self.object_conf_mlp,
             self.object_visual_mlp,
             self.object_valid_embed,
-            self.object_action_embed,
-            self.object_action_query,
-            self.object_action_key,
-            self.object_action_value,
-            self.object_action_geom_bias,
-            self.object_action_delta_norm,
-            self.object_action_delta,
+            self.object_actor_query,
+            self.object_actor_key,
+            self.object_actor_value,
+            self.object_actor_geom_bias,
+            self.object_fusion_norm,
+            self.object_fusion_adapter,
         ]
-        if self.object_specialist_heads_enabled:
-            modules.extend(
-                [
-                    self.object_specialist_base_mlp,
-                    self.object_specialist_delta_norms,
-                    self.object_specialist_delta_heads,
-                ]
-            )
         return tuple(modules)
 
     def _apply_object_dropout(self, object_valid):
@@ -813,14 +693,11 @@ class POGUISE(pl.LightningModule):
         action_labels=None,
         base_logits=None,
     ):
-        num_classes = int(self.hparams.num_classes)
         if object_boxes is None:
-            zero_delta = actor_feat.new_zeros(
-                (*actor_feat.shape[:2], num_classes)
-            )
+            zero_delta = actor_feat.new_zeros(actor_feat.shape)
             num_object_tokens = int(self.hparams.get("num_object_tokens", 0))
             zero_selection = actor_feat.new_zeros(
-                (*actor_feat.shape[:2], num_classes, num_object_tokens + 1)
+                (*actor_feat.shape[:2], num_object_tokens + 1)
             )
             return zero_delta, zero_selection, None
         if object_cls is None or object_conf is None or object_valid is None:
@@ -870,266 +747,69 @@ class POGUISE(pl.LightningModule):
             actor_boxes,
             object_boxes_with_null,
         )
-        num_actors = actor_feat.shape[1]
-        action_embed = self.object_action_embed.weight.to(dtype=actor_feat.dtype)
-        actor_action = actor_feat[:, :, None, :].expand(
-            -1,
-            -1,
-            num_classes,
-            -1,
-        )
-        action_pair = action_embed[None, None, :, :].expand(
-            batch_size,
-            num_actors,
-            -1,
-            -1,
-        )
-        action_query = self.object_action_query(
-            torch.cat(
-                [
-                    actor_action,
-                    action_pair,
-                    actor_action * action_pair,
-                ],
-                dim=-1,
-            )
-        )
-        object_key = self.object_action_key(object_feat)
-        object_value = self.object_action_value(object_feat)
-        action_scores = torch.einsum(
-            "bkcd,bmd->bkcm",
-            action_query,
+
+        actor_query = self.object_actor_query(actor_feat)
+        object_key = self.object_actor_key(object_feat)
+        object_value = self.object_actor_value(object_feat)
+        selection_scores = torch.einsum(
+            "bkd,bmd->bkm",
+            actor_query,
             object_key,
         ) / float(actor_feat.shape[-1]) ** 0.5
-        geom_bias = self.object_action_geom_bias(relation_geometry).squeeze(-1)
-        action_scores = action_scores + geom_bias[:, :, None, :]
-        action_scores = action_scores.masked_fill(
-            ~object_valid_with_null[:, None, None, :],
-            torch.finfo(action_scores.dtype).min,
+        geom_bias = self.object_actor_geom_bias(relation_geometry).squeeze(-1)
+        selection_scores = selection_scores + geom_bias
+        selection_scores = selection_scores.masked_fill(
+            ~object_valid_with_null[:, None, :],
+            torch.finfo(selection_scores.dtype).min,
         )
-        selection_logits = action_scores
-        action_alpha = torch.softmax(selection_logits.float(), dim=-1).to(
+        selection_logits = selection_scores
+        object_alpha = torch.softmax(selection_logits.float(), dim=-1).to(
             dtype=actor_feat.dtype
         )
-        if self.object_specialist_heads_enabled:
-            return self._object_specialist_relation(
-                actor_feat=actor_feat,
-                spatial_feat=spatial_feat,
-                object_boxes=object_boxes,
-                object_valid=object_valid,
-                object_cls_with_null=object_cls_with_null,
-                object_valid_with_null=object_valid_with_null,
-                object_value=object_value,
-                action_scores=selection_logits,
-                action_alpha=action_alpha,
-                action_embed=action_embed,
-                base_logits=base_logits,
-                action_labels=action_labels,
-            )
-        real_object_mass = action_alpha[..., : object_boxes.shape[1]].sum(
-            dim=-1,
+        real_object_mass = object_alpha[..., : object_boxes.shape[1]].sum(dim=-1)
+        interaction_heatmap = self._build_interaction_heatmap(
+            object_alpha,
+            object_boxes,
+            object_valid,
+            self.interaction_heatmap_size,
         )
-        interaction_heatmap = None
-        if action_labels is not None:
-            action_labels = action_labels.to(
-                device=actor_feat.device,
-                dtype=torch.long,
-            )
-            action_labels = action_labels.clamp(0, num_classes - 1)
-            gather_idx = action_labels[:, :, None, None].expand(
-                -1,
-                -1,
-                1,
-                action_alpha.shape[-1],
-            )
-            target_action_alpha = action_alpha.gather(dim=2, index=gather_idx).squeeze(
-                2
-            )
-            interaction_heatmap = self._build_interaction_heatmap(
-                target_action_alpha,
-                object_boxes,
-                object_valid,
-                self.interaction_heatmap_size,
-            )
 
         action_heatmap_for_pool = self._build_interaction_heatmap(
-            action_alpha,
+            object_alpha,
             object_boxes,
             object_valid,
             self.net.HW_OUT_CONV,
         )
-        visual_action = self._pool_interaction_context(
+        visual_context = self._pool_interaction_context(
             spatial_feat,
             action_heatmap_for_pool,
         )
-        visual_action = visual_action * real_object_mass[..., None]
+        visual_context = visual_context * real_object_mass[..., None]
         object_value = object_value.clone()
         object_value[:, -1] = 0
-        action_context = torch.einsum(
-            "bkcm,bmd->bkcd",
-            action_alpha,
+        object_context = torch.einsum(
+            "bkm,bmd->bkd",
+            object_alpha,
             object_value,
         )
-        action_feat = torch.cat(
+        fusion_feat = torch.cat(
             [
-                action_context,
-                visual_action,
-                actor_action * action_context,
-                actor_action * visual_action,
-                action_pair * action_context,
-                action_pair * visual_action,
+                object_context,
+                visual_context,
+                actor_feat * object_context,
+                actor_feat * visual_context,
             ],
             dim=-1,
         )
-        action_feat = self.object_action_delta_norm(action_feat)
-        raw_delta = self.object_action_delta(action_feat).squeeze(-1)
+        fusion_feat = self.object_fusion_norm(fusion_feat)
+        raw_delta = self.object_fusion_adapter(fusion_feat)
         bounded_delta = self.object_delta_scale * torch.tanh(raw_delta)
-        class_gate = torch.sigmoid(self.object_relation_gate_logit).to(
+        feature_gate = torch.sigmoid(self.object_relation_gate_logit).to(
             device=bounded_delta.device,
             dtype=bounded_delta.dtype,
         )
-        residual_action_mask = self.object_residual_action_mask.to(
-            device=bounded_delta.device,
-            dtype=bounded_delta.dtype,
-        )
-        residual = bounded_delta * class_gate[None, None, :] * real_object_mass
-        residual = residual * residual_action_mask[None, None, :]
-        return residual, selection_logits, interaction_heatmap
-
-    def _object_specialist_relation(
-        self,
-        actor_feat,
-        spatial_feat,
-        object_boxes,
-        object_valid,
-        object_cls_with_null,
-        object_valid_with_null,
-        object_value,
-        action_scores,
-        action_alpha,
-        action_embed,
-        base_logits,
-        action_labels=None,
-    ):
-        if base_logits is None:
-            raise ValueError("object_specialist_heads requires base_logits")
-
-        batch_size, num_actors, num_classes = base_logits.shape
-        residual = base_logits.new_zeros(base_logits.shape)
-        specialist_selection_logits = action_scores.clone()
-        interaction_heatmap = None
-
-        object_value = object_value.clone()
-        object_value[:, -1] = 0
-        class_gate = torch.sigmoid(self.object_relation_gate_logit).to(
-            device=base_logits.device,
-            dtype=base_logits.dtype,
-        )
-        none_slot = object_cls_with_null.shape[1] - 1
-        slot_ids = torch.arange(
-            object_cls_with_null.shape[1],
-            device=object_cls_with_null.device,
-        )
-
-        for group_name, _, _ in self.object_specialist_specs:
-            action_idx = getattr(self, f"object_specialist_{group_name}_actions").to(
-                device=base_logits.device
-            )
-            object_idx = getattr(self, f"object_specialist_{group_name}_objects").to(
-                device=object_cls_with_null.device
-            )
-            object_allowed = torch.isin(object_cls_with_null, object_idx)
-            object_allowed = object_allowed | (slot_ids[None, :] == none_slot)
-            object_allowed = object_allowed & object_valid_with_null
-
-            group_scores = action_scores.index_select(2, action_idx)
-            group_scores = group_scores.masked_fill(
-                ~object_allowed[:, None, None, :],
-                torch.finfo(group_scores.dtype).min,
-            )
-            group_alpha = torch.softmax(group_scores.float(), dim=-1).to(
-                dtype=actor_feat.dtype
-            )
-            specialist_selection_logits.index_copy_(2, action_idx, group_scores)
-
-            real_mass = group_alpha[..., : object_boxes.shape[1]].sum(dim=-1)
-            group_context = torch.einsum(
-                "bkgm,bmd->bkgd",
-                group_alpha,
-                object_value,
-            )
-            group_heatmap = self._build_interaction_heatmap(
-                group_alpha,
-                object_boxes,
-                object_valid,
-                self.net.HW_OUT_CONV,
-            )
-            group_visual = self._pool_interaction_context(spatial_feat, group_heatmap)
-            group_visual = group_visual * real_mass[..., None]
-
-            actor_group = actor_feat[:, :, None, :].expand(
-                -1,
-                -1,
-                action_idx.numel(),
-                -1,
-            )
-            action_group = action_embed.index_select(0, action_idx)[None, None, :, :]
-            action_group = action_group.expand(batch_size, num_actors, -1, -1)
-            base_group = base_logits.index_select(2, action_idx).to(
-                dtype=actor_feat.dtype
-            )
-            base_group_embed = self.object_specialist_base_mlp(
-                base_group.unsqueeze(-1)
-            )
-            group_feat = torch.cat(
-                [
-                    group_context,
-                    group_visual,
-                    actor_group * group_context,
-                    actor_group * group_visual,
-                    action_group * group_context,
-                    action_group * group_visual,
-                    base_group_embed,
-                ],
-                dim=-1,
-            )
-            group_feat = self.object_specialist_delta_norms[group_name](group_feat)
-            group_raw = self.object_specialist_delta_heads[group_name](
-                group_feat
-            ).squeeze(-1)
-            group_delta = self.object_delta_scale * torch.tanh(group_raw)
-            group_delta = (
-                group_delta
-                * class_gate.index_select(0, action_idx)[None, None, :]
-                * real_mass
-            )
-            residual.index_add_(2, action_idx, group_delta.to(dtype=residual.dtype))
-
-        if action_labels is not None:
-            action_labels = action_labels.to(
-                device=base_logits.device,
-                dtype=torch.long,
-            ).clamp(0, num_classes - 1)
-            gather_idx = action_labels[:, :, None, None].expand(
-                -1,
-                -1,
-                1,
-                action_alpha.shape[-1],
-            )
-            target_action_alpha = torch.softmax(
-                specialist_selection_logits.gather(dim=2, index=gather_idx)
-                .squeeze(2)
-                .float(),
-                dim=-1,
-            ).to(dtype=actor_feat.dtype)
-            interaction_heatmap = self._build_interaction_heatmap(
-                target_action_alpha,
-                object_boxes,
-                object_valid,
-                self.interaction_heatmap_size,
-            )
-
-        return residual, specialist_selection_logits, interaction_heatmap
+        feature_delta = bounded_delta * feature_gate * real_object_mass[..., None]
+        return feature_delta, selection_logits, interaction_heatmap
 
     def forward(
         self,
@@ -1173,14 +853,14 @@ class POGUISE(pl.LightningModule):
                 x_spatial = None
             if self.hparams.ret_feat:
                 return x_actor
-            action_logits = self.actor_head(x_actor)
+            action_feat = x_actor
             if self.object_prompt:
                 (
                     object_delta,
                     selection_logits,
                     interaction_heatmap,
                 ) = self._object_relation(
-                    x_actor,
+                    action_feat,
                     spatial_feat=x_spatial,
                     actor_boxes=boxes,
                     object_boxes=object_boxes,
@@ -1188,12 +868,13 @@ class POGUISE(pl.LightningModule):
                     object_conf=object_conf,
                     object_valid=object_valid,
                     action_labels=action_labels,
-                    base_logits=action_logits,
                 )
-                action_logits = action_logits + object_delta
+                action_feat = action_feat + object_delta
             else:
                 selection_logits = None
                 interaction_heatmap = None
+                object_delta = None
+            action_logits = self.actor_head(action_feat)
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
                 if self.object_prompt:
@@ -1282,6 +963,7 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--object_relation_dropout", type=float, default=0.1)
         parser.add_argument("--object_relation_gate_init", type=float, default=0.25)
         parser.add_argument("--object_action_gate_init", type=float, default=0.05)
+        parser.add_argument("--object_fusion_gate_init", type=float, default=None)
         parser.add_argument("--object_delta_scale", type=float, default=1.0)
         parser.add_argument("--object_residual_action_mask", type=str, default="none")
         parser.add_argument("--object_specialist_heads", type=int, default=0)

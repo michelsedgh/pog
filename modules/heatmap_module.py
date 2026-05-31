@@ -9,7 +9,7 @@ import os
 from losses.softtarget import SoftTargetCrossEntropy
 from losses.heatmap_loss import KeypointMSELoss
 import pickle
-from datasets.object_vocab import GROUPS, OBJECT_SPECIALIST_GROUPS, OBJECT_TO_ID
+from datasets.object_vocab import GROUPS
 from datasets.toyotasm import CS_DICT, CV_DICT
 
 try:
@@ -116,12 +116,6 @@ class HeatmapModule(pl.LightningModule):
             hparams.get("actor_val_diagnostic_max_pairs", 8)
         )
         self.group_indices = self._build_group_indices()
-        self.object_specialist_specs = (
-            self._build_object_specialist_specs()
-            if self.object_prompt
-            and bool(hparams.get("object_specialist_heads", 0))
-            else {}
-        )
         if self.object_prompt:
             self.val_acc_macro_objects_on = torchmetrics.Accuracy(
                 task="multiclass", num_classes=hparams.num_classes, average="macro"
@@ -157,16 +151,12 @@ class HeatmapModule(pl.LightningModule):
                 "model.object_conf_mlp",
                 "model.object_visual_mlp",
                 "model.object_valid_embed",
-                "model.object_action_embed",
-                "model.object_action_query",
-                "model.object_action_key",
-                "model.object_action_value",
-                "model.object_action_geom_bias",
-                "model.object_action_delta_norm",
-                "model.object_action_delta",
-                "model.object_specialist_base_mlp",
-                "model.object_specialist_delta_norms",
-                "model.object_specialist_delta_heads",
+                "model.object_actor_query",
+                "model.object_actor_key",
+                "model.object_actor_value",
+                "model.object_actor_geom_bias",
+                "model.object_fusion_norm",
+                "model.object_fusion_adapter",
                 "model.object_relation_gate_logit",
             ]
             if self.model.hparams.get("use_register_tokens", 0):
@@ -241,9 +231,8 @@ class HeatmapModule(pl.LightningModule):
         if not self.actor_prompt:
             return list(self.model.head.parameters())
 
-        if self.object_prompt and (
-            self.model.hparams.get("object_relation_only", 0)
-            or self.model.hparams.get("object_warmup_freeze_actor_path", 0)
+        if self.object_prompt and self.model.hparams.get(
+            "object_warmup_freeze_actor_path", 0
         ):
             return self._object_relation_params()
 
@@ -301,35 +290,6 @@ class HeatmapModule(pl.LightningModule):
             metric_name = action_name.replace(".", "_")
             indices.append((metric_name, int(label_dict[action_name]) - 1))
         return indices
-
-    def _build_object_specialist_specs(self):
-        label_dict = self._toyota_label_dict()
-        specs = {}
-        for group_name, group in OBJECT_SPECIALIST_GROUPS.items():
-            action_indices = [
-                int(label_dict[action_name]) - 1
-                for action_name in group["actions"]
-                if action_name in label_dict
-            ]
-            object_indices = [
-                int(OBJECT_TO_ID[object_name])
-                for object_name in group["objects"]
-                if object_name in OBJECT_TO_ID
-            ]
-            if len(action_indices) < 2 or not object_indices:
-                continue
-            specs[group_name] = {
-                "actions": torch.tensor(action_indices, dtype=torch.long),
-                "objects": torch.tensor(object_indices, dtype=torch.long),
-            }
-        return specs
-
-    def _use_specialist_only_relation_loss(self):
-        return (
-            self.object_prompt
-            and bool(self.model.hparams.get("object_relation_only", 0))
-            and bool(self.model.hparams.get("object_specialist_heads", 0))
-        )
 
     def _object_kwargs(self, target, mode="on"):
         if not self.object_prompt:
@@ -587,9 +547,12 @@ class HeatmapModule(pl.LightningModule):
     def _selection_logits_for_target_action(self, selection_logits, target):
         if selection_logits is None:
             return None
+        if selection_logits.ndim == 3:
+            return selection_logits
         if selection_logits.ndim != 4:
             raise RuntimeError(
-                "Action-conditioned object selection must have shape [B, K, C, M+1]; "
+                "Object selection must have shape [B, K, M+1] for the clean "
+                "feature-fusion path, or legacy [B, K, C, M+1]; "
                 f"got {tuple(selection_logits.shape)}"
             )
         labels = target["actions"].to(
@@ -604,79 +567,6 @@ class HeatmapModule(pl.LightningModule):
             selection_logits.shape[-1],
         )
         return selection_logits.gather(dim=2, index=gather_index).squeeze(2)
-
-    def _object_specialist_loss(self, preds, object_residual, target, valid, stage):
-        group_weight = float(
-            self.model.hparams.get("object_specialist_group_loss_weight", 0.0)
-        )
-        no_boost_weight = float(
-            self.model.hparams.get("object_specialist_no_boost_weight", 0.0)
-        )
-        if (
-            object_residual is None
-            or not self.object_specialist_specs
-            or (group_weight <= 0.0 and no_boost_weight <= 0.0)
-        ):
-            return preds.new_zeros(())
-
-        actions = target["actions"].to(device=preds.device, dtype=torch.long)
-        object_cls = target["object_cls"].to(device=preds.device, dtype=torch.long)
-        object_valid = target["object_valid"].to(device=preds.device, dtype=torch.bool)
-        total = preds.new_zeros(())
-
-        group_losses = []
-        no_boost_losses = []
-        for group_name, spec in self.object_specialist_specs.items():
-            action_idx = spec["actions"].to(device=preds.device)
-            object_idx = spec["objects"].to(device=preds.device)
-
-            in_group = torch.isin(actions, action_idx) & valid
-            if group_weight > 0.0 and in_group.any():
-                group_logits = preds.index_select(2, action_idx)[in_group]
-                group_labels = actions[in_group]
-                group_targets = (
-                    group_labels[:, None] == action_idx[None, :]
-                ).long().argmax(dim=1)
-                group_losses.append(F.cross_entropy(group_logits, group_targets))
-
-            object_visible = (
-                torch.isin(object_cls, object_idx) & object_valid
-            ).any(dim=1)
-            outside_group_visible = (~torch.isin(actions, action_idx)) & valid
-            outside_group_visible = outside_group_visible & object_visible[:, None]
-            if no_boost_weight > 0.0 and outside_group_visible.any():
-                residual_group = object_residual.index_select(2, action_idx)
-                max_boost = residual_group[outside_group_visible].max(dim=-1).values
-                margin = float(
-                    self.model.hparams.get("object_specialist_no_boost_margin", 0.02)
-                )
-                no_boost_losses.append(F.relu(max_boost - margin).mean())
-
-        if group_losses:
-            loss_group = torch.stack(group_losses).mean()
-            total = total + loss_group * group_weight
-            self.log(
-                f"{stage}_loss_object_specialist_group",
-                loss_group,
-                on_step=stage == "train",
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-                sync_dist=True,
-            )
-        if no_boost_losses:
-            loss_no_boost = torch.stack(no_boost_losses).mean()
-            total = total + loss_no_boost * no_boost_weight
-            self.log(
-                f"{stage}_loss_object_specialist_no_boost",
-                loss_no_boost,
-                on_step=stage == "train",
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-                sync_dist=True,
-            )
-        return total
 
     def _pose_heatmap_pred(self, hm_preds):
         if not torch.is_tensor(hm_preds):
@@ -1085,10 +975,7 @@ class HeatmapModule(pl.LightningModule):
         valid_preds = preds[valid]
         valid_labels = actions[valid]
         loss_action = loss_fn(valid_preds, valid_labels)
-        if self._use_specialist_only_relation_loss():
-            loss = valid_preds.sum() * 0.0
-        else:
-            loss = loss_action
+        loss = loss_action
         self.log(
             f"{stage}_loss_action",
             loss_action,
@@ -1304,15 +1191,6 @@ class HeatmapModule(pl.LightningModule):
                     prog_bar=False,
                     logger=True,
                     sync_dist=True,
-                )
-
-            if self.model.hparams.get("object_specialist_heads", 0):
-                loss = loss + self._object_specialist_loss(
-                    preds,
-                    object_residual,
-                    target,
-                    valid,
-                    stage,
                 )
 
             if stage == "train":
@@ -1680,91 +1558,6 @@ class HeatmapModule(pl.LightningModule):
         other_logits.scatter_(1, labels[:, None], -torch.inf)
         return true_logits - other_logits.max(dim=1).values
 
-    def _group_classification_margin(self, logits, labels, group_idx):
-        group_logits = logits.index_select(1, group_idx)
-        group_targets = (labels[:, None] == group_idx[None, :]).long().argmax(dim=1)
-        true_logits = group_logits.gather(1, group_targets[:, None]).squeeze(1)
-        other_logits = group_logits.clone()
-        other_logits.scatter_(1, group_targets[:, None], -torch.inf)
-        return true_logits - other_logits.max(dim=1).values
-
-    def _log_specialist_ablation_metrics(self, normal_logits, labels, off, shuffled):
-        if not self.object_specialist_specs or labels.numel() == 0:
-            return
-
-        comparisons = []
-        if off is not None:
-            comparisons.append(("off", off[0], off[1]))
-        if shuffled is not None:
-            comparisons.append(("shuffled", shuffled[0], shuffled[1]))
-        if not comparisons:
-            return
-
-        for group_name, spec in self.object_specialist_specs.items():
-            group_idx = spec["actions"].to(device=labels.device)
-            group_mask = torch.isin(labels, group_idx)
-            if not group_mask.any():
-                continue
-
-            normal_group = normal_logits[group_mask]
-            labels_group = labels[group_mask]
-            normal_margin = self._group_classification_margin(
-                normal_group,
-                labels_group,
-                group_idx,
-            )
-            normal_full = normal_logits[group_mask]
-            normal_pred = normal_full.argmax(dim=1)
-            normal_correct = normal_pred == labels_group
-            self._log_scalar(
-                f"val_{group_name}_objects_on_group_margin",
-                normal_margin.mean(),
-                labels_group.numel(),
-            )
-
-            for mode_name, mode_logits, mode_labels in comparisons:
-                if mode_logits.shape != normal_logits.shape or not torch.equal(
-                    mode_labels,
-                    labels,
-                ):
-                    raise ValueError(
-                        f"Object {mode_name} specialist diagnostic returned "
-                        "misaligned logits/labels"
-                    )
-                mode_group = mode_logits[group_mask]
-                mode_margin = self._group_classification_margin(
-                    mode_group,
-                    labels_group,
-                    group_idx,
-                )
-                mode_full = mode_logits[group_mask]
-                mode_pred = mode_full.argmax(dim=1)
-                mode_correct = mode_pred == labels_group
-                changed = normal_pred != mode_pred
-                correct_change = changed & normal_correct & ~mode_correct
-                wrong_change = changed & ~normal_correct & mode_correct
-
-                self._log_scalar(
-                    f"val_{group_name}_margin_gain_on_vs_{mode_name}",
-                    (normal_margin - mode_margin).mean(),
-                    labels_group.numel(),
-                )
-                self._log_scalar(
-                    f"val_{group_name}_pred_changed_on_vs_{mode_name}",
-                    changed.float().mean(),
-                    labels_group.numel(),
-                )
-                self._log_scalar(
-                    f"val_{group_name}_correct_changes_on_vs_{mode_name}",
-                    correct_change.float().mean(),
-                    labels_group.numel(),
-                )
-                self._log_scalar(
-                    f"val_{group_name}_wrong_changes_on_vs_{mode_name}",
-                    wrong_change.float().mean(),
-                    labels_group.numel(),
-                )
-
     def _log_object_delta_metrics(
         self,
         normal_logits,
@@ -2027,13 +1820,6 @@ class HeatmapModule(pl.LightningModule):
             positive_erased=erased_data,
             shuffled=shuffled_data,
         )
-        self._log_specialist_ablation_metrics(
-            normal_preds,
-            labels,
-            off_data,
-            shuffled_data,
-        )
-
     def training_step(self, batch, batch_idx):
         # "batch" is the output of the training data loader.
         if isinstance(batch, torch._utils.ExceptionWrapper):
