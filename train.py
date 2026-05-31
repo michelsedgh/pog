@@ -326,7 +326,7 @@ def build_parser():
     parser.add_argument("--object_heatmap_weight", type=float, default=200.0)
     parser.add_argument("--object_interaction_loss_weight", type=float, default=0.05)
     parser.add_argument("--object_warmup_freeze_actor_path", type=int, default=0)
-    parser.add_argument("--object_residual_l2_weight", type=float, default=0.0)
+    parser.add_argument("--object_feature_l2_weight", type=float, default=0.0)
     parser.add_argument("--object_counterfactual_margin_weight", type=float, default=0.0)
     parser.add_argument("--object_counterfactual_margin", type=float, default=0.05)
     parser.add_argument("--object_counterfactual_branch_grad", type=int, default=0)

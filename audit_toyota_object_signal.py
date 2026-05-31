@@ -268,7 +268,7 @@ def print_table(title, rows, headers):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Audit Toyota object-cache signal for object specialist groups."
+        description="Audit Toyota object-cache signal for object-sensitive actions."
     )
     parser.add_argument("--object_cache", required=True)
     parser.add_argument("--split", default="val", choices=["train", "val", "test"])
@@ -399,7 +399,7 @@ def main():
     print(f"base predictions: {'yes' if base_preds else 'no'}")
 
     print_table(
-        "Specialist Group Coverage",
+        "Object-Sensitive Group Coverage",
         group_rows,
         [
             "group",

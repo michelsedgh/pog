@@ -8,6 +8,13 @@ import pandas as pd
 import os
 from losses.softtarget import SoftTargetCrossEntropy
 from losses.heatmap_loss import KeypointMSELoss
+from losses.object_interaction_losses import (
+    feature_delta_l2,
+    interaction_heatmap_loss,
+    objectless_consistency_loss,
+    positive_erased_margin_loss,
+    positive_object_selection_loss,
+)
 import pickle
 from datasets.object_vocab import GROUPS
 from datasets.toyotasm import CS_DICT, CV_DICT
@@ -146,18 +153,7 @@ class HeatmapModule(pl.LightningModule):
                 "model.net.bbox_mlp",
                 "model.actor_head",
                 "model.presence_head",
-                "model.object_cls_embed",
-                "model.object_bbox_mlp",
-                "model.object_conf_mlp",
-                "model.object_visual_mlp",
-                "model.object_valid_embed",
-                "model.object_actor_query",
-                "model.object_actor_key",
-                "model.object_actor_value",
-                "model.object_actor_geom_bias",
-                "model.object_fusion_norm",
-                "model.object_fusion_adapter",
-                "model.object_relation_gate_logit",
+                "model.object_interaction",
             ]
             if self.model.hparams.get("use_register_tokens", 0):
                 allowed_missing.append("model.net.register_tokens")
@@ -220,12 +216,8 @@ class HeatmapModule(pl.LightningModule):
             )
         )
 
-    def _object_relation_params(self):
-        params = []
-        for module in self.model._object_relation_modules():
-            params.extend(module.parameters())
-        params.append(self.model.object_relation_gate_logit)
-        return params
+    def _object_interaction_params(self):
+        return list(self.model.object_interaction.parameters())
 
     def _head_params(self):
         if not self.actor_prompt:
@@ -234,13 +226,13 @@ class HeatmapModule(pl.LightningModule):
         if self.object_prompt and self.model.hparams.get(
             "object_warmup_freeze_actor_path", 0
         ):
-            return self._object_relation_params()
+            return self._object_interaction_params()
 
         params = list(self.model.actor_head.parameters())
         if self.model.presence_head is not None:
             params += list(self.model.presence_head.parameters())
         if self.object_prompt:
-            params += self._object_relation_params()
+            params += self._object_interaction_params()
         for name, param in self.model.net.named_parameters():
             if self._actor_prompt_param_name(name):
                 params.append(param)
@@ -487,31 +479,22 @@ class HeatmapModule(pl.LightningModule):
             )
 
         weighted_loss = normal_logits.new_zeros(())
-        margin_losses = []
         if margin_weight > 0.0 and object_mask.any():
-            normal_object = normal_valid[object_mask]
-            labels_object = labels_valid[object_mask]
-            normal_true = normal_object.gather(
-                1,
-                labels_object[:, None],
-            ).squeeze(1)
             margin = float(self.model.hparams.get("object_counterfactual_margin", 0.05))
+            loss_margin = positive_erased_margin_loss(
+                normal_valid,
+                labels_valid,
+                object_mask,
+                margin,
+                erased_logits=None if erased_logits is None else erased_logits[valid].float(),
+                shuffled_logits=(
+                    None if shuffled_logits is None else shuffled_logits[valid].float()
+                ),
+            )
+        else:
+            loss_margin = None
 
-            if erased_logits is not None:
-                erased_true = erased_logits[valid].float()[object_mask].gather(
-                    1,
-                    labels_object[:, None],
-                ).squeeze(1)
-                margin_losses.append(F.relu(margin - (normal_true - erased_true)))
-            if shuffled_logits is not None:
-                shuffled_true = shuffled_logits[valid].float()[object_mask].gather(
-                    1,
-                    labels_object[:, None],
-                ).squeeze(1)
-                margin_losses.append(F.relu(margin - (normal_true - shuffled_true)))
-
-        if margin_losses:
-            loss_margin = torch.cat(margin_losses).mean()
+        if loss_margin is not None:
             weighted_loss = weighted_loss + loss_margin * margin_weight
             self.log(
                 "train_loss_object_counterfactual_margin",
@@ -523,14 +506,16 @@ class HeatmapModule(pl.LightningModule):
                 sync_dist=True,
             )
 
-        if consistency_weight > 0.0 and none_mask.any() and off_logits is not None:
-            normal_none = normal_valid[none_mask]
-            off_none = off_logits[valid].float()[none_mask]
-            loss_consistency = F.kl_div(
-                F.log_softmax(normal_none, dim=-1),
-                F.softmax(off_none, dim=-1),
-                reduction="batchmean",
+        if consistency_weight > 0.0 and off_logits is not None:
+            loss_consistency = objectless_consistency_loss(
+                normal_valid,
+                off_logits[valid].float(),
+                none_mask,
             )
+        else:
+            loss_consistency = None
+
+        if loss_consistency is not None:
             weighted_loss = weighted_loss + loss_consistency * consistency_weight
             self.log(
                 "train_loss_objectless_consistency",
@@ -549,24 +534,10 @@ class HeatmapModule(pl.LightningModule):
             return None
         if selection_logits.ndim == 3:
             return selection_logits
-        if selection_logits.ndim != 4:
-            raise RuntimeError(
-                "Object selection must have shape [B, K, M+1] for the clean "
-                "feature-fusion path, or legacy [B, K, C, M+1]; "
-                f"got {tuple(selection_logits.shape)}"
-            )
-        labels = target["actions"].to(
-            device=selection_logits.device,
-            dtype=torch.long,
+        raise RuntimeError(
+            "Object selection must have shape [B, K, M+1] for the clean "
+            f"feature-fusion path; got {tuple(selection_logits.shape)}"
         )
-        labels = labels.clamp(0, selection_logits.shape[2] - 1)
-        gather_index = labels[:, :, None, None].expand(
-            -1,
-            -1,
-            1,
-            selection_logits.shape[-1],
-        )
-        return selection_logits.gather(dim=2, index=gather_index).squeeze(2)
 
     def _pose_heatmap_pred(self, hm_preds):
         if not torch.is_tensor(hm_preds):
@@ -749,16 +720,17 @@ class HeatmapModule(pl.LightningModule):
                 int(valid_count.item()),
             )
 
-    def _log_object_relation_gate(self, stage):
+    def _log_object_fusion_gate(self, stage):
         if not (
             self.object_prompt
-            and hasattr(self.model, "object_relation_gate_logit")
+            and hasattr(self.model, "object_interaction")
+            and hasattr(self.model.object_interaction, "fusion_gate_logit")
         ):
             return
-        gate = torch.sigmoid(self.model.object_relation_gate_logit.detach())
+        gate = torch.sigmoid(self.model.object_interaction.fusion_gate_logit.detach())
         gate_mean = gate.mean()
         self.log(
-            f"{stage}_object_relation_gate",
+            f"{stage}_object_fusion_gate",
             gate_mean,
             on_step=stage == "train",
             on_epoch=True,
@@ -768,12 +740,12 @@ class HeatmapModule(pl.LightningModule):
         )
         if gate.ndim > 0 and stage != "train":
             self._log_scalar(
-                f"{stage}_object_relation_gate_min",
+                f"{stage}_object_fusion_gate_min",
                 gate.min(),
                 gate.numel(),
             )
             self._log_scalar(
-                f"{stage}_object_relation_gate_max",
+                f"{stage}_object_fusion_gate_max",
                 gate.max(),
                 gate.numel(),
             )
@@ -965,7 +937,7 @@ class HeatmapModule(pl.LightningModule):
             presence_logits,
             selection_logits,
             interaction_heatmap,
-            object_residual,
+            object_feature_delta,
         ) = self._unpack_model_data(data)
         target_action_selection_logits = self._selection_logits_for_target_action(
             selection_logits,
@@ -1032,7 +1004,7 @@ class HeatmapModule(pl.LightningModule):
                 loss = loss + loss_kp * kp_loss_weight
 
         if self.object_prompt:
-            self._log_object_relation_gate(stage)
+            self._log_object_fusion_gate(stage)
             pred_obj = self._object_heatmap_pred(hm_preds)
             object_heatmap_weight = float(
                 self.model.hparams.get("object_heatmap_weight", 200.0)
@@ -1099,20 +1071,12 @@ class HeatmapModule(pl.LightningModule):
                 ).any(dim=-1)
                 if inter_valid.any():
                     inter_valid = inter_valid & positive_mask.any(dim=-1)
-                if inter_valid.any():
-                    log_probs = F.log_softmax(
-                        target_action_selection_logits.float(),
-                        dim=-1,
-                    )
-                    valid_log_probs = log_probs[inter_valid]
-                    valid_positive_mask = positive_mask[inter_valid]
-                    mask_value = torch.finfo(valid_log_probs.dtype).min
-                    selected_log_prob = torch.logsumexp(
-                        valid_log_probs.masked_fill(~valid_positive_mask, mask_value),
-                        dim=-1,
-                    )
-                    loss_interaction = -selected_log_prob.mean()
-                else:
+                loss_interaction = positive_object_selection_loss(
+                    target_action_selection_logits,
+                    positive_mask,
+                    inter_valid,
+                )
+                if loss_interaction is None:
                     loss_interaction = target_action_selection_logits.new_zeros(())
                 loss = loss + loss_interaction * self.model.hparams.get(
                     "object_interaction_loss_weight", 0.05
@@ -1146,22 +1110,16 @@ class HeatmapModule(pl.LightningModule):
                     heatmap_valid = heatmap_valid & ~dropped_positive.to(
                         device=heatmap_valid.device
                     )
-                if heatmap_valid.any():
-                    target_heatmap = target["interaction_heatmap"].to(
-                        device=interaction_heatmap.device,
-                        dtype=interaction_heatmap.dtype,
-                    )
-                    if target_heatmap.shape[-2:] != interaction_heatmap.shape[-2:]:
-                        raise RuntimeError(
-                            "interaction_heatmap target/prediction size mismatch: "
-                            f"{target_heatmap.shape[-2:]} vs "
-                            f"{interaction_heatmap.shape[-2:]}"
-                        )
-                    loss_interaction_heatmap = F.mse_loss(
-                        interaction_heatmap[heatmap_valid],
-                        target_heatmap[heatmap_valid],
-                    )
-                else:
+                target_heatmap = target["interaction_heatmap"].to(
+                    device=interaction_heatmap.device,
+                    dtype=interaction_heatmap.dtype,
+                )
+                loss_interaction_heatmap = interaction_heatmap_loss(
+                    interaction_heatmap,
+                    target_heatmap,
+                    heatmap_valid,
+                )
+                if loss_interaction_heatmap is None:
                     loss_interaction_heatmap = interaction_heatmap.new_zeros(())
                 loss = loss + loss_interaction_heatmap * self.model.hparams.get(
                     "object_interaction_heatmap_weight", 0.0
@@ -1176,16 +1134,15 @@ class HeatmapModule(pl.LightningModule):
                     sync_dist=True,
                 )
 
-            residual_weight = float(
-                self.model.hparams.get("object_residual_l2_weight", 0.0)
+            feature_l2_weight = float(
+                self.model.hparams.get("object_feature_l2_weight", 0.0)
             )
-            if object_residual is not None and residual_weight > 0.0:
-                residual_valid = object_residual[valid].float()
-                loss_residual = residual_valid.square().mean()
-                loss = loss + loss_residual * residual_weight
+            if object_feature_delta is not None and feature_l2_weight > 0.0:
+                loss_feature_l2 = feature_delta_l2(object_feature_delta, valid)
+                loss = loss + loss_feature_l2 * feature_l2_weight
                 self.log(
-                    f"{stage}_loss_object_residual_l2",
-                    loss_residual,
+                    f"{stage}_loss_object_feature_l2",
+                    loss_feature_l2,
                     on_step=stage == "train",
                     on_epoch=True,
                     prog_bar=False,
@@ -1220,7 +1177,7 @@ class HeatmapModule(pl.LightningModule):
                 presence_logits,
                 selection_logits,
                 interaction_heatmap,
-                object_residual,
+                object_feature_delta,
             ) = data
         elif len(data) == 5:
             (
@@ -1230,29 +1187,29 @@ class HeatmapModule(pl.LightningModule):
                 selection_logits,
                 interaction_heatmap,
             ) = data
-            object_residual = None
+            object_feature_delta = None
         elif len(data) == 4:
             preds, hm_preds, presence_logits, selection_logits = data
             interaction_heatmap = None
-            object_residual = None
+            object_feature_delta = None
         elif len(data) == 3:
             preds, hm_preds, presence_logits = data
             selection_logits = None
             interaction_heatmap = None
-            object_residual = None
+            object_feature_delta = None
         else:
             preds, hm_preds = data
             presence_logits = None
             selection_logits = None
             interaction_heatmap = None
-            object_residual = None
+            object_feature_delta = None
         return (
             preds,
             hm_preds,
             presence_logits,
             selection_logits,
             interaction_heatmap,
-            object_residual,
+            object_feature_delta,
         )
 
     def _first_actor_targets(self, imgs, target):
@@ -1558,7 +1515,7 @@ class HeatmapModule(pl.LightningModule):
         other_logits.scatter_(1, labels[:, None], -torch.inf)
         return true_logits - other_logits.max(dim=1).values
 
-    def _log_object_delta_metrics(
+    def _log_object_feature_shift_metrics(
         self,
         normal_logits,
         labels,
@@ -1592,7 +1549,7 @@ class HeatmapModule(pl.LightningModule):
             mode_margin = self._classification_margin(mode_logits, labels)
             pred_changed = normal_logits.argmax(dim=1) != mode_logits.argmax(dim=1)
             self._log_scalar(
-                f"val_object_delta_l1_on_vs_{mode_name}",
+                f"val_object_logit_shift_l1_on_vs_{mode_name}",
                 (normal_logits - mode_logits).abs().mean(),
                 normal_logits.numel(),
             )
@@ -1806,7 +1763,7 @@ class HeatmapModule(pl.LightningModule):
         shuffled_data = (
             None if shuffled_preds is None else (shuffled_preds, shuffled_labels)
         )
-        self._log_object_delta_metrics(
+        self._log_object_feature_shift_metrics(
             normal_preds,
             labels,
             positive_erased=erased_data,

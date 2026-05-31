@@ -1,4 +1,4 @@
-# Object Relation Architecture
+# Object Interaction Architecture
 
 ## Problem
 
@@ -48,13 +48,13 @@ Suggested settings:
 - `--freeze_backbone 1`
 - `--object_warmup_freeze_actor_path 1`
 - `--object_fusion_gate_init 0.04`
-- `--object_delta_scale 0.5`
-- `--object_relation_hidden_dim 512`
-- `--object_relation_dropout 0.05`
+- `--object_feature_scale 0.5`
+- `--object_interaction_hidden_dim 512`
+- `--object_interaction_dropout 0.05`
 - `--object_heatmap_weight 50`
 - `--object_interaction_loss_weight 0.10`
 - `--object_interaction_heatmap_weight 50`
-- `--object_residual_l2_weight 0.02`
+- `--object_feature_l2_weight 0.02`
 - `--object_counterfactual_margin_weight 0.10`
 - `--object_counterfactual_margin 0.05`
 - `--object_objectless_consistency_weight 0.03`
