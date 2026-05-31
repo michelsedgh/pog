@@ -49,6 +49,27 @@ TOYOTA_CS_ACTION_TO_INDEX = {
     "WatchTV": 30,
 }
 
+OBJECT_RESIDUAL_ACTION_MASKS = {
+    "none": [],
+    "strong": [
+        "Drink.Frombottle",
+        "Drink.Fromcup",
+        "Drink.Fromglass",
+        "Readbook",
+        "Uselaptop",
+        "Usetelephone",
+    ],
+    "strong_plus_watchtv": [
+        "Drink.Frombottle",
+        "Drink.Fromcup",
+        "Drink.Fromglass",
+        "Readbook",
+        "Uselaptop",
+        "Usetelephone",
+        "WatchTV",
+    ],
+}
+
 
 def load_state_dict(
     model, state_dict, prefix="", ignore_missing="relative_position_index"
@@ -410,6 +431,7 @@ class POGUISE(pl.LightningModule):
             raise ValueError("object_prompt requires num_object_classes > 0")
         dim = self.net.num_features
         self.num_object_classes = num_object_classes
+        num_classes = int(self.hparams.num_classes)
         hidden_dim = int(self.hparams.get("object_relation_hidden_dim", 512))
         if hidden_dim <= 0:
             raise ValueError("object_relation_hidden_dim must be positive")
@@ -424,6 +446,36 @@ class POGUISE(pl.LightningModule):
             raise ValueError("object_delta_scale must be positive")
         self.object_specialist_heads_enabled = bool(
             self.hparams.get("object_specialist_heads", 0)
+        )
+        residual_action_mask = str(
+            self.hparams.get("object_residual_action_mask", "none")
+        )
+        if residual_action_mask not in OBJECT_RESIDUAL_ACTION_MASKS:
+            raise ValueError(
+                "object_residual_action_mask must be one of "
+                + ", ".join(sorted(OBJECT_RESIDUAL_ACTION_MASKS))
+            )
+        if residual_action_mask != "none" and int(self.hparams.num_classes) != 31:
+            raise ValueError(
+                "object_residual_action_mask currently supports Toyota CS 31 classes"
+            )
+        residual_mask = torch.ones(num_classes, dtype=torch.float32)
+        masked_actions = OBJECT_RESIDUAL_ACTION_MASKS[residual_action_mask]
+        if masked_actions:
+            residual_mask.zero_()
+            residual_mask[
+                [TOYOTA_CS_ACTION_TO_INDEX[action] for action in masked_actions]
+            ] = 1.0
+            print(
+                "Object residual action mask: "
+                + residual_action_mask
+                + " -> "
+                + ", ".join(masked_actions)
+            )
+        self.register_buffer(
+            "object_residual_action_mask",
+            residual_mask,
+            persistent=False,
         )
         interaction_heatmap_size = int(self.hparams.get("object_heatmap_size", 56))
         if interaction_heatmap_size != 56:
@@ -450,7 +502,6 @@ class POGUISE(pl.LightningModule):
             nn.GELU(),
             nn.Linear(dim, dim),
         )
-        num_classes = int(self.hparams.num_classes)
         self.object_action_embed = nn.Embedding(num_classes, dim)
         self.object_action_query = nn.Sequential(
             nn.LayerNorm(dim * 3),
@@ -937,7 +988,12 @@ class POGUISE(pl.LightningModule):
             device=bounded_delta.device,
             dtype=bounded_delta.dtype,
         )
+        residual_action_mask = self.object_residual_action_mask.to(
+            device=bounded_delta.device,
+            dtype=bounded_delta.dtype,
+        )
         residual = bounded_delta * class_gate[None, None, :] * real_object_mass
+        residual = residual * residual_action_mask[None, None, :]
         return residual, selection_logits, interaction_heatmap
 
     def _object_specialist_relation(
@@ -1227,6 +1283,7 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--object_relation_gate_init", type=float, default=0.25)
         parser.add_argument("--object_action_gate_init", type=float, default=0.05)
         parser.add_argument("--object_delta_scale", type=float, default=1.0)
+        parser.add_argument("--object_residual_action_mask", type=str, default="none")
         parser.add_argument("--object_specialist_heads", type=int, default=0)
         parser.add_argument("--object_relation_only", type=int, default=0)
         parser.add_argument(
