@@ -156,6 +156,17 @@ Toyota validation may still show `Uselaptop = 1.0` across modes. That does not
 prove the live laptop case is fixed. The saved live tensor sensitivity test is
 mandatory for that.
 
+Use the repo summarizer instead of copy-pasting ad-hoc metric scripts:
+
+```bash
+python3 object_actor_live/summarize_object_metrics.py \
+  --run /mnt/local-scratch/poguise_data/checkpoints/YOUR_RUN_DIR
+```
+
+The summarizer prints global on/off/shuffled metrics, object-interaction margins,
+selection mass/accuracy, object IoU/recall, and per-class/per-group object
+ablations for the object-sensitive actions.
+
 ## Live Tensor Sensitivity Test
 
 After training a new decoder checkpoint:
