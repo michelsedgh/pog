@@ -7,7 +7,7 @@ Use this path for checkpoints trained with:
 - `object_prompt=1`
 - RF-DETR object candidates at inference
 - actor slots
-- object feature fusion
+- transformer object tokens
 
 Do not use the old `live_actor_dashboard.py` for object-interaction checkpoints. The old dashboard only feeds person boxes. This dashboard feeds:
 
@@ -37,7 +37,7 @@ ls -lh checkpoints/object_actor/epoch=004.ckpt
 
 If your uploaded file has another name, pass that path to `--checkpoint`.
 
-## 3. Export TensorRT
+## 3. Export Actor ONNX / TensorRT
 
 ```bash
 python object_actor_live/export_object_actor_tensorrt.py \
@@ -50,6 +50,8 @@ python object_actor_live/export_object_actor_tensorrt.py \
 ```
 
 This script delegates to `utils/export_actor_tensorrt.py`, verifies that the checkpoint is an object-prompt checkpoint, builds a fixed-shape ONNX file, builds a TensorRT engine with `trtexec`, and smoke-tests the object inputs.
+
+For object-token checkpoints, validate TensorRT numerics against ONNX/PyTorch before trusting the engine. On Orin, FP16 TensorRT may build successfully while changing action logits for this architecture. If the TensorRT actor engine is not numerically faithful, run the actor through ONNX Runtime CUDA with `--onnx` and keep RF-DETR on TensorRT.
 
 ## 4. Export RF-DETR TensorRT
 
@@ -74,11 +76,11 @@ object_actor_live/exports/rfdetr_nano/inference_model_fp16.engine
 
 ## 5. Run Live Dashboard
 
-Use the engine printed by the export step:
+Use the actor backend that passed numeric validation. ONNX Runtime CUDA is the safer actor backend for object-token checkpoints:
 
 ```bash
 python object_actor_live/live_object_actor_dashboard.py \
-  --engine object_actor_live/exports/epoch004/epoch=004_b1_t16_k8_m24_224_fp16.engine \
+  --onnx object_actor_live/exports/epoch004/epoch=004_b1_t16_k8_m24_224.onnx \
   --detector-backend tensorrt \
   --detector-engine object_actor_live/exports/rfdetr_nano/inference_model_fp16.engine \
   --camera 0 \
@@ -94,13 +96,15 @@ python object_actor_live/live_object_actor_dashboard.py \
   --action-every 5
 ```
 
+Use `--engine ...fp16.engine` only after confirming that TensorRT matches ONNX/PyTorch on saved live inputs.
+
 Open the printed LAN URL from another device on the same network.
 
 For a smoke test without a camera:
 
 ```bash
 python object_actor_live/live_object_actor_dashboard.py \
-  --engine object_actor_live/exports/epoch004/epoch=004_b1_t16_k8_m24_224_fp16.engine \
+  --onnx object_actor_live/exports/epoch004/epoch=004_b1_t16_k8_m24_224.onnx \
   --smoke
 ```
 
@@ -109,4 +113,5 @@ python object_actor_live/live_object_actor_dashboard.py \
 - TensorRT engines are hardware/version specific. Build the engine on the Orin Nano that will run it.
 - Keep `batch_size=1`, `clip_frames=16`, `max_actors=8`, and `max_objects=24` unless the checkpoint was trained differently.
 - The live dashboard uses RF-DETR detections from the current video stream. It does not use the Toyota JSONL cache.
+- `--debug-save-latest-input path.pt` writes the exact actor tensors and object packing from the latest action step. Use it to compare PyTorch, ONNX Runtime, and TensorRT on the same live input.
 - If the live camera is slow, increase `--detect-every`. If object behavior looks stale, lower `--detect-every`.

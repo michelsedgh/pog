@@ -7,8 +7,9 @@ import torch.nn as nn
 class ObjectInteractionHead(nn.Module):
     """Actor/object selection head for object-token PO-GUISE+.
 
-    Object candidates are already embedded into the transformer token sequence.
-    This head only reads the final actor and object tokens to produce:
+    Object candidates are already embedded into the transformer token sequence
+    with pooled object-region patch features. This head reads final actor/object
+    tokens plus actor-object union visual features to produce:
       * actor-conditioned object/NONE selection logits
       * actor-conditioned interaction heatmaps built from selected object boxes
 
@@ -40,22 +41,20 @@ class ObjectInteractionHead(nn.Module):
             int(interaction_heatmap_size),
         )
         self.none_token = nn.Parameter(torch.zeros(1, 1, feature_dim))
-        self.actor_query = nn.Sequential(
+        self.pair_visual_proj = nn.Sequential(
             nn.LayerNorm(feature_dim),
             nn.Linear(feature_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, feature_dim),
         )
-        self.object_key = nn.Sequential(
-            nn.LayerNorm(feature_dim),
-            nn.Linear(feature_dim, feature_dim),
-        )
-        self.geometry_bias = nn.Sequential(
-            nn.LayerNorm(10),
-            nn.Linear(10, max(32, hidden_dim // 4)),
+        selector_dim = feature_dim * 4 + 10
+        self.selector = nn.Sequential(
+            nn.LayerNorm(selector_dim),
+            nn.Linear(selector_dim, hidden_dim),
             nn.GELU(),
-            nn.Linear(max(32, hidden_dim // 4), 1),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1),
         )
         nn.init.normal_(self.none_token, std=0.02)
 
@@ -156,27 +155,39 @@ class ObjectInteractionHead(nn.Module):
         actor_boxes: Optional[torch.Tensor],
         object_boxes: torch.Tensor,
         object_valid: torch.Tensor,
+        pair_visual_features: torch.Tensor,
         heatmap_size: Optional[Tuple[int, int]] = None,
     ):
         if object_tokens is None:
             raise ValueError("object_tokens are required for object interaction")
+        if pair_visual_features is None:
+            raise ValueError(
+                "pair_visual_features are required for visually grounded object interaction"
+            )
         object_valid = object_valid.to(device=actor_tokens.device, dtype=torch.bool)
         object_boxes = object_boxes.to(device=actor_tokens.device, dtype=actor_tokens.dtype)
         object_tokens = object_tokens.to(device=actor_tokens.device, dtype=actor_tokens.dtype)
+        pair_visual_features = pair_visual_features.to(
+            device=actor_tokens.device,
+            dtype=actor_tokens.dtype,
+        )
+        expected_pair_shape = (
+            actor_tokens.shape[0],
+            actor_tokens.shape[1],
+            object_tokens.shape[1],
+            actor_tokens.shape[-1],
+        )
+        if tuple(pair_visual_features.shape) != expected_pair_shape:
+            raise ValueError(
+                "pair_visual_features must have shape "
+                f"{expected_pair_shape}, got {tuple(pair_visual_features.shape)}"
+            )
 
         batch_size = actor_tokens.shape[0]
         none_token = self.none_token.to(dtype=actor_tokens.dtype).expand(batch_size, 1, -1)
         object_tokens_with_none = torch.cat([object_tokens, none_token], dim=1)
         none_valid = object_valid.new_ones((batch_size, 1))
         object_valid_with_none = torch.cat([object_valid, none_valid], dim=1)
-
-        actor_query = self.actor_query(actor_tokens)
-        object_key = self.object_key(object_tokens_with_none)
-        selection_logits = torch.einsum(
-            "bkd,bmd->bkm",
-            actor_query,
-            object_key,
-        ) / float(actor_tokens.shape[-1]) ** 0.5
 
         none_boxes = object_boxes.new_zeros((batch_size, 1, 4))
         boxes_with_none = torch.cat([object_boxes, none_boxes], dim=1)
@@ -185,7 +196,41 @@ class ObjectInteractionHead(nn.Module):
             geometry = object_boxes.new_zeros(
                 (batch_size, actor_tokens.shape[1], boxes_with_none.shape[1], 10)
             )
-        selection_logits = selection_logits + self.geometry_bias(geometry).squeeze(-1)
+        none_pair_visual = pair_visual_features.new_zeros(
+            batch_size,
+            actor_tokens.shape[1],
+            1,
+            actor_tokens.shape[-1],
+        )
+        pair_visual_features = torch.cat(
+            [pair_visual_features, none_pair_visual],
+            dim=2,
+        )
+        pair_visual_features = self.pair_visual_proj(pair_visual_features)
+
+        actor_pair = actor_tokens[:, :, None, :].expand(
+            -1,
+            -1,
+            object_tokens_with_none.shape[1],
+            -1,
+        )
+        object_pair = object_tokens_with_none[:, None, :, :].expand(
+            -1,
+            actor_tokens.shape[1],
+            -1,
+            -1,
+        )
+        selector_input = torch.cat(
+            [
+                actor_pair,
+                object_pair,
+                actor_pair * object_pair,
+                pair_visual_features,
+                geometry.to(dtype=actor_tokens.dtype),
+            ],
+            dim=-1,
+        )
+        selection_logits = self.selector(selector_input).squeeze(-1)
         selection_logits = selection_logits.masked_fill(
             ~object_valid_with_none[:, None, :],
             torch.finfo(selection_logits.dtype).min,

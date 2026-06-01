@@ -11,11 +11,13 @@ The previous object path was cleaner than the old specialist experiments, but it
 There is one active object path:
 
 1. Feed all RF-DETR object detections during training and inference.
-2. Embed object boxes, classes, confidences, and validity as transformer tokens.
+2. Embed object boxes, classes, confidences, validity, and pooled object-region
+   patch features as transformer tokens.
 3. Protect class, actor, object, register, and heatmap tokens from pruning.
 4. Let actor tokens attend to object tokens inside the PO-GUISE transformer blocks.
 5. Use the final actor tokens directly for action classification.
-6. Predict actor/object selection and actor-conditioned interaction heatmaps from the final actor/object tokens.
+6. Predict actor/object selection and actor-conditioned interaction heatmaps from
+   final actor/object tokens plus pooled actor-object union visual features.
 7. Train with visible-object heatmaps, strong-object selection targets, interaction heatmaps, positive-erased counterfactuals, shuffled-object counterfactuals, and objectless consistency.
 
 The model no longer has a post-backbone object adapter, a free logit residual, specialist rerankers, or relation-only modes. Object evidence must enter through transformer tokens and affect the actor token before `actor_head`.
@@ -48,6 +50,36 @@ The current Toyota/live configuration uses `K=8`, `M=24`, and 19 COCO-derived ob
 ```
 
 Class, actor, object, register, and heatmap tokens are semantic tokens. They are not pruned. Video-token pruning scores visual tokens using attention from all semantic tokens when `topk_type=1`.
+
+## Visual Grounding
+
+Object tokens are not metadata-only tokens. Each object token includes a pooled
+visual descriptor from the fixed patch grid:
+
+```text
+object_token =
+  object_slot_embed
++ object_cls_embed(object_cls)
++ object_bbox_mlp(object_box)
++ object_conf_mlp(object_conf)
++ object_visual_proj(pool_patch_features_inside_object_box)
++ object_valid_embed(object_valid)
+```
+
+The pooling is fixed-grid tensor math over the patch embedding output, not
+ROIAlign. This keeps the path compatible with ONNX export and avoids dynamic
+crop operations.
+
+The actor/object selection head also receives visual evidence from each
+actor-object union region:
+
+```text
+selection_score(actor, object) =
+  MLP(actor_token, object_token, actor_token * object_token, geometry, union_visual)
+```
+
+This is the intended path for learning interaction evidence such as laptop-on-lap
+or book-in-hands without hard-coded hand/nearest-object rules.
 
 ## Strong Object Targets
 

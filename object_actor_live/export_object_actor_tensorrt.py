@@ -35,6 +35,7 @@ def parse_args():
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--smoke", action="store_true", default=True)
     parser.add_argument("--no-smoke", dest="smoke", action="store_false")
+    parser.add_argument("--numeric-atol", type=float, default=0.5)
     return parser.parse_args()
 
 
@@ -61,14 +62,15 @@ def inspect_object_checkpoint(checkpoint):
     return payload
 
 
-def smoke_engine(engine_path):
+def _smoke_inputs(engine):
     import torch
 
-    engine = TensorRTActorEngine(engine_path)
-    if not engine.object_prompt:
-        raise RuntimeError("Exported TensorRT engine does not expose object inputs.")
-
-    video = torch.zeros(engine.shapes["video"], dtype=torch.float32, device="cuda")
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(1234)
+    video = torch.randn(engine.shapes["video"], generator=generator).to(
+        device="cuda",
+        dtype=torch.float32,
+    )
     boxes = torch.zeros(engine.shapes["boxes"], dtype=torch.float32, device="cuda")
     valid = torch.zeros(engine.shapes["valid"], dtype=torch.bool, device="cuda")
     boxes[0, 0] = torch.tensor([0.20, 0.12, 0.82, 0.95], device="cuda")
@@ -90,6 +92,31 @@ def smoke_engine(engine_path):
     object_cls[0, 0] = 1
     object_conf[0, 0] = 0.90
     object_valid[0, 0] = True
+    object_boxes[0, 1] = torch.tensor([0.38, 0.38, 0.58, 0.58], device="cuda")
+    object_cls[0, 1] = 0
+    object_conf[0, 1] = 0.72
+    object_valid[0, 1] = True
+    return video, boxes, valid, object_boxes, object_cls, object_conf, object_valid
+
+
+def smoke_engine(engine_path, onnx_path, numeric_atol):
+    import numpy as np
+    import onnxruntime as ort
+    import torch
+
+    engine = TensorRTActorEngine(engine_path)
+    if not engine.object_prompt:
+        raise RuntimeError("Exported TensorRT engine does not expose object inputs.")
+
+    (
+        video,
+        boxes,
+        valid,
+        object_boxes,
+        object_cls,
+        object_conf,
+        object_valid,
+    ) = _smoke_inputs(engine)
 
     logits, presence = engine(
         video,
@@ -110,6 +137,43 @@ def smoke_engine(engine_path):
         },
         flush=True,
     )
+
+    feed = {
+        "video": video.detach().cpu().numpy().astype(np.float32, copy=False),
+        "boxes": boxes.detach().cpu().numpy().astype(np.float32, copy=False),
+        "valid": valid.detach().cpu().numpy().astype(np.bool_, copy=False),
+        "object_boxes": object_boxes.detach().cpu().numpy().astype(np.float32, copy=False),
+        "object_cls": object_cls.detach().cpu().numpy().astype(np.int32, copy=False),
+        "object_conf": object_conf.detach().cpu().numpy().astype(np.float32, copy=False),
+        "object_valid": object_valid.detach().cpu().numpy().astype(np.bool_, copy=False),
+    }
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    ref_logits, ref_presence = session.run(["logits", "presence"], feed)
+    ref_logits = torch.from_numpy(ref_logits)
+    ref_presence = torch.from_numpy(ref_presence)
+    logit_diff = (logits.detach().cpu().float() - ref_logits.float()).abs().max().item()
+    presence_diff = (
+        presence.detach().cpu().float() - ref_presence.float()
+    ).abs().max().item()
+    engine_top1 = logits.detach().cpu().float().argmax(dim=-1)
+    ref_top1 = ref_logits.float().argmax(dim=-1)
+    top1_match = bool(torch.equal(engine_top1, ref_top1))
+    print(
+        "TensorRT numeric check:",
+        {
+            "max_logit_abs_diff": round(logit_diff, 6),
+            "max_presence_abs_diff": round(presence_diff, 6),
+            "top1_match": top1_match,
+            "atol": float(numeric_atol),
+        },
+        flush=True,
+    )
+    if logit_diff > float(numeric_atol) or not top1_match:
+        raise RuntimeError(
+            "TensorRT actor engine is not numerically faithful to ONNX. "
+            f"max_logit_abs_diff={logit_diff:.6f}, top1_match={top1_match}. "
+            "Use the dashboard --onnx actor backend or rebuild with a safer TensorRT config."
+        )
 
 
 def main():
@@ -178,7 +242,7 @@ def main():
     if engine_path is None or not engine_path.is_file():
         raise RuntimeError("Could not resolve exported engine path.")
     if args.smoke:
-        smoke_engine(engine_path)
+        smoke_engine(engine_path, onnx_path, args.numeric_atol)
 
     print("\nExport complete.")
     print("Engine:", engine_path)

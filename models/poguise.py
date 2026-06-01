@@ -237,6 +237,10 @@ class POGUISE(pl.LightningModule):
                 object_bbox_prior_expand=self.hparams.get(
                     "object_bbox_prior_expand", 1.25
                 ),
+                object_pool_expand=self.hparams.get("object_pool_expand", 1.2),
+                object_pair_pool_expand=self.hparams.get(
+                    "object_pair_pool_expand", 1.1
+                ),
                 return_heatmap_features=False,
             )
         else:
@@ -273,6 +277,10 @@ class POGUISE(pl.LightningModule):
                 ),
                 object_bbox_prior_expand=self.hparams.get(
                     "object_bbox_prior_expand", 1.25
+                ),
+                object_pool_expand=self.hparams.get("object_pool_expand", 1.2),
+                object_pair_pool_expand=self.hparams.get(
+                    "object_pair_pool_expand", 1.1
                 ),
                 return_heatmap_features=False,
             )
@@ -409,6 +417,7 @@ class POGUISE(pl.LightningModule):
                 "object_valid_embed",
                 "object_bbox_mlp",
                 "object_conf_mlp",
+                "object_visual_proj",
             )
         )
 
@@ -456,12 +465,12 @@ class POGUISE(pl.LightningModule):
                     object_conf=object_conf,
                 )
                 if self.object_prompt:
-                    if len(net_data) == 4:
-                        _, x_actor, x_object, x_heatmap = net_data
+                    if len(net_data) == 5:
+                        _, x_actor, x_object, x_heatmap, pair_visual_features = net_data
                     else:
                         raise RuntimeError(
                             "object_prompt backbone must return actor, object, "
-                            "and heatmap tokens"
+                            "heatmap tokens, and actor-object pair visual features"
                         )
                 elif len(net_data) == 4:
                     _, x_actor, x_heatmap, _ = net_data
@@ -489,6 +498,7 @@ class POGUISE(pl.LightningModule):
                     actor_boxes=boxes,
                     object_boxes=object_boxes,
                     object_valid=object_valid,
+                    pair_visual_features=pair_visual_features,
                     heatmap_size=(56, 56),
                 )
             else:
@@ -575,6 +585,8 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--actor_val_diagnostic_max_pairs", type=int, default=8)
         parser.add_argument("--object_bbox_prior_weight", type=float, default=0.0)
         parser.add_argument("--object_bbox_prior_expand", type=float, default=1.25)
+        parser.add_argument("--object_pool_expand", type=float, default=1.2)
+        parser.add_argument("--object_pair_pool_expand", type=float, default=1.1)
         parser.add_argument("--object_dropout_prob", type=float, default=0.0)
         parser.add_argument("--object_token_dropout_prob", type=float, default=0.0)
         parser.add_argument("--object_interaction_hidden_dim", type=int, default=512)
@@ -582,7 +594,7 @@ class POGUISE(pl.LightningModule):
         parser.add_argument(
             "--object_interaction_heatmap_weight",
             type=float,
-            default=0.0,
+            default=50.0,
         )
         parser.add_argument("--ret_feat", type=int, default=0)
         parser.add_argument("--linear_probe", type=int, default=0)

@@ -58,7 +58,7 @@ The next cells intentionally read `/content/poguise_colab_env.sh` instead of red
 
 ## Cell 2: Frozen-Backbone PO-GUISE+ Object Warmup
 
-This is the clean Actor-Object Token PO-GUISE+ warmup. The backbone and base actor path stay frozen; only the object token embeddings, actor-object selection head, and heatmap head train.
+This is the clean Actor-Object Token PO-GUISE+ warmup. The backbone and base actor path stay frozen; only the object token embeddings/projections, visual object grounding, actor-object selection head, and heatmap head train.
 
 ```python
 import os

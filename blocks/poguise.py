@@ -803,6 +803,8 @@ class VisionTransformer(nn.Module):
         num_object_classes=0,
         object_bbox_prior_weight=0.0,
         object_bbox_prior_expand=1.25,
+        object_pool_expand=1.2,
+        object_pair_pool_expand=1.1,
         return_heatmap_features=False,
         **kwargs,
     ):
@@ -841,11 +843,17 @@ class VisionTransformer(nn.Module):
             raise ValueError("num_object_classes must be non-negative")
         self.object_bbox_prior_weight = float(object_bbox_prior_weight)
         self.object_bbox_prior_expand = float(object_bbox_prior_expand)
+        self.object_pool_expand = float(object_pool_expand)
+        self.object_pair_pool_expand = float(object_pair_pool_expand)
         self.return_heatmap_features = bool(return_heatmap_features)
         if self.object_bbox_prior_weight < 0:
             raise ValueError("object_bbox_prior_weight must be non-negative")
         if self.object_bbox_prior_expand <= 0:
             raise ValueError("object_bbox_prior_expand must be positive")
+        if self.object_pool_expand <= 0:
+            raise ValueError("object_pool_expand must be positive")
+        if self.object_pair_pool_expand <= 0:
+            raise ValueError("object_pair_pool_expand must be positive")
         self.HW_OUT_CONV = (hw_out_conv, hw_out_conv)
         self.n_heatmap_tokens = self.HW_OUT_CONV[0] * self.HW_OUT_CONV[1]
         self.n_landmarks = int(n_landmarks)
@@ -977,6 +985,12 @@ class VisionTransformer(nn.Module):
                 nn.GELU(),
                 nn.Linear(self.num_features, self.num_features),
             )
+            self.object_visual_proj = nn.Sequential(
+                nn.LayerNorm(self.num_features),
+                nn.Linear(self.num_features, self.num_features),
+                nn.GELU(),
+                nn.Linear(self.num_features, self.num_features),
+            )
             nn.init.zeros_(self.object_slot_embed)
             nn.init.normal_(self.object_cls_embed.weight, std=0.02)
             nn.init.zeros_(self.object_valid_embed.weight)
@@ -984,6 +998,8 @@ class VisionTransformer(nn.Module):
             nn.init.zeros_(self.object_bbox_mlp[-1].bias)
             nn.init.zeros_(self.object_conf_mlp[-1].weight)
             nn.init.zeros_(self.object_conf_mlp[-1].bias)
+            nn.init.zeros_(self.object_visual_proj[-1].weight)
+            nn.init.zeros_(self.object_visual_proj[-1].bias)
         if self.n_heatmap_out_channels > 0:
             self.heatmap_tokens = nn.Parameter(
                 torch.randn(1, self.HW_OUT_CONV[0] * self.HW_OUT_CONV[1], embed_dim)
@@ -1027,6 +1043,7 @@ class VisionTransformer(nn.Module):
 
     def _make_object_tokens(
         self,
+        patch_feats,
         object_boxes,
         object_cls,
         object_conf,
@@ -1081,14 +1098,124 @@ class VisionTransformer(nn.Module):
         none_id = self.num_object_classes
         object_cls = object_cls.clamp(0, none_id)
         object_cls = object_cls.masked_fill(~object_valid, none_id)
+        object_visual_feat = self._pool_box_features(
+            patch_feats,
+            object_boxes,
+            object_valid,
+            expand=self.object_pool_expand,
+        )
         object_tokens = (
             self.object_slot_embed.expand(batch_size, -1, -1)
             + self.object_cls_embed(object_cls).to(dtype=dtype)
             + self.object_bbox_mlp(object_boxes)
             + self.object_conf_mlp(object_conf.unsqueeze(-1))
+            + self.object_visual_proj(object_visual_feat)
             + self.object_valid_embed(object_valid.long()).to(dtype=dtype)
         )
         return object_tokens, object_boxes, object_valid, object_conf
+
+    def _expand_boxes(self, boxes, expand):
+        boxes = boxes.clamp(0.0, 1.0)
+        center = (boxes[..., :2] + boxes[..., 2:]) * 0.5
+        size = (boxes[..., 2:] - boxes[..., :2]).clamp_min(1e-4)
+        size = size * float(expand)
+        mins = (center - size * 0.5).clamp(0.0, 1.0)
+        maxs = (center + size * 0.5).clamp(0.0, 1.0)
+        return torch.cat([mins, maxs], dim=-1)
+
+    def _pool_box_features(self, patch_feats, boxes, valid, expand=1.0):
+        """Pool patch-grid visual features inside normalized xyxy boxes.
+
+        This deliberately uses fixed tensor math instead of ROIAlign so the path
+        remains exportable. The same spatial mask is applied across all temporal
+        patch slices, producing one visual descriptor per candidate box.
+        """
+        if boxes is None or valid is None:
+            raise ValueError("boxes and valid are required for box feature pooling")
+        if patch_feats.ndim != 5:
+            raise ValueError(
+                f"patch_feats must be [B,D,T,H,W], got {tuple(patch_feats.shape)}"
+            )
+        batch_size, dim, frames, height, width = patch_feats.shape
+        if boxes.ndim != 3 or boxes.shape[0] != batch_size or boxes.shape[-1] != 4:
+            raise ValueError(
+                "boxes must have shape [B,N,4] matching patch_feats batch, "
+                f"got {tuple(boxes.shape)}"
+            )
+        if valid.shape != boxes.shape[:2]:
+            raise ValueError(
+                f"valid must have shape {tuple(boxes.shape[:2])}, got {tuple(valid.shape)}"
+            )
+
+        dtype = patch_feats.dtype
+        device = patch_feats.device
+        boxes = self._expand_boxes(boxes.to(device=device, dtype=dtype), expand)
+        valid = valid.to(device=device, dtype=torch.bool)
+
+        y_centers = (
+            torch.arange(height, device=device, dtype=dtype) + 0.5
+        ) / float(height)
+        x_centers = (
+            torch.arange(width, device=device, dtype=dtype) + 0.5
+        ) / float(width)
+        grid_y, grid_x = torch.meshgrid(y_centers, x_centers, indexing="ij")
+        grid_x = grid_x.reshape(1, 1, height, width)
+        grid_y = grid_y.reshape(1, 1, height, width)
+
+        x1 = boxes[..., 0].reshape(batch_size, boxes.shape[1], 1, 1)
+        y1 = boxes[..., 1].reshape(batch_size, boxes.shape[1], 1, 1)
+        x2 = boxes[..., 2].reshape(batch_size, boxes.shape[1], 1, 1)
+        y2 = boxes[..., 3].reshape(batch_size, boxes.shape[1], 1, 1)
+        softness = 1.0 / float(max(height, width))
+        mask = (
+            torch.sigmoid((grid_x - x1) / softness)
+            * torch.sigmoid((x2 - grid_x) / softness)
+            * torch.sigmoid((grid_y - y1) / softness)
+            * torch.sigmoid((y2 - grid_y) / softness)
+        )
+        mask = mask * valid[:, :, None, None].to(dtype=dtype)
+
+        weighted = patch_feats[:, None, :, :, :, :] * mask[:, :, None, None, :, :]
+        numerator = weighted.sum(dim=(-1, -2, -3))
+        denominator = (mask.sum(dim=(-1, -2)) * float(frames)).clamp_min(1e-6)
+        return numerator / denominator.unsqueeze(-1)
+
+    def _pool_actor_object_union_features(
+        self,
+        patch_feats,
+        actor_boxes,
+        actor_valid,
+        object_boxes,
+        object_valid,
+    ):
+        if actor_boxes is None or actor_valid is None:
+            raise ValueError("actor boxes and validity are required for pair pooling")
+        actor_boxes = actor_boxes.to(device=patch_feats.device, dtype=patch_feats.dtype)
+        object_boxes = object_boxes.to(device=patch_feats.device, dtype=patch_feats.dtype)
+        actor_valid = actor_valid.to(device=patch_feats.device, dtype=torch.bool)
+        object_valid = object_valid.to(device=patch_feats.device, dtype=torch.bool)
+
+        union_min = torch.minimum(
+            actor_boxes[:, :, None, :2],
+            object_boxes[:, None, :, :2],
+        )
+        union_max = torch.maximum(
+            actor_boxes[:, :, None, 2:],
+            object_boxes[:, None, :, 2:],
+        )
+        union_boxes = torch.cat([union_min, union_max], dim=-1)
+        pair_valid = actor_valid[:, :, None] & object_valid[:, None, :]
+
+        batch_size, num_actors, num_objects, _ = union_boxes.shape
+        flat_boxes = union_boxes.reshape(batch_size, num_actors * num_objects, 4)
+        flat_valid = pair_valid.reshape(batch_size, num_actors * num_objects)
+        pooled = self._pool_box_features(
+            patch_feats,
+            flat_boxes,
+            flat_valid,
+            expand=self.object_pair_pool_expand,
+        )
+        return pooled.reshape(batch_size, num_actors, num_objects, -1)
 
     def _make_box_token_prior(self, boxes, valid, window_size, expand=1.0, conf=None):
         frames, height, width = [int(v) for v in window_size]
@@ -1178,6 +1305,7 @@ class VisionTransformer(nn.Module):
         # x_list, images_whwh = self.preprocess_image(x_list)
 
         x = self.patch_embed(x)  # (B, C_e, t, h, w)
+        patch_feats = x
         ws = x.shape[2:]
 
         num_frames = x.shape[2]
@@ -1203,6 +1331,7 @@ class VisionTransformer(nn.Module):
         object_valid_for_prior = None
         object_conf_for_prior = None
         object_tokens = None
+        pair_visual_features = None
         if self.n_object_tokens > 0:
             (
                 object_tokens,
@@ -1210,6 +1339,7 @@ class VisionTransformer(nn.Module):
                 object_valid_for_prior,
                 object_conf_for_prior,
             ) = self._make_object_tokens(
+                patch_feats,
                 object_boxes,
                 object_cls,
                 object_conf,
@@ -1255,6 +1385,14 @@ class VisionTransformer(nn.Module):
                 object_valid=object_valid_for_prior,
                 object_conf=object_conf_for_prior,
             )
+            if object_boxes_for_prior is not None:
+                pair_visual_features = self._pool_actor_object_union_features(
+                    patch_feats,
+                    boxes,
+                    valid,
+                    object_boxes_for_prior,
+                    object_valid_for_prior,
+                )
             prefix_tokens.append(actor_tokens)
         elif object_boxes_for_prior is not None:
             bbox_token_prior = self._bbox_token_prior(
@@ -1319,7 +1457,7 @@ class VisionTransformer(nn.Module):
         if self.n_heatmap_out_channels == 0:
             if self.n_actor_tokens > 0:
                 if self.n_object_tokens > 0:
-                    return x_class, x_actor, x_object
+                    return x_class, x_actor, x_object, pair_visual_features
                 return x_class, x_actor
             return x_class
         x_heatmap_feat = x_heatmap.reshape(B, *self.HW_OUT_CONV, -1).permute(
@@ -1333,8 +1471,15 @@ class VisionTransformer(nn.Module):
         if self.n_actor_tokens > 0:
             if self.n_object_tokens > 0:
                 if self.return_heatmap_features:
-                    return x_class, x_actor, x_object, x_heatmap, x_heatmap_feat
-                return x_class, x_actor, x_object, x_heatmap
+                    return (
+                        x_class,
+                        x_actor,
+                        x_object,
+                        x_heatmap,
+                        x_heatmap_feat,
+                        pair_visual_features,
+                    )
+                return x_class, x_actor, x_object, x_heatmap, pair_visual_features
             if self.return_heatmap_features:
                 return x_class, x_actor, x_heatmap, x_heatmap_feat
             return x_class, x_actor, x_heatmap

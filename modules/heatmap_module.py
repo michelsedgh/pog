@@ -224,6 +224,7 @@ class HeatmapModule(pl.LightningModule):
                 "object_valid_embed",
                 "object_bbox_mlp",
                 "object_conf_mlp",
+                "object_visual_proj",
             )
         )
 
@@ -559,7 +560,7 @@ class HeatmapModule(pl.LightningModule):
             return selection_logits
         raise RuntimeError(
             "Object selection must have shape [B, K, M+1] for the clean "
-            f"feature-fusion path; got {tuple(selection_logits.shape)}"
+            f"object-token path; got {tuple(selection_logits.shape)}"
         )
 
     def _pose_heatmap_pred(self, hm_preds):
@@ -998,7 +999,7 @@ class HeatmapModule(pl.LightningModule):
         if self.object_prompt:
             pred_obj = self._object_heatmap_pred(hm_preds)
             object_heatmap_weight = float(
-                self.model.hparams.get("object_heatmap_weight", 200.0)
+                self.model.hparams.get("object_heatmap_weight", 50.0)
             )
             if (
                 object_heatmap_weight > 0.0
@@ -1070,7 +1071,7 @@ class HeatmapModule(pl.LightningModule):
                 if loss_interaction is None:
                     loss_interaction = target_action_selection_logits.new_zeros(())
                 loss = loss + loss_interaction * self.model.hparams.get(
-                    "object_interaction_loss_weight", 0.05
+                    "object_interaction_loss_weight", 0.10
                 )
                 self.log(
                     f"{stage}_loss_interaction",

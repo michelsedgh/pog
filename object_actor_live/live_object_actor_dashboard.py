@@ -42,6 +42,7 @@ def parse_args():
     )
     parser.add_argument("--checkpoint", type=str, default="checkpoints/object_actor/epoch=004.ckpt")
     parser.add_argument("--engine", type=str, default=None)
+    parser.add_argument("--onnx", type=str, default=None)
     parser.add_argument("--camera", type=str, default="0")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=7861)
@@ -86,9 +87,18 @@ def parse_args():
     parser.add_argument("--object-track-iou-threshold", type=float, default=0.20)
     parser.add_argument("--camera-buffer-size", type=int, default=1)
     parser.add_argument("--jpeg-quality", type=int, default=80)
+    parser.add_argument(
+        "--debug-save-latest-input",
+        type=str,
+        default=None,
+        help="Overwrite this .pt file with the exact actor inputs from each action step.",
+    )
     parser.add_argument("--smoke", action="store_true")
     args = parser.parse_args()
 
+    selected_actor_backends = sum(bool(value) for value in [args.engine, args.onnx])
+    if selected_actor_backends > 1:
+        raise ValueError("Choose only one actor backend: --engine or --onnx.")
     if args.detect_every < 1:
         raise ValueError("--detect-every must be >= 1")
     if args.action_every < 1:
@@ -268,6 +278,69 @@ def action_mode_summary(probs):
         "p_watchtv": finite_float(probs[watch_idx]),
         "top5": top,
     }
+
+
+def save_latest_actor_debug(
+    path,
+    *,
+    frame,
+    clip,
+    boxes,
+    valid,
+    object_boxes,
+    object_cls,
+    object_conf,
+    object_valid,
+    logits,
+    presence_logits,
+    packed_objects,
+    action_probs,
+    ablation_probs,
+):
+    if not path:
+        return
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    object_names = []
+    for cls_id, is_valid in zip(
+        object_cls[0].detach().cpu().tolist(),
+        object_valid[0].detach().cpu().tolist(),
+    ):
+        if not is_valid:
+            object_names.append("NONE")
+        else:
+            object_names.append(OBJECT_CLASSES.get(int(cls_id), f"object_{int(cls_id)}"))
+    payload = {
+        "frame": int(frame),
+        "action_classes": list(ACTION_CLASSES),
+        "object_classes": dict(OBJECT_CLASSES),
+        "object_names": object_names,
+        "packed_objects": [
+            {
+                "cls": item["cls"],
+                "conf": float(item["conf"]),
+                "box_norm": np.asarray(item["box_norm"], dtype=np.float32).tolist(),
+            }
+            for item in packed_objects
+        ],
+        "clip": clip.detach().cpu(),
+        "boxes": boxes.detach().cpu(),
+        "valid": valid.detach().cpu(),
+        "object_boxes": object_boxes.detach().cpu(),
+        "object_cls": object_cls.detach().cpu(),
+        "object_conf": object_conf.detach().cpu(),
+        "object_valid": object_valid.detach().cpu(),
+        "logits": logits.detach().cpu(),
+        "presence_logits": presence_logits.detach().cpu(),
+        "action_probs": torch.as_tensor(action_probs).detach().cpu(),
+        "ablation_probs": {
+            name: torch.as_tensor(probs).detach().cpu()
+            for name, probs in ablation_probs.items()
+        },
+    }
+    tmp_path = output_path.with_name(output_path.name + ".tmp")
+    torch.save(payload, tmp_path)
+    tmp_path.replace(output_path)
 
 
 class TensorRTRFDETRDetector:
@@ -629,9 +702,85 @@ class TensorRTObjectActorBackend:
         )
 
 
+class ONNXObjectActorBackend:
+    def __init__(self, onnx_path, device):
+        import onnxruntime as ort
+
+        onnx_path = Path(onnx_path)
+        if not onnx_path.is_file():
+            raise FileNotFoundError(f"Actor ONNX model not found: {onnx_path}")
+
+        self.device = device
+        providers = (
+            ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            if device.type == "cuda"
+            else ["CPUExecutionProvider"]
+        )
+        self.session = ort.InferenceSession(str(onnx_path), providers=providers)
+        self.input_names = [item.name for item in self.session.get_inputs()]
+        self.output_names = [item.name for item in self.session.get_outputs()]
+        expected_inputs = {
+            "video",
+            "boxes",
+            "valid",
+            "object_boxes",
+            "object_cls",
+            "object_conf",
+            "object_valid",
+        }
+        expected_outputs = {"logits", "presence"}
+        if set(self.input_names) != expected_inputs:
+            raise RuntimeError(
+                f"Actor ONNX inputs must be {sorted(expected_inputs)}, got {self.input_names}"
+            )
+        if set(self.output_names) != expected_outputs:
+            raise RuntimeError(
+                f"Actor ONNX outputs must be {sorted(expected_outputs)}, got {self.output_names}"
+            )
+        shapes = {
+            item.name: tuple(int(dim) for dim in item.shape)
+            for item in self.session.get_inputs()
+        }
+        self.num_actor_tokens = shapes["boxes"][1]
+        self.num_object_tokens = shapes["object_boxes"][1]
+        self.clip_frames = shapes["video"][1]
+        self.input_size = shapes["video"][3]
+        self.backend_name = "onnxruntime-object"
+
+    @staticmethod
+    def _numpy(tensor, dtype):
+        return tensor.detach().cpu().numpy().astype(dtype, copy=False)
+
+    def __call__(
+        self,
+        clip,
+        boxes,
+        valid,
+        object_boxes,
+        object_cls,
+        object_conf,
+        object_valid,
+    ):
+        feed = {
+            "video": self._numpy(clip, np.float32),
+            "boxes": self._numpy(boxes, np.float32),
+            "valid": self._numpy(valid, np.bool_),
+            "object_boxes": self._numpy(object_boxes, np.float32),
+            "object_cls": self._numpy(object_cls, np.int32),
+            "object_conf": self._numpy(object_conf, np.float32),
+            "object_valid": self._numpy(object_valid, np.bool_),
+        }
+        outputs = self.session.run(["logits", "presence"], feed)
+        logits = torch.from_numpy(outputs[0]).to(device=self.device)
+        presence = torch.from_numpy(outputs[1]).to(device=self.device)
+        return logits, presence
+
+
 def load_actor_backend(args):
     if args.engine:
         return TensorRTObjectActorBackend(args.engine)
+    if args.onnx:
+        return ONNXObjectActorBackend(args.onnx, resolve_device(args.device))
     return TorchObjectActorBackend(args.checkpoint, resolve_device(args.device))
 
 
@@ -823,6 +972,10 @@ class LiveRunner:
         self.last_detection_frame = None
         self.last_detector_ms = None
         self.last_actor_ms = None
+        self.last_action_frame = None
+        self.last_model_object_count = 0
+        self.last_packed_objects = []
+        self.last_action_debug_by_track = {}
         self.next_track_id = 1
         self.tracks = {}
         self.current_track_ids = []
@@ -955,13 +1108,18 @@ class LiveRunner:
                     track = self.tracks.get(actor["track_id"])
                     if track is not None:
                         actor.update(track.action_payload())
+                    action_debug = self.last_action_debug_by_track.get(actor["track_id"])
+                    if action_debug is not None:
+                        actor.update(action_debug)
 
                 message = (
                     f"buffer {len(self.buffer)}/{self.args.buffer_frames} "
-                    f"objects={len(self.last_objects)} stride={self.args.clip_stride}"
+                    f"objects={len(self.last_objects)} "
+                    f"model_objects={self.last_model_object_count} "
+                    f"stride={self.args.clip_stride}"
                 )
                 should_run_action = action_due and len(self.last_boxes_xyxy) > 0
-                packed_objects = []
+                packed_objects = self.last_packed_objects
                 if should_run_action:
                     clip_frames = sample_clip(
                         self.buffer,
@@ -1005,6 +1163,9 @@ class LiveRunner:
                         self.device,
                         self.args.object_track_iou_threshold,
                     )
+                    self.last_action_frame = self.frame_count
+                    self.last_model_object_count = int(object_valid.sum().item())
+                    self.last_packed_objects = list(packed_objects)
                     if valid.any():
                         started = time.perf_counter()
                         logits, presence_logits = self.actor(
@@ -1072,6 +1233,22 @@ class LiveRunner:
                                             .cpu()
                                             .numpy()
                                         )
+                            save_latest_actor_debug(
+                                self.args.debug_save_latest_input,
+                                frame=self.frame_count,
+                                clip=clip,
+                                boxes=boxes,
+                                valid=valid,
+                                object_boxes=object_boxes,
+                                object_cls=object_cls,
+                                object_conf=object_conf,
+                                object_valid=object_valid,
+                                logits=logits,
+                                presence_logits=presence_logits,
+                                packed_objects=packed_objects,
+                                action_probs=action_probs,
+                                ablation_probs=ablation_probs,
+                            )
                             kept_actor_idx = np.flatnonzero(keep)[: self.args.max_actors]
                             for slot, actor_idx in enumerate(kept_actor_idx):
                                 if actor_idx >= len(self.current_track_ids):
@@ -1085,20 +1262,23 @@ class LiveRunner:
                                 presence_value = finite_float(presence_probs[slot])
                                 track.update_action(action_probs[slot], presence_value or 0.0)
                                 action_id = int(action_probs[slot].argmax())
+                                mode_summaries = {
+                                    mode: action_mode_summary(mode_probs[slot])
+                                    for mode, mode_probs in ablation_probs.items()
+                                    if slot < mode_probs.shape[0]
+                                }
+                                action_debug = {
+                                    "last_action_frame": self.frame_count,
+                                    "raw_label": ACTION_CLASSES[action_id],
+                                    "raw_action_conf": finite_float(
+                                        action_probs[slot, action_id]
+                                    ),
+                                    "model_object_count": int(object_valid.sum().item()),
+                                    "action_modes": mode_summaries,
+                                }
+                                self.last_action_debug_by_track[track_id] = action_debug
                                 actors[int(actor_idx)].update(track.action_payload())
-                                actors[int(actor_idx)].update(
-                                    {
-                                        "raw_label": ACTION_CLASSES[action_id],
-                                        "raw_action_conf": finite_float(
-                                            action_probs[slot, action_id]
-                                        ),
-                                        "action_modes": {
-                                            mode: action_mode_summary(mode_probs[slot])
-                                            for mode, mode_probs in ablation_probs.items()
-                                            if slot < mode_probs.shape[0]
-                                        },
-                                    }
-                                )
+                                actors[int(actor_idx)].update(action_debug)
                             message = (
                                 f"{self.actor.backend_name} actors={int(valid.sum().item())} "
                                 f"objects={int(object_valid.sum().item())} "
@@ -1146,8 +1326,10 @@ class LiveRunner:
                                 "conf": float(item["conf"]),
                                 "box_norm": item["box_norm"].tolist(),
                             }
-                            for item in packed_objects
+                            for item in self.last_packed_objects
                         ],
+                        last_action_frame=self.last_action_frame,
+                        last_model_object_count=self.last_model_object_count,
                         last_detector_ms=self.last_detector_ms,
                         last_actor_ms=self.last_actor_ms,
                         det_age_frames=det_age,
