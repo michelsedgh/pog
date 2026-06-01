@@ -78,6 +78,17 @@ selection_score(actor, object) =
   MLP(actor_token, object_token, actor_token * object_token, geometry, union_visual)
 ```
 
+The NONE option is scored by a separate actor-conditioned MLP:
+
+```text
+none_score(actor) = none_mlp(actor_token)
+selection_logits = concat(object_scores, none_score)
+```
+
+NONE is not represented by a fake object token. Real object logits are masked by
+`object_valid`; the NONE logit is always available for objectless or weak-context
+actions.
+
 This is the intended path for learning interaction evidence such as laptop-on-lap
 or book-in-hands without hard-coded hand/nearest-object rules.
 
@@ -126,21 +137,21 @@ Frozen object-token warmup:
 - `--object_counterfactual_margin 0.05`
 - `--object_objectless_consistency_weight 0.02`
 - `--kp_loss_weight 1000`
-- `--lr_head 1e-4`
+- `--lr_head 5e-5`
 - `--lr_head_hm 5e-5`
 - `--class_balanced_sampler 1`
 - `--hard_negative_sampler 1`
 - `--hard_negative_prob 0.15`
-- `--max_epochs 4`
+- `--max_epochs 2`
 
 Only after the frozen warmup passes, run a short integrated fine-tune:
 
 - `--freeze_backbone 0`
 - `--object_warmup_freeze_actor_path 0`
-- `--lr 5e-7` to `1e-6`
-- `--lr_head 5e-5`
-- `--lr_head_hm 5e-5`
-- `--max_epochs 4` to `8`
+- `--lr 5e-7`
+- `--lr_head 3e-5`
+- `--lr_head_hm 3e-5`
+- `--max_epochs 2`
 
 ## Acceptance Criteria
 

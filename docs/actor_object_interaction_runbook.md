@@ -71,7 +71,7 @@ from pathlib import Path
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 ENV_FILE = "/content/poguise_colab_env.sh"
-REQUIRED_COMMIT = "70e32b9"
+REQUIRED_COMMIT = os.environ.get("POGUISE_REQUIRED_COMMIT", "")
 
 def load_colab_env(path=ENV_FILE):
     env = {}
@@ -141,7 +141,10 @@ require_file(HARD_NEGATIVE_MANIFEST, "Hard-negative manifest")
 
 run_stream(["git", "pull", "--ff-only", "origin", "main"], cwd=REPO_DIR)
 run_stream(["git", "log", "-1", "--oneline"], cwd=REPO_DIR)
-run_stream(["git", "merge-base", "--is-ancestor", REQUIRED_COMMIT, "HEAD"], cwd=REPO_DIR)
+if REQUIRED_COMMIT:
+    run_stream(["git", "merge-base", "--is-ancestor", REQUIRED_COMMIT, "HEAD"], cwd=REPO_DIR)
+else:
+    print("POGUISE_REQUIRED_COMMIT not set; using current checked-out code.", flush=True)
 
 cmd = [
     sys.executable, "-u", "train.py",
@@ -186,6 +189,8 @@ cmd = [
     "--object_track_iou_threshold", "0.2",
     "--object_bbox_prior_weight", "0.05",
     "--object_bbox_prior_expand", "1.25",
+    "--object_pool_expand", "1.2",
+    "--object_pair_pool_expand", "1.1",
     "--object_heatmap_weight", "50",
     "--object_warmup_freeze_actor_path", "1",
     "--object_interaction_hidden_dim", "512",
@@ -195,7 +200,7 @@ cmd = [
     "--object_counterfactual_margin_weight", "0.10",
     "--object_counterfactual_margin", "0.05",
     "--object_counterfactual_branch_grad", "0",
-    "--object_objectless_consistency_weight", "0.03",
+    "--object_objectless_consistency_weight", "0.02",
     "--object_dropout_prob", "0.05",
     "--object_token_dropout_prob", "0.02",
     "--class_balanced_sampler", "1",
@@ -227,10 +232,10 @@ cmd = [
     "--toyota_actor_background_box_prob", "0",
     "--batch_size", "64",
     "--accum_grad_batches", "1",
-    "--max_epochs", "4",
-    "--t_max_scheduler", "4",
+    "--max_epochs", "2",
+    "--t_max_scheduler", "2",
     "--lr", "0",
-    "--lr_head", "1e-4",
+    "--lr_head", "5e-5",
     "--lr_head_hm", "5e-5",
     "--weight_decay", "0.04",
     "--weight_decay_head", "0.01",
@@ -269,7 +274,9 @@ print("Epoch checkpoints:", EPOCH_DIR)
 
 This cell reads the same setup env file as Cell 2 and only searches the clean warmup run pattern. If you want a specific run, set `RUN_DIR_OVERRIDE` to its full checkpoint directory.
 
-```python
+cd /content/pog
+
+python3 - <<'PY'
 import os
 import shlex
 from pathlib import Path
@@ -295,172 +302,110 @@ def load_colab_env(path=ENV_FILE):
         os.environ[key] = value
     return env
 
-ENV = load_colab_env()
-DATA_DIR = ENV["DATA_DIR"]
-ROOT = Path(DATA_DIR) / "checkpoints"
-
-if RUN_DIR_OVERRIDE:
-    root = Path(RUN_DIR_OVERRIDE)
-    if not root.exists():
-        raise SystemExit(f"RUN_DIR_OVERRIDE does not exist: {root}")
-else:
-    runs = sorted(ROOT.glob(RUN_PATTERN), key=lambda p: p.stat().st_mtime)
-    if not runs:
-        raise SystemExit(f"No runs found matching {ROOT / RUN_PATTERN}")
-    print("matching runs:")
-    for run_path in runs[-5:]:
-        print(" ", run_path)
-    root = runs[-1]
-
-metrics_files = sorted(root.glob("version_*/metrics.csv"), key=lambda p: p.stat().st_mtime)
-if not metrics_files:
-    raise SystemExit(f"No metrics.csv found under {root}")
-metrics = metrics_files[-1]
-df = pd.read_csv(metrics)
-
 def last_nonnull(s):
     s = s.dropna()
     return s.iloc[-1] if len(s) else float("nan")
 
+def safe(row, col):
+    return row[col] if col in row and not pd.isna(row[col]) else float("nan")
+
+ENV = load_colab_env()
+ROOT = Path(ENV["DATA_DIR"]) / "checkpoints"
+
+if RUN_DIR_OVERRIDE:
+    run = Path(RUN_DIR_OVERRIDE)
+else:
+    runs = sorted(ROOT.glob(RUN_PATTERN), key=lambda p: p.stat().st_mtime)
+    if not runs:
+        raise SystemExit(f"No runs found matching {ROOT / RUN_PATTERN}")
+    run = runs[-1]
+
+metrics_files = sorted(run.glob("version_*/metrics.csv"), key=lambda p: p.stat().st_mtime)
+if not metrics_files:
+    raise SystemExit(f"No metrics.csv found under {run}")
+
+metrics = metrics_files[-1]
+df = pd.read_csv(metrics)
 epoch_df = df.groupby("epoch", as_index=False).agg({
     c: last_nonnull for c in df.columns if c != "epoch"
 })
 
-cols = [
-    "epoch",
-    "val_loss",
-    "val_obj_heatmap_loss",
-    "val_loss_interaction",
-    "val_loss_interaction_heatmap",
-    "val_acc_macro",
-    "val_f1",
+needed = [
     "val_acc_macro_objects_on",
     "val_acc_macro_objects_off",
     "val_acc_macro_objects_shuffled",
     "val_f1_objects_on",
     "val_f1_objects_off",
     "val_f1_objects_shuffled",
+]
+ready = epoch_df.dropna(subset=[c for c in needed if c in epoch_df.columns]).copy()
+if ready.empty:
+    print("run:", run)
+    print("metrics:", metrics)
+    raise SystemExit("No complete validation rows yet.")
+
+ready["macro_gain_vs_off"] = ready["val_acc_macro_objects_on"] - ready["val_acc_macro_objects_off"]
+ready["macro_gain_vs_shuf"] = ready["val_acc_macro_objects_on"] - ready["val_acc_macro_objects_shuffled"]
+ready["f1_gain_vs_off"] = ready["val_f1_objects_on"] - ready["val_f1_objects_off"]
+ready["f1_gain_vs_shuf"] = ready["val_f1_objects_on"] - ready["val_f1_objects_shuffled"]
+
+erased_col = "val_object_interaction_margin_gain_on_vs_positive_erased"
+shuf_col = "val_object_interaction_margin_gain_on_vs_shuffled"
+mass_col = "val_interaction_select_mass_object"
+
+ready["pass_gate"] = (
+    (ready["f1_gain_vs_off"] >= -0.003)
+    & (ready["f1_gain_vs_shuf"] >= -0.003)
+    & (ready.get(erased_col, 0) > 0)
+    & (ready.get(shuf_col, 0) > 0)
+    & (ready.get(mass_col, 0) >= 0.50)
+)
+
+summary_cols = [
+    "epoch", "val_loss",
+    "val_acc_macro_objects_on", "val_acc_macro_objects_off", "val_acc_macro_objects_shuffled",
+    "macro_gain_vs_off", "macro_gain_vs_shuf",
+    "val_f1_objects_on", "val_f1_objects_off", "val_f1_objects_shuffled",
+    "f1_gain_vs_off", "f1_gain_vs_shuf",
+    "val_loss_interaction",
     "val_interaction_select_mass_object",
     "val_interaction_select_acc_object",
-    "val_object_true_logit_gain_on_vs_positive_erased",
-    "val_object_margin_gain_on_vs_positive_erased",
-    "val_object_interaction_true_logit_gain_on_vs_positive_erased",
-    "val_object_interaction_margin_gain_on_vs_positive_erased",
-    "val_object_true_logit_gain_on_vs_shuffled",
-    "val_object_margin_gain_on_vs_shuffled",
-    "val_object_interaction_true_logit_gain_on_vs_shuffled",
-    "val_object_interaction_margin_gain_on_vs_shuffled",
+    erased_col,
+    shuf_col,
     "val_obj_iou",
     "val_obj_recall_visible",
-    "val_laptop_book_tv_objects_on",
-    "val_laptop_book_tv_objects_positive_erased",
-    "val_laptop_book_tv_objects_shuffled",
-    "val_drink_cup_bottle_glass_objects_on",
-    "val_drink_cup_bottle_glass_objects_positive_erased",
-    "val_drink_cup_bottle_glass_objects_shuffled",
-    "val_action_Uselaptop_objects_on",
-    "val_action_Uselaptop_objects_positive_erased",
-    "val_action_Uselaptop_objects_off",
-    "val_action_Uselaptop_objects_shuffled",
-    "val_action_Readbook_objects_on",
-    "val_action_Readbook_objects_positive_erased",
-    "val_action_Readbook_objects_off",
-    "val_action_Readbook_objects_shuffled",
-    "val_action_WatchTV_objects_on",
-    "val_action_WatchTV_objects_positive_erased",
-    "val_action_WatchTV_objects_off",
-    "val_action_WatchTV_objects_shuffled",
-    "val_action_Usetelephone_objects_on",
-    "val_action_Usetelephone_objects_positive_erased",
-    "val_action_Usetelephone_objects_off",
-    "val_action_Usetelephone_objects_shuffled",
-    "val_action_Drink_Frombottle_objects_on",
-    "val_action_Drink_Frombottle_objects_positive_erased",
-    "val_action_Drink_Frombottle_objects_off",
-    "val_action_Drink_Frombottle_objects_shuffled",
-    "val_action_Drink_Fromcup_objects_on",
-    "val_action_Drink_Fromcup_objects_positive_erased",
-    "val_action_Drink_Fromcup_objects_off",
-    "val_action_Drink_Fromcup_objects_shuffled",
-    "val_action_Drink_Fromglass_objects_on",
-    "val_action_Drink_Fromglass_objects_positive_erased",
-    "val_action_Drink_Fromglass_objects_off",
-    "val_action_Drink_Fromglass_objects_shuffled",
+    "pass_gate",
 ]
-cols = [c for c in cols if c in epoch_df.columns]
-val = epoch_df[cols].copy()
-metric_cols = [c for c in cols if c != "epoch"]
-val = val[val[metric_cols].notna().any(axis=1)]
+summary_cols = [c for c in summary_cols if c in ready.columns]
 
-print("run:", root)
+print("run:", run)
 print("metrics:", metrics)
-print("\nvalidation rows:")
-print(val[cols].tail(10).to_string(index=False, float_format=lambda x: f"{x:.4f}"))
+print("\nEPOCH SUMMARY:\n")
+print(ready[summary_cols].tail(10).to_string(index=False, float_format=lambda x: f"{x:.4f}"))
 
-ready = val.dropna(subset=[
-    "val_acc_macro_objects_on",
-    "val_acc_macro_objects_off",
-    "val_acc_macro_objects_shuffled",
-    "val_f1_objects_on",
-    "val_f1_objects_off",
-    "val_f1_objects_shuffled",
-], how="any").copy()
-
-if ready.empty:
-    raise SystemExit("No complete object ablation validation rows yet.")
-
-ready["global_macro_gain_vs_off"] = ready["val_acc_macro_objects_on"] - ready["val_acc_macro_objects_off"]
-ready["global_macro_gain_vs_shuffled"] = ready["val_acc_macro_objects_on"] - ready["val_acc_macro_objects_shuffled"]
-ready["global_f1_gain_vs_off"] = ready["val_f1_objects_on"] - ready["val_f1_objects_off"]
-ready["global_f1_gain_vs_shuffled"] = ready["val_f1_objects_on"] - ready["val_f1_objects_shuffled"]
-
-score_cols = [
-    "global_macro_gain_vs_shuffled",
-    "global_f1_gain_vs_shuffled",
-    "val_object_margin_gain_on_vs_positive_erased",
-    "val_object_interaction_margin_gain_on_vs_positive_erased",
-    "val_interaction_select_mass_object",
-]
-score_cols = [c for c in score_cols if c in ready.columns]
-best = ready.sort_values(score_cols, ascending=False).iloc[0] if score_cols else ready.iloc[-1]
 latest = ready.iloc[-1]
+passing = ready[ready["pass_gate"]]
+best = passing.sort_values(["val_f1_objects_on", "val_acc_macro_objects_on"], ascending=False).iloc[0] if len(passing) else ready.sort_values(["val_f1_objects_on", "val_acc_macro_objects_on"], ascending=False).iloc[0]
 
-def show_row(name, row):
+def show(name, row):
     print(f"\n{name}: epoch {int(row['epoch'])}")
     print(f"macro on/off/shuf: {row['val_acc_macro_objects_on']:.4f} / {row['val_acc_macro_objects_off']:.4f} / {row['val_acc_macro_objects_shuffled']:.4f}")
     print(f"f1    on/off/shuf: {row['val_f1_objects_on']:.4f} / {row['val_f1_objects_off']:.4f} / {row['val_f1_objects_shuffled']:.4f}")
-    print(f"macro gains off/shuf: {row['global_macro_gain_vs_off']:.4f} / {row['global_macro_gain_vs_shuffled']:.4f}")
-    print(f"f1 gains off/shuf:    {row['global_f1_gain_vs_off']:.4f} / {row['global_f1_gain_vs_shuffled']:.4f}")
-    for c in [
-        "val_obj_heatmap_loss",
-        "val_loss_interaction",
-        "val_loss_interaction_heatmap",
-        "val_interaction_select_mass_object",
-        "val_interaction_select_acc_object",
-        "val_object_true_logit_gain_on_vs_positive_erased",
-        "val_object_margin_gain_on_vs_positive_erased",
-        "val_object_interaction_true_logit_gain_on_vs_positive_erased",
-        "val_object_interaction_margin_gain_on_vs_positive_erased",
-        "val_object_margin_gain_on_vs_shuffled",
-        "val_object_interaction_margin_gain_on_vs_shuffled",
-    ]:
-        if c in row and not math.isnan(row[c]):
+    print(f"macro gains off/shuf: {row['macro_gain_vs_off']:.4f} / {row['macro_gain_vs_shuf']:.4f}")
+    print(f"f1 gains off/shuf:    {row['f1_gain_vs_off']:.4f} / {row['f1_gain_vs_shuf']:.4f}")
+    print("pass_gate:", bool(row["pass_gate"]))
+    for c in [mass_col, "val_interaction_select_acc_object", erased_col, shuf_col, "val_obj_iou", "val_obj_recall_visible"]:
+        if c in row and not pd.isna(row[c]):
             print(f"{c}: {row[c]:.4f}")
 
-show_row("LATEST", latest)
-show_row("BEST_CAUSAL_OBJECT_SIGNAL", best)
+show("LATEST", latest)
+show("BEST_PASSING" if len(passing) else "BEST_NONPASSING", best)
 
-print("\nDECISION")
-print("latest real objects beat shuffled macro:", bool(latest["global_macro_gain_vs_shuffled"] > 0.003))
-print("latest F1 not worse than off by >.003:", bool(latest["global_f1_gain_vs_off"] >= -0.003))
-print("latest F1 not worse than shuffled by >.003:", bool(latest["global_f1_gain_vs_shuffled"] >= -0.003))
-if "val_object_margin_gain_on_vs_positive_erased" in latest:
-    print("latest positive-erased margin gain > 0:", bool(latest["val_object_margin_gain_on_vs_positive_erased"] > 0))
-if "val_object_interaction_margin_gain_on_vs_positive_erased" in latest:
-    print("latest strong-object positive-erased margin gain > 0:", bool(latest["val_object_interaction_margin_gain_on_vs_positive_erased"] > 0))
-if "val_interaction_select_mass_object" in latest:
-    print("latest object selection mass sane:", bool(latest["val_interaction_select_mass_object"] >= 0.50))
-```
+print("\nIMPORTANT:")
+print("- pass_gate=True means worth considering.")
+print("- Do not trust a checkpoint just because val_loss drops.")
+print("- Best warmup is usually the earliest passing epoch, not necessarily the last.")
+PY
 
 ## Cell 4: Short Full Fine-Tune
 
@@ -481,7 +426,7 @@ import pandas as pd
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 ENV_FILE = "/content/poguise_colab_env.sh"
-REQUIRED_COMMIT = "70e32b9"
+REQUIRED_COMMIT = os.environ.get("POGUISE_REQUIRED_COMMIT", "")
 WARMUP_PATTERN = "actor_object_poguiseplus_clean_actorfrozen_warmup_from_actor_slot_*"
 WARMUP_RUN_DIR_OVERRIDE = ""
 PASS_REQUIRED = True
@@ -648,6 +593,8 @@ def choose_warmup_checkpoint(run, epoch_df):
     epoch = int(best["epoch"])
 
     candidates = [
+        run / "epoch_checkpoints" / f"epoch={epoch:03d}.ckpt",
+        run / "epoch_checkpoints" / f"epoch={epoch}.ckpt",
         run / "epoch_checkpoints" / f"{epoch:03d}.ckpt",
         run / "epoch_checkpoints" / f"{epoch:03d}",
     ]
@@ -666,7 +613,10 @@ require_file(HARD_NEGATIVE_MANIFEST, "Hard-negative manifest")
 
 run_stream(["git", "pull", "--ff-only", "origin", "main"], cwd=REPO_DIR)
 run_stream(["git", "log", "-1", "--oneline"], cwd=REPO_DIR)
-run_stream(["git", "merge-base", "--is-ancestor", REQUIRED_COMMIT, "HEAD"], cwd=REPO_DIR)
+if REQUIRED_COMMIT:
+    run_stream(["git", "merge-base", "--is-ancestor", REQUIRED_COMMIT, "HEAD"], cwd=REPO_DIR)
+else:
+    print("POGUISE_REQUIRED_COMMIT not set; using current checked-out code.", flush=True)
 
 warmup_run = find_warmup_run()
 metrics_path, epoch_df = load_epoch_metrics(warmup_run)
@@ -685,7 +635,7 @@ print("full fine-tune model:", MODEL_NAME)
 cmd = [
     sys.executable, "-u", "train.py",
     "--model_file", str(START_CKPT),
-    "--strict_load", "0",
+    "--strict_load", "1",
     "--dataset", "toyotasm",
     "--dataset_artifact", "toyotasm",
     "--data_dir", DATA_DIR,
@@ -725,6 +675,8 @@ cmd = [
     "--object_track_iou_threshold", "0.2",
     "--object_bbox_prior_weight", "0.05",
     "--object_bbox_prior_expand", "1.25",
+    "--object_pool_expand", "1.2",
+    "--object_pair_pool_expand", "1.1",
     "--object_heatmap_weight", "50",
     "--object_warmup_freeze_actor_path", "0",
     "--object_interaction_hidden_dim", "512",
@@ -766,11 +718,11 @@ cmd = [
     "--toyota_actor_background_box_prob", "0",
     "--batch_size", "32",
     "--accum_grad_batches", "2",
-    "--max_epochs", "6",
-    "--t_max_scheduler", "6",
-    "--lr", "1e-6",
-    "--lr_head", "5e-5",
-    "--lr_head_hm", "5e-5",
+    "--max_epochs", "2",
+    "--t_max_scheduler", "2",
+    "--lr", "5e-7",
+    "--lr_head", "3e-5",
+    "--lr_head_hm", "3e-5",
     "--weight_decay", "0.04",
     "--weight_decay_head", "0.01",
     "--weight_decay_head_hm", "0.01",

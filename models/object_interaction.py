@@ -40,7 +40,6 @@ class ObjectInteractionHead(nn.Module):
             int(interaction_heatmap_size),
             int(interaction_heatmap_size),
         )
-        self.none_token = nn.Parameter(torch.zeros(1, 1, feature_dim))
         self.pair_visual_proj = nn.Sequential(
             nn.LayerNorm(feature_dim),
             nn.Linear(feature_dim, hidden_dim),
@@ -56,7 +55,13 @@ class ObjectInteractionHead(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, 1),
         )
-        nn.init.normal_(self.none_token, std=0.02)
+        self.none_mlp = nn.Sequential(
+            nn.LayerNorm(feature_dim),
+            nn.Linear(feature_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1),
+        )
 
     def _geometry(self, actor_boxes, object_boxes):
         batch_size, num_objects, _ = object_boxes.shape
@@ -184,37 +189,21 @@ class ObjectInteractionHead(nn.Module):
             )
 
         batch_size = actor_tokens.shape[0]
-        none_token = self.none_token.to(dtype=actor_tokens.dtype).expand(batch_size, 1, -1)
-        object_tokens_with_none = torch.cat([object_tokens, none_token], dim=1)
-        none_valid = object_valid.new_ones((batch_size, 1))
-        object_valid_with_none = torch.cat([object_valid, none_valid], dim=1)
-
-        none_boxes = object_boxes.new_zeros((batch_size, 1, 4))
-        boxes_with_none = torch.cat([object_boxes, none_boxes], dim=1)
-        geometry = self._geometry(actor_boxes, boxes_with_none)
+        num_objects = object_tokens.shape[1]
+        geometry = self._geometry(actor_boxes, object_boxes)
         if geometry.shape[1] != actor_tokens.shape[1]:
             geometry = object_boxes.new_zeros(
-                (batch_size, actor_tokens.shape[1], boxes_with_none.shape[1], 10)
+                (batch_size, actor_tokens.shape[1], num_objects, 10)
             )
-        none_pair_visual = pair_visual_features.new_zeros(
-            batch_size,
-            actor_tokens.shape[1],
-            1,
-            actor_tokens.shape[-1],
-        )
-        pair_visual_features = torch.cat(
-            [pair_visual_features, none_pair_visual],
-            dim=2,
-        )
         pair_visual_features = self.pair_visual_proj(pair_visual_features)
 
         actor_pair = actor_tokens[:, :, None, :].expand(
             -1,
             -1,
-            object_tokens_with_none.shape[1],
+            num_objects,
             -1,
         )
-        object_pair = object_tokens_with_none[:, None, :, :].expand(
+        object_pair = object_tokens[:, None, :, :].expand(
             -1,
             actor_tokens.shape[1],
             -1,
@@ -230,11 +219,13 @@ class ObjectInteractionHead(nn.Module):
             ],
             dim=-1,
         )
-        selection_logits = self.selector(selector_input).squeeze(-1)
-        selection_logits = selection_logits.masked_fill(
-            ~object_valid_with_none[:, None, :],
-            torch.finfo(selection_logits.dtype).min,
+        object_logits = self.selector(selector_input).squeeze(-1)
+        object_logits = object_logits.masked_fill(
+            ~object_valid[:, None, :],
+            torch.finfo(object_logits.dtype).min,
         )
+        none_logits = self.none_mlp(actor_tokens)
+        selection_logits = torch.cat([object_logits, none_logits], dim=-1)
 
         object_alpha = torch.softmax(selection_logits.float(), dim=-1).to(
             dtype=actor_tokens.dtype

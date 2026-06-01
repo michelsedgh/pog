@@ -344,7 +344,8 @@ class KTPAttention(Attention):
 
         if self.keep_rate >= 1 and not self.needs_full_attention:
             # use flash attention
-            x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop.p)
+            dropout_p = self.attn_drop.p if self.training else 0.0
+            x = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p)
             x = x.transpose(1, 2).reshape(B, N, -1)
             attn = None
         else:
