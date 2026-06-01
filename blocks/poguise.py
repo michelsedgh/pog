@@ -1229,6 +1229,67 @@ class VisionTransformer(nn.Module):
         maxs = (center + size * 0.5).clamp(0.0, 1.0)
         return torch.cat([mins, maxs], dim=-1)
 
+    def _box_spatial_mask(self, boxes, valid, height, width, dtype, device, expand=1.0):
+        if boxes is None or valid is None:
+            return None
+        if boxes.ndim != 3 or boxes.shape[-1] != 4:
+            raise ValueError(f"boxes must be [B,N,4], got {tuple(boxes.shape)}")
+        if valid.shape != boxes.shape[:2]:
+            raise ValueError(
+                f"valid must have shape {tuple(boxes.shape[:2])}, got {tuple(valid.shape)}"
+            )
+        boxes = self._expand_boxes(boxes.to(device=device, dtype=dtype), expand)
+        valid = valid.to(device=device, dtype=torch.bool)
+
+        y_centers = (
+            torch.arange(height, device=device, dtype=dtype) + 0.5
+        ) / float(height)
+        x_centers = (
+            torch.arange(width, device=device, dtype=dtype) + 0.5
+        ) / float(width)
+        grid_y, grid_x = torch.meshgrid(y_centers, x_centers, indexing="ij")
+        grid_x = grid_x.reshape(1, 1, height, width)
+        grid_y = grid_y.reshape(1, 1, height, width)
+
+        x1 = boxes[..., 0].reshape(boxes.shape[0], boxes.shape[1], 1, 1)
+        y1 = boxes[..., 1].reshape(boxes.shape[0], boxes.shape[1], 1, 1)
+        x2 = boxes[..., 2].reshape(boxes.shape[0], boxes.shape[1], 1, 1)
+        y2 = boxes[..., 3].reshape(boxes.shape[0], boxes.shape[1], 1, 1)
+        softness = 1.0 / float(max(height, width))
+        mask = (
+            torch.sigmoid((grid_x - x1) / softness)
+            * torch.sigmoid((x2 - grid_x) / softness)
+            * torch.sigmoid((grid_y - y1) / softness)
+            * torch.sigmoid((y2 - grid_y) / softness)
+        )
+        mask = mask * valid[:, :, None, None].to(dtype=dtype)
+        return mask.max(dim=1).values.clamp(0.0, 1.0)
+
+    def _erase_box_features(self, patch_feats, boxes, valid, expand=1.0):
+        if boxes is None or valid is None:
+            return patch_feats
+        if patch_feats.ndim != 5:
+            raise ValueError(
+                f"patch_feats must be [B,D,T,H,W], got {tuple(patch_feats.shape)}"
+            )
+        _, _, _, height, width = patch_feats.shape
+        mask = self._box_spatial_mask(
+            boxes,
+            valid,
+            height,
+            width,
+            patch_feats.dtype,
+            patch_feats.device,
+            expand=expand,
+        )
+        if mask is None:
+            return patch_feats
+        if not valid.to(device=patch_feats.device, dtype=torch.bool).any():
+            return patch_feats
+        mask = mask[:, None, None, :, :]
+        replacement = patch_feats.mean(dim=(-1, -2, -3), keepdim=True)
+        return patch_feats * (1.0 - mask) + replacement * mask
+
     def _pool_box_features(self, patch_feats, boxes, valid, expand=1.0):
         """Pool patch-grid visual features inside normalized xyxy boxes.
 
@@ -1281,8 +1342,7 @@ class VisionTransformer(nn.Module):
         )
         mask = mask * valid[:, :, None, None].to(dtype=dtype)
 
-        weighted = patch_feats[:, None, :, :, :, :] * mask[:, :, None, None, :, :]
-        numerator = weighted.sum(dim=(-1, -2, -3))
+        numerator = torch.einsum("bdthw,bnhw->bnd", patch_feats, mask)
         denominator = (mask.sum(dim=(-1, -2)) * float(frames)).clamp_min(1e-6)
         return numerator / denominator.unsqueeze(-1)
 
@@ -1407,10 +1467,18 @@ class VisionTransformer(nn.Module):
         object_cls=None,
         object_valid=None,
         object_conf=None,
+        object_erase_boxes=None,
+        object_erase_valid=None,
     ):
         # x_list, images_whwh = self.preprocess_image(x_list)
 
         x = self.patch_embed(x)  # (B, C_e, t, h, w)
+        x = self._erase_box_features(
+            x,
+            object_erase_boxes,
+            object_erase_valid,
+            expand=self.object_pool_expand,
+        )
         patch_feats = x
         ws = x.shape[2:]
 

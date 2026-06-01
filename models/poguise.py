@@ -4,7 +4,7 @@ from argparse import ArgumentParser
 from blocks.poguise import vit_base_patch16_224
 from blocks.poguise import vit_small_patch16_224
 from blocks.poguise import vit_large_patch16_224
-from models.object_interaction import ObjectInteractionHead
+from models.actor_object_decoder import ActorObjectDecoder
 import torch
 import os
 import os.path
@@ -346,7 +346,7 @@ class POGUISE(pl.LightningModule):
         if object_warmup_freeze_actor_path:
             print(
                 "Object warmup: freezing base actor path; training object tokens, "
-                "actor-object selection, and heatmap head only."
+                "actor-object decoder, and heatmap head only."
             )
             for param in self.head.parameters():
                 param.requires_grad = False
@@ -356,6 +356,31 @@ class POGUISE(pl.LightningModule):
                 if self.presence_head is not None:
                     for param in self.presence_head.parameters():
                         param.requires_grad = False
+        object_unfreeze_last_blocks = int(
+            self.hparams.get("object_unfreeze_last_blocks", 0) or 0
+        )
+        if self.object_prompt and object_unfreeze_last_blocks > 0:
+            blocks = getattr(self.net, "blocks", None)
+            if blocks is None:
+                raise ValueError("object_unfreeze_last_blocks requires net.blocks")
+            if object_unfreeze_last_blocks > len(blocks):
+                raise ValueError(
+                    "object_unfreeze_last_blocks exceeds transformer depth: "
+                    f"{object_unfreeze_last_blocks} > {len(blocks)}"
+                )
+            print(
+                "Object path: unfreezing last "
+                f"{object_unfreeze_last_blocks} transformer blocks."
+            )
+            for block in blocks[-object_unfreeze_last_blocks:]:
+                for param in block.parameters():
+                    param.requires_grad = True
+            if getattr(self.net, "fc_norm", None) is not None:
+                for param in self.net.fc_norm.parameters():
+                    param.requires_grad = True
+            if getattr(self.net, "norm", None) is not None:
+                for param in self.net.norm.parameters():
+                    param.requires_grad = True
         # Unfreeze the head
         if not object_warmup_freeze_actor_path:
             for param in self.head.parameters():
@@ -409,13 +434,19 @@ class POGUISE(pl.LightningModule):
         if not 0 <= dropout < 1:
             raise ValueError("object_interaction_dropout must be in [0, 1)")
         interaction_heatmap_size = int(self.hparams.get("object_heatmap_size", 56))
-        self.object_interaction = ObjectInteractionHead(
+        init_update_gate = float(
+            self.hparams.get("object_decoder_update_gate_init", 0.02)
+        )
+        init_ffn_gate = float(self.hparams.get("object_decoder_ffn_gate_init", 0.02))
+        self.object_interaction = ActorObjectDecoder(
             feature_dim=self.net.num_features,
             hidden_dim=hidden_dim,
             dropout=dropout,
             interaction_heatmap_size=interaction_heatmap_size,
+            init_update_gate=init_update_gate,
+            init_ffn_gate=init_ffn_gate,
         )
-        print("Object interaction path: transformer object tokens + selection head.")
+        print("Object interaction path: transformer object tokens + actor-object decoder.")
 
     def _object_prompt_param_name(self, name):
         return name.startswith(
@@ -457,6 +488,8 @@ class POGUISE(pl.LightningModule):
         object_cls=None,
         object_conf=None,
         object_valid=None,
+        object_erase_boxes=None,
+        object_erase_valid=None,
         action_labels=None,
     ):
         # convert to b c t h w
@@ -471,6 +504,8 @@ class POGUISE(pl.LightningModule):
                     object_cls=object_cls,
                     object_valid=object_valid,
                     object_conf=object_conf,
+                    object_erase_boxes=object_erase_boxes,
+                    object_erase_valid=object_erase_valid,
                 )
                 if self.object_prompt:
                     if len(net_data) == 5:
@@ -497,10 +532,8 @@ class POGUISE(pl.LightningModule):
                 _, x_actor = data[:2]
                 x_heatmap = 0
                 x_object = None
-            if self.hparams.ret_feat:
-                return x_actor
             if self.object_prompt:
-                selection_logits, interaction_heatmap = self.object_interaction(
+                x_actor, selection_logits, interaction_heatmap = self.object_interaction(
                     x_actor,
                     x_object,
                     actor_boxes=boxes,
@@ -512,6 +545,8 @@ class POGUISE(pl.LightningModule):
             else:
                 selection_logits = None
                 interaction_heatmap = None
+            if self.hparams.ret_feat:
+                return x_actor
             action_logits = self.actor_head(x_actor)
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
@@ -599,6 +634,9 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--object_token_dropout_prob", type=float, default=0.0)
         parser.add_argument("--object_interaction_hidden_dim", type=int, default=512)
         parser.add_argument("--object_interaction_dropout", type=float, default=0.1)
+        parser.add_argument("--object_decoder_update_gate_init", type=float, default=0.02)
+        parser.add_argument("--object_decoder_ffn_gate_init", type=float, default=0.02)
+        parser.add_argument("--object_unfreeze_last_blocks", type=int, default=0)
         parser.add_argument(
             "--object_interaction_heatmap_weight",
             type=float,

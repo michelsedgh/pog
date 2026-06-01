@@ -1,21 +1,30 @@
 from typing import Optional, Tuple
 
+import math
+
 import torch
 import torch.nn as nn
 
 
-class ObjectInteractionHead(nn.Module):
-    """Actor/object selection head for object-token PO-GUISE+.
+def _logit(prob: float) -> float:
+    prob = min(max(float(prob), 1e-6), 1.0 - 1e-6)
+    return math.log(prob / (1.0 - prob))
 
-    Object candidates are already embedded into the transformer token sequence
-    with pooled object-region patch features. This head reads final actor/object
-    tokens plus actor-object union visual features to produce:
-      * actor-conditioned object/NONE selection logits
-      * actor-conditioned interaction heatmaps built from selected object boxes
 
-    It intentionally does not produce action-score adjustments. The action
-    classifier reads actor tokens that have already attended to object tokens
-    inside the transformer.
+class ActorObjectDecoder(nn.Module):
+    """Refine actor tokens with actor-conditioned object evidence.
+
+    The transformer backbone inserts object tokens into the token sequence, but
+    the final actor classifier still reads actor tokens. This decoder is the
+    explicit per-actor binding step:
+
+      actor token queries object tokens + actor/object geometry + union visual
+      evidence, then the selected object context updates the actor token before
+      actor_head sees it.
+
+    It also emits the same selection logits and interaction heatmaps used by
+    the object supervision and validation diagnostics. It never writes action
+    logits directly.
     """
 
     def __init__(
@@ -24,6 +33,8 @@ class ObjectInteractionHead(nn.Module):
         hidden_dim: int,
         dropout: float,
         interaction_heatmap_size: int,
+        init_update_gate: float = 0.02,
+        init_ffn_gate: float = 0.02,
     ):
         super().__init__()
         if feature_dim <= 0:
@@ -40,17 +51,29 @@ class ObjectInteractionHead(nn.Module):
             int(interaction_heatmap_size),
             int(interaction_heatmap_size),
         )
-        self.pair_visual_proj = nn.Sequential(
-            nn.LayerNorm(feature_dim),
+
+        self.actor_norm = nn.LayerNorm(feature_dim)
+        self.object_norm = nn.LayerNorm(feature_dim)
+        self.pair_norm = nn.LayerNorm(feature_dim)
+
+        self.query = nn.Linear(feature_dim, feature_dim)
+        self.key = nn.Linear(feature_dim, feature_dim)
+        self.value = nn.Linear(feature_dim, feature_dim)
+        self.pair_value = nn.Sequential(
             nn.Linear(feature_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, feature_dim),
         )
-        selector_dim = feature_dim * 4 + 10
-        self.selector = nn.Sequential(
-            nn.LayerNorm(selector_dim),
-            nn.Linear(selector_dim, hidden_dim),
+        self.geometry_bias = nn.Sequential(
+            nn.LayerNorm(10),
+            nn.Linear(10, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1),
+        )
+        self.pair_score = nn.Sequential(
+            nn.Linear(feature_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, 1),
@@ -63,10 +86,31 @@ class ObjectInteractionHead(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
 
-    def _geometry(self, actor_boxes, object_boxes):
+        self.update_norm = nn.LayerNorm(feature_dim)
+        self.update_proj = nn.Sequential(
+            nn.Linear(feature_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, feature_dim),
+        )
+        self.ffn_norm = nn.LayerNorm(feature_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(feature_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, feature_dim),
+        )
+        self.update_gate_logit = nn.Parameter(
+            torch.tensor(_logit(init_update_gate), dtype=torch.float32)
+        )
+        self.ffn_gate_logit = nn.Parameter(
+            torch.tensor(_logit(init_ffn_gate), dtype=torch.float32)
+        )
+
+    def _geometry(self, actor_boxes, object_boxes, num_actors: int):
         batch_size, num_objects, _ = object_boxes.shape
         if actor_boxes is None:
-            return object_boxes.new_zeros((batch_size, 0, num_objects, 10))
+            return object_boxes.new_zeros((batch_size, num_actors, num_objects, 10))
 
         actor_boxes = actor_boxes.to(
             device=object_boxes.device,
@@ -87,8 +131,8 @@ class ObjectInteractionHead(nn.Module):
             [
                 object_center_pair - actor_center_pair,
                 torch.log(object_size_pair / actor_size_pair),
-                object_center_pair.expand(-1, actor_boxes.shape[1], -1, -1),
-                object_size_pair.expand(-1, actor_boxes.shape[1], -1, -1),
+                object_center_pair.expand(-1, num_actors, -1, -1),
+                object_size_pair.expand(-1, num_actors, -1, -1),
                 actor_center_pair.expand(-1, -1, num_objects, -1),
             ],
             dim=-1,
@@ -164,11 +208,12 @@ class ObjectInteractionHead(nn.Module):
         heatmap_size: Optional[Tuple[int, int]] = None,
     ):
         if object_tokens is None:
-            raise ValueError("object_tokens are required for object interaction")
+            raise ValueError("object_tokens are required for actor-object decoding")
         if pair_visual_features is None:
             raise ValueError(
-                "pair_visual_features are required for visually grounded object interaction"
+                "pair_visual_features are required for actor-object decoding"
             )
+
         object_valid = object_valid.to(device=actor_tokens.device, dtype=torch.bool)
         object_boxes = object_boxes.to(device=actor_tokens.device, dtype=actor_tokens.dtype)
         object_tokens = object_tokens.to(device=actor_tokens.device, dtype=actor_tokens.dtype)
@@ -188,52 +233,52 @@ class ObjectInteractionHead(nn.Module):
                 f"{expected_pair_shape}, got {tuple(pair_visual_features.shape)}"
             )
 
-        batch_size = actor_tokens.shape[0]
+        batch_size, num_actors, feature_dim = actor_tokens.shape
         num_objects = object_tokens.shape[1]
-        geometry = self._geometry(actor_boxes, object_boxes)
-        if geometry.shape[1] != actor_tokens.shape[1]:
-            geometry = object_boxes.new_zeros(
-                (batch_size, actor_tokens.shape[1], num_objects, 10)
-            )
-        pair_visual_features = self.pair_visual_proj(pair_visual_features)
+        actor_norm = self.actor_norm(actor_tokens)
+        object_norm = self.object_norm(object_tokens)
+        pair_norm = self.pair_norm(pair_visual_features)
 
-        actor_pair = actor_tokens[:, :, None, :].expand(
-            -1,
-            -1,
-            num_objects,
-            -1,
-        )
-        object_pair = object_tokens[:, None, :, :].expand(
-            -1,
-            actor_tokens.shape[1],
-            -1,
-            -1,
-        )
-        selector_input = torch.cat(
-            [
-                actor_pair,
-                object_pair,
-                actor_pair * object_pair,
-                pair_visual_features,
-                geometry.to(dtype=actor_tokens.dtype),
-            ],
-            dim=-1,
-        )
-        object_logits = self.selector(selector_input).squeeze(-1)
-        object_logits = object_logits.masked_fill(
-            ~object_valid[:, None, :],
-            torch.finfo(object_logits.dtype).min,
-        )
-        none_logits = self.none_mlp(actor_tokens)
-        selection_logits = torch.cat([object_logits, none_logits], dim=-1)
+        query = self.query(actor_norm)
+        key = self.key(object_norm)
+        value = self.value(object_norm)
+        pair_value = self.pair_value(pair_norm)
 
-        object_alpha = torch.softmax(selection_logits.float(), dim=-1).to(
+        attention_logits = torch.einsum("bkd,bmd->bkm", query, key)
+        attention_logits = attention_logits / math.sqrt(float(feature_dim))
+
+        geometry = self._geometry(actor_boxes, object_boxes, num_actors).to(
             dtype=actor_tokens.dtype
         )
+        attention_logits = attention_logits + self.geometry_bias(geometry).squeeze(-1)
+        attention_logits = attention_logits + self.pair_score(pair_norm).squeeze(-1)
+        attention_logits = attention_logits.masked_fill(
+            ~object_valid[:, None, :],
+            torch.finfo(attention_logits.dtype).min,
+        )
+        none_logits = self.none_mlp(actor_norm)
+        selection_logits = torch.cat([attention_logits, none_logits], dim=-1)
+
+        alpha = torch.softmax(selection_logits.float(), dim=-1).to(
+            dtype=actor_tokens.dtype
+        )
+        real_alpha = alpha[..., :num_objects]
+        object_context = value[:, None, :, :] + pair_value
+        context = (real_alpha[..., None] * object_context).sum(dim=2)
+
+        update_gate = torch.sigmoid(self.update_gate_logit).to(dtype=actor_tokens.dtype)
+        ffn_gate = torch.sigmoid(self.ffn_gate_logit).to(dtype=actor_tokens.dtype)
+        refined_actor = actor_tokens + update_gate * self.update_proj(
+            self.update_norm(context)
+        )
+        refined_actor = refined_actor + ffn_gate * self.ffn(
+            self.ffn_norm(refined_actor)
+        )
+
         interaction_heatmap = self._build_interaction_heatmap(
-            object_alpha,
+            alpha,
             object_boxes,
             object_valid,
             heatmap_size or self.interaction_heatmap_size,
         )
-        return selection_logits, interaction_heatmap
+        return refined_actor, selection_logits, interaction_heatmap

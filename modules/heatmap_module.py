@@ -9,6 +9,7 @@ import os
 from losses.softtarget import SoftTargetCrossEntropy
 from losses.heatmap_loss import KeypointMSELoss
 from losses.object_interaction_losses import (
+    group_margin_sensitivity_loss,
     interaction_heatmap_loss,
     objectless_consistency_loss,
     positive_erased_margin_loss,
@@ -122,6 +123,9 @@ class HeatmapModule(pl.LightningModule):
             hparams.get("actor_val_diagnostic_max_pairs", 8)
         )
         self.group_indices = self._build_group_indices()
+        self.object_sensitivity_group_indices = (
+            self._build_object_sensitivity_group_indices()
+        )
         if self.object_prompt:
             self.val_acc_macro_objects_on = torchmetrics.Accuracy(
                 task="multiclass", num_classes=hparams.num_classes, average="macro"
@@ -240,6 +244,28 @@ class HeatmapModule(pl.LightningModule):
     def _object_interaction_params(self):
         return list(self.model.object_interaction.parameters())
 
+    def _object_unfrozen_backbone_params(self):
+        if not self.object_prompt:
+            return []
+        count = int(self.model.hparams.get("object_unfreeze_last_blocks", 0) or 0)
+        if count <= 0:
+            return []
+        blocks = getattr(self.model.net, "blocks", None)
+        if blocks is None:
+            raise ValueError("object_unfreeze_last_blocks requires model.net.blocks")
+        if count > len(blocks):
+            raise ValueError(
+                f"object_unfreeze_last_blocks={count} exceeds depth={len(blocks)}"
+            )
+        params = []
+        for block in blocks[-count:]:
+            params.extend(block.parameters())
+        if getattr(self.model.net, "fc_norm", None) is not None:
+            params.extend(self.model.net.fc_norm.parameters())
+        if getattr(self.model.net, "norm", None) is not None:
+            params.extend(self.model.net.norm.parameters())
+        return params
+
     def _head_params(self):
         if not self.actor_prompt:
             return list(self.model.head.parameters())
@@ -286,6 +312,25 @@ class HeatmapModule(pl.LightningModule):
             ]
             if indices:
                 groups[group_name] = torch.tensor(indices, dtype=torch.long)
+        return groups
+
+    def _build_object_sensitivity_group_indices(self):
+        label_dict = self._toyota_label_dict()
+        group_names = (
+            "laptop_book_tv",
+            "phone_tv",
+            "drink_cup_bottle_glass",
+        )
+        groups = []
+        for group_name in group_names:
+            action_names = GROUPS.get(group_name, ())
+            indices = [
+                int(label_dict[action_name]) - 1
+                for action_name in action_names
+                if action_name in label_dict
+            ]
+            if len(indices) >= 2:
+                groups.append(torch.tensor(indices, dtype=torch.long))
         return groups
 
     def _object_audit_action_indices(self):
@@ -354,12 +399,16 @@ class HeatmapModule(pl.LightningModule):
             erase_mask = (
                 positive_mask[..., :real_object_count]
                 & actor_valid[..., None]
-            ).any(dim=1)
+            ).any(dim=1) & kwargs["object_valid"][..., :real_object_count]
+            erase_valid = torch.zeros_like(kwargs["object_valid"])
+            erase_valid[..., :real_object_count] = erase_mask
             kwargs["object_valid"] = kwargs["object_valid"].clone()
             kwargs["object_valid"][..., :real_object_count] = (
                 kwargs["object_valid"][..., :real_object_count]
                 & ~erase_mask
             )
+            kwargs["object_erase_boxes"] = kwargs["object_boxes"]
+            kwargs["object_erase_valid"] = erase_valid
             return kwargs
         if mode == "shuffled":
             batch_size = kwargs["object_valid"].shape[0]
@@ -442,10 +491,21 @@ class HeatmapModule(pl.LightningModule):
         margin_weight = float(
             self.model.hparams.get("object_counterfactual_margin_weight", 0.0)
         )
+        action_sensitivity_weight = float(
+            self.model.hparams.get("object_action_sensitivity_weight", 0.0)
+        )
+        group_sensitivity_weight = float(
+            self.model.hparams.get("object_action_group_sensitivity_weight", 0.0)
+        )
         consistency_weight = float(
             self.model.hparams.get("object_objectless_consistency_weight", 0.0)
         )
-        if margin_weight <= 0.0 and consistency_weight <= 0.0:
+        if (
+            margin_weight <= 0.0
+            and action_sensitivity_weight <= 0.0
+            and group_sensitivity_weight <= 0.0
+            and consistency_weight <= 0.0
+        ):
             return normal_logits.new_zeros(())
         if (
             "interaction_valid" not in target
@@ -490,7 +550,11 @@ class HeatmapModule(pl.LightningModule):
         if consistency_weight > 0.0:
             with torch.no_grad():
                 off_logits = self._actor_logits_for_object_mode(imgs, target, "off")
-        if margin_weight > 0.0:
+        if (
+            margin_weight > 0.0
+            or action_sensitivity_weight > 0.0
+            or group_sensitivity_weight > 0.0
+        ):
             erased_logits = self._counterfactual_branch_logits(
                 imgs,
                 target,
@@ -523,6 +587,75 @@ class HeatmapModule(pl.LightningModule):
             self.log(
                 "train_loss_object_counterfactual_margin",
                 loss_margin,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+
+        if action_sensitivity_weight > 0.0 and object_mask.any():
+            sensitivity_margin = float(
+                self.model.hparams.get("object_action_sensitivity_margin", 0.05)
+            )
+            loss_action_sensitivity = positive_erased_margin_loss(
+                normal_valid,
+                labels_valid,
+                object_mask,
+                sensitivity_margin,
+                erased_logits=None if erased_logits is None else erased_logits[valid].float(),
+                shuffled_logits=(
+                    None if shuffled_logits is None else shuffled_logits[valid].float()
+                ),
+            )
+        else:
+            loss_action_sensitivity = None
+
+        if loss_action_sensitivity is not None:
+            weighted_loss = (
+                weighted_loss
+                + loss_action_sensitivity * action_sensitivity_weight
+            )
+            self.log(
+                "train_loss_object_action_sensitivity",
+                loss_action_sensitivity,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+
+        if group_sensitivity_weight > 0.0 and object_mask.any():
+            group_margin = float(
+                self.model.hparams.get("object_action_group_sensitivity_margin", 0.05)
+            )
+            groups = [
+                group.to(device=normal_logits.device)
+                for group in self.object_sensitivity_group_indices
+            ]
+            loss_group_sensitivity = group_margin_sensitivity_loss(
+                normal_valid,
+                labels_valid,
+                object_mask,
+                groups,
+                group_margin,
+                erased_logits=None if erased_logits is None else erased_logits[valid].float(),
+                shuffled_logits=(
+                    None if shuffled_logits is None else shuffled_logits[valid].float()
+                ),
+            )
+        else:
+            loss_group_sensitivity = None
+
+        if loss_group_sensitivity is not None:
+            weighted_loss = (
+                weighted_loss
+                + loss_group_sensitivity * group_sensitivity_weight
+            )
+            self.log(
+                "train_loss_object_action_group_sensitivity",
+                loss_group_sensitivity,
                 on_step=True,
                 on_epoch=True,
                 prog_bar=False,
@@ -787,6 +920,15 @@ class HeatmapModule(pl.LightningModule):
                     "weight_decay": self.weight_decay_head,
                 },
             ]
+            unfrozen_backbone_params = self._object_unfrozen_backbone_params()
+            if unfrozen_backbone_params:
+                params.append(
+                    {
+                        "params": unfrozen_backbone_params,
+                        "lr": self.lr,
+                        "weight_decay": self.weight_decay,
+                    }
+                )
             if (
                 self.object_prompt
                 and getattr(self.model.hparams, "lr_head_hm", None)

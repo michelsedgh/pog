@@ -55,6 +55,57 @@ def positive_erased_margin_loss(
     return torch.cat(margin_losses).mean()
 
 
+def _group_margin(logits, labels, group):
+    group = group.to(device=logits.device)
+    in_group = (labels[:, None] == group[None, :]).any(dim=1)
+    if not in_group.any() or group.numel() < 2:
+        return None, None
+    logits = logits[in_group]
+    labels = labels[in_group]
+    group_logits = logits.index_select(1, group)
+    label_pos = (labels[:, None] == group[None, :]).long().argmax(dim=1)
+    other_logits = group_logits.clone()
+    other_logits.scatter_(1, label_pos[:, None], -torch.inf)
+    true_logits = logits.gather(1, labels[:, None]).squeeze(1)
+    return true_logits - other_logits.max(dim=1).values, in_group
+
+
+def group_margin_sensitivity_loss(
+    normal_logits,
+    labels,
+    object_mask,
+    groups,
+    margin,
+    erased_logits=None,
+    shuffled_logits=None,
+):
+    if not object_mask.any() or not groups:
+        return None
+    normal_object = normal_logits[object_mask]
+    labels_object = labels[object_mask]
+
+    losses = []
+    for comparison_logits in (erased_logits, shuffled_logits):
+        if comparison_logits is None:
+            continue
+        comparison_object = comparison_logits[object_mask]
+        for group in groups:
+            normal_margin, in_group = _group_margin(normal_object, labels_object, group)
+            if normal_margin is None:
+                continue
+            comparison_margin, _ = _group_margin(
+                comparison_object[in_group],
+                labels_object[in_group],
+                group,
+            )
+            if comparison_margin is None:
+                continue
+            losses.append(F.relu(margin - (normal_margin - comparison_margin)))
+    if not losses:
+        return None
+    return torch.cat(losses).mean()
+
+
 def objectless_consistency_loss(normal_logits, off_logits, none_mask):
     if off_logits is None or not none_mask.any():
         return None

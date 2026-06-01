@@ -137,9 +137,11 @@ python object_actor_live/analyze_live_object_sensitivity.py \
 ```
 
 The important rows are `objects_on`, `objects_off`, `laptop_only`,
-`positive_erased_laptop`, `laptop_class_changed_to_book`, and
-`laptop_box_moved_away`. A useful checkpoint should move the `Uselaptop` logit
-when those object facts change. If the script says the tensor contains no
+`positive_erased_laptop`, `positive_erased_laptop_visual`,
+`laptop_class_changed_to_book`, and `laptop_box_moved_away`. The visual-erased
+row removes the laptop object token and mean-fills its patch-grid region before
+the transformer. A useful checkpoint should move the `Uselaptop` logit when
+those object facts change. If the script says the tensor contains no
 laptop/keyboard object, save a new live tensor while RF-DETR is actually drawing
 the laptop.
 

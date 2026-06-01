@@ -149,6 +149,11 @@ def clone_inputs(inputs):
 
 
 def run_model(model, inputs):
+    erase_kwargs = {}
+    if "object_erase_boxes" in inputs:
+        erase_kwargs["object_erase_boxes"] = inputs["object_erase_boxes"]
+    if "object_erase_valid" in inputs:
+        erase_kwargs["object_erase_valid"] = inputs["object_erase_valid"]
     with torch.inference_mode():
         output = model(
             inputs["clip"],
@@ -158,6 +163,7 @@ def run_model(model, inputs):
             object_cls=inputs["object_cls"],
             object_conf=inputs["object_conf"],
             object_valid=inputs["object_valid"],
+            **erase_kwargs,
         )
     if not isinstance(output, (tuple, list)) or len(output) < 3:
         raise RuntimeError("Expected actor model output with logits and presence logits.")
@@ -298,6 +304,12 @@ def build_modes(base_inputs, object_classes):
     erased["object_valid"] = erased["object_valid"] & ~laptop_mask
     modes["positive_erased_laptop"] = erased
 
+    erased_visual = clone_inputs(base_inputs)
+    erased_visual["object_valid"] = erased_visual["object_valid"] & ~laptop_mask
+    erased_visual["object_erase_boxes"] = base_inputs["object_boxes"].clone()
+    erased_visual["object_erase_valid"] = laptop_mask.clone()
+    modes["positive_erased_laptop_visual"] = erased_visual
+
     laptop_to_book = clone_inputs(base_inputs)
     laptop_to_book["object_cls"] = laptop_to_book["object_cls"].clone()
     laptop_to_book["object_cls"][laptop_mask] = int(book_id)
@@ -358,7 +370,7 @@ def print_selection(outputs_by_mode, payload, object_classes, actor_idx, laptop_
             valid.zero_()
         elif mode_name == "laptop_only":
             valid = laptop_mask[0].detach().cpu().bool()
-        elif mode_name == "positive_erased_laptop":
+        elif mode_name in ("positive_erased_laptop", "positive_erased_laptop_visual"):
             valid = valid & ~laptop_mask[0].detach().cpu().bool()
         object_cls = payload["object_cls"][0].long()
         object_conf = payload["object_conf"][0].float()
@@ -419,8 +431,13 @@ def gradient_audit(model, base_inputs, action_map, actor_idx, target_action):
         "net.object_bbox_mlp": "net.object_bbox_mlp",
         "net.object_conf_mlp": "net.object_conf_mlp",
         "net.object_visual_proj": "net.object_visual_proj",
-        "object_interaction.selector": "object_interaction.selector",
-        "object_interaction.pair_visual_proj": "object_interaction.pair_visual_proj",
+        "object_interaction.query": "object_interaction.query",
+        "object_interaction.key": "object_interaction.key",
+        "object_interaction.value": "object_interaction.value",
+        "object_interaction.pair_value": "object_interaction.pair_value",
+        "object_interaction.update_proj": "object_interaction.update_proj",
+        "object_interaction.geometry_bias": "object_interaction.geometry_bias",
+        "object_interaction.pair_score": "object_interaction.pair_score",
         "object_interaction.none_mlp": "object_interaction.none_mlp",
         "actor_head": "actor_head",
     }
@@ -451,6 +468,7 @@ def judge(rows, laptop_present):
     off = by_mode.get("objects_off", {})
     laptop_only = by_mode.get("laptop_only", {})
     erased = by_mode.get("positive_erased_laptop", {})
+    erased_visual = by_mode.get("positive_erased_laptop_visual", {})
     moved = by_mode.get("laptop_box_moved_away", {})
     cls_book = by_mode.get("laptop_class_changed_to_book", {})
     key = "Uselaptop_logit"
@@ -459,16 +477,22 @@ def judge(rows, laptop_present):
         return
     laptop_vs_off = laptop_only.get(key, float("nan")) - off.get(key, float("nan"))
     erased_drop = erased.get(key, float("nan")) - on.get(key, float("nan"))
+    erased_visual_drop = erased_visual.get(key, float("nan")) - on.get(key, float("nan"))
     moved_drop = moved.get(key, float("nan")) - on.get(key, float("nan"))
     class_change = cls_book.get(key, float("nan")) - on.get(key, float("nan"))
     print(f"  laptop_only minus objects_off Uselaptop logit: {laptop_vs_off:+.4f}")
     print(f"  positive_erased minus objects_on Uselaptop logit: {erased_drop:+.4f}")
+    print(
+        "  positive_erased_visual minus objects_on Uselaptop logit: "
+        f"{erased_visual_drop:+.4f}"
+    )
     print(f"  laptop_moved minus objects_on Uselaptop logit: {moved_drop:+.4f}")
     print(f"  laptop_class_to_book minus objects_on Uselaptop logit: {class_change:+.4f}")
 
-    if laptop_vs_off > 0.10 and erased_drop < -0.05:
+    best_erased_drop = min(erased_drop, erased_visual_drop)
+    if laptop_vs_off > 0.10 and best_erased_drop < -0.05:
         print("  PASS: laptop object is moving the Uselaptop logit in the right direction.")
-    elif abs(laptop_vs_off) < 0.05 and abs(erased_drop) < 0.05:
+    elif abs(laptop_vs_off) < 0.05 and abs(best_erased_drop) < 0.05:
         print(
             "  FAIL: object changes barely affect Uselaptop. The action path is "
             "mostly ignoring the laptop object on this live tensor."
