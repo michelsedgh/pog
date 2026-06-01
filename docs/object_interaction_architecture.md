@@ -71,6 +71,11 @@ object_token =
 + object_valid_embed(object_valid)
 ```
 
+When adding object tokens to a clean actor-slot checkpoint, real object-class
+embedding rows must keep their constructor initialization. Only the NONE/padding
+row is zero. Do not zero all class rows, or `laptop`, `book`, `phone`, and other
+objects become indistinguishable at warmup start.
+
 Invalid/padded object slots are neutralized before transformer attention:
 
 - the NONE object class id uses `padding_idx=num_object_classes`

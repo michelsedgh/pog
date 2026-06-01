@@ -207,11 +207,13 @@ def _initialize_actor_prompt_from_checkpoint(module, checkpoint):
             net.object_slot_embed.zero_()
             initialized.append("object_slot_embed")
 
-        if hasattr(net, "object_cls_embed") and not _checkpoint_has_key(
-            checkpoint, "model.net.object_cls_embed.weight"
-        ):
-            net.object_cls_embed.weight.zero_()
-            initialized.append("object_cls_embed")
+        if hasattr(net, "object_cls_embed"):
+            with torch.no_grad():
+                padding_idx = getattr(net.object_cls_embed, "padding_idx", None)
+                if padding_idx is not None:
+                    net.object_cls_embed.weight[padding_idx].zero_()
+            if not _checkpoint_has_key(checkpoint, "model.net.object_cls_embed.weight"):
+                initialized.append("object_cls_embed_constructor_init")
 
         if hasattr(net, "object_valid_embed") and not _checkpoint_has_key(
             checkpoint, "model.net.object_valid_embed.weight"
@@ -310,6 +312,43 @@ def _print_trainable_parameters(module):
     )
     for name, numel in rows:
         print(f"TRAINABLE {name} {numel:,}")
+
+
+def _validate_object_prompt_initialization(module):
+    model = module.model
+    if not getattr(model, "object_prompt", False):
+        return
+    net = getattr(model, "net", None)
+    if net is None or not hasattr(net, "object_cls_embed"):
+        return
+
+    with torch.no_grad():
+        weight = net.object_cls_embed.weight.detach().float()
+        padding_idx = getattr(net.object_cls_embed, "padding_idx", None)
+        if padding_idx is None:
+            real_weight = weight
+            padding_abs_max = 0.0
+        else:
+            real_mask = torch.ones(weight.shape[0], dtype=torch.bool, device=weight.device)
+            real_mask[int(padding_idx)] = False
+            real_weight = weight[real_mask]
+            net.object_cls_embed.weight[int(padding_idx)].zero_()
+            padding_abs_max = float(weight[int(padding_idx)].abs().max().item())
+
+        real_abs_max = float(real_weight.abs().max().item()) if real_weight.numel() else 0.0
+        real_std = float(real_weight.std().item()) if real_weight.numel() > 1 else 0.0
+        print(
+            "Object class embedding init: "
+            f"real_abs_max={real_abs_max:.6e} "
+            f"real_std={real_std:.6e} "
+            f"padding_abs_max={padding_abs_max:.6e}"
+        )
+        if real_abs_max == 0.0:
+            raise RuntimeError(
+                "Object class embeddings for real object classes are all zero. "
+                "This would make laptop/book/phone/etc. indistinguishable at "
+                "object-token initialization."
+            )
 
 
 def build_parser():
@@ -429,6 +468,8 @@ def main():
             print("Unexpected keys:", result.unexpected_keys)
     elif hparams.actor_prompt:
         _initialize_actor_prompt_from_checkpoint(module, None)
+
+    _validate_object_prompt_initialization(module)
 
     if hparams.print_trainable_params:
         _print_trainable_parameters(module)

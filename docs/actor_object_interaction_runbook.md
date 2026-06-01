@@ -301,6 +301,15 @@ warmup, you should see object token/projection parameters, `object_interaction.*
 and heatmap head parameters. You should not see full transformer blocks or
 `model.head`, `actor_head`, or `presence_head` trainable.
 
+Also check this line before the first epoch starts:
+
+```text
+Object class embedding init: real_abs_max=... real_std=... padding_abs_max=0.000000e+00
+```
+
+`real_abs_max` and `real_std` must be nonzero. If they are zero, laptop/book/phone
+classes are indistinguishable at object-token initialization and the run is invalid.
+
 ```python
 import os
 import sys
@@ -653,9 +662,9 @@ PY
 
 ## Cell 5: Short Full Fine-Tune
 
-Only run this after the warmup shows positive-erased causal gain and no F1 collapse. The cell refuses to start if no warmup epoch passes the gate.
+Only run this after the warmup shows positive-erased causal gain and no severe F1 collapse. If you leave `START_CKPT_OVERRIDE` empty, the cell auto-selects the best passing warmup epoch and refuses to start if no epoch passes. If you are making a deliberate borderline run, paste an explicit warmup checkpoint path into `START_CKPT_OVERRIDE`.
 
-It starts from the best passing warmup epoch checkpoint, unfreezes the backbone, and uses a lower-memory batch shape (`batch_size=32`, `accum_grad_batches=2`) so the effective batch remains 64 without relying on the warmup memory profile.
+It unfreezes the backbone and uses a lower-memory batch shape (`batch_size=32`, `accum_grad_batches=2`) so the effective batch remains 64 without relying on the warmup memory profile. Default is 4 epochs; use 6 only as a deliberate longer run.
 
 ```python
 import os
@@ -663,6 +672,7 @@ import sys
 import shlex
 import subprocess
 import time
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -674,6 +684,14 @@ REQUIRED_COMMIT = os.environ.get("POGUISE_REQUIRED_COMMIT", "")
 WARMUP_PATTERN = "actor_object_poguiseplus_clean_actorfrozen_warmup_from_actor_slot_*"
 WARMUP_RUN_DIR_OVERRIDE = ""
 PASS_REQUIRED = True
+
+# Paste a specific warmup checkpoint here to bypass automatic gate selection.
+# Example:
+# START_CKPT_OVERRIDE = "/mnt/local-scratch/poguise_data/checkpoints/actor_object_poguiseplus_clean_actorfrozen_warmup_from_actor_slot_20260601_083153/epoch_checkpoints/epoch=002.ckpt"
+START_CKPT_OVERRIDE = ""
+
+# 4 is the recommended full fine-tune length. 6 is allowed but more likely to drift.
+FULLFT_EPOCHS = 4
 
 def load_colab_env(path=ENV_FILE):
     env = {}
@@ -759,6 +777,15 @@ def load_epoch_metrics(run):
         c: last_nonnull for c in df.columns if c != "epoch"
     })
     return metrics, epoch_df
+
+def infer_epoch_from_checkpoint(path):
+    match = re.search(r"epoch[=/-](\d+)", str(path))
+    if match:
+        return int(match.group(1))
+    match = re.search(r"(?:^|/)(\d{3})(?:$|\\.)", str(path))
+    if match:
+        return int(match.group(1))
+    return -1
 
 def choose_warmup_checkpoint(run, epoch_df):
     required = [
@@ -862,19 +889,33 @@ if REQUIRED_COMMIT:
 else:
     print("POGUISE_REQUIRED_COMMIT not set; using current checked-out code.", flush=True)
 
-warmup_run = find_warmup_run()
-metrics_path, epoch_df = load_epoch_metrics(warmup_run)
-best_epoch, START_CKPT = choose_warmup_checkpoint(warmup_run, epoch_df)
-require_file(START_CKPT, f"Warmup checkpoint epoch {best_epoch}")
+if FULLFT_EPOCHS < 1 or FULLFT_EPOCHS > 6:
+    raise SystemExit("FULLFT_EPOCHS must be between 1 and 6. Recommended: 4.")
+
+if START_CKPT_OVERRIDE:
+    START_CKPT = Path(START_CKPT_OVERRIDE)
+    best_epoch = infer_epoch_from_checkpoint(START_CKPT)
+    warmup_run = START_CKPT.parents[1] if START_CKPT.parent.name == "epoch_checkpoints" else START_CKPT.parent
+    metrics_path = None
+    require_file(START_CKPT, f"Manual warmup checkpoint epoch {best_epoch if best_epoch >= 0 else 'unknown'}")
+    print("\nMANUAL CHECKPOINT OVERRIDE ENABLED")
+    print("This bypasses the automatic pass gate. Use only for deliberate borderline runs.")
+else:
+    warmup_run = find_warmup_run()
+    metrics_path, epoch_df = load_epoch_metrics(warmup_run)
+    best_epoch, START_CKPT = choose_warmup_checkpoint(warmup_run, epoch_df)
+    require_file(START_CKPT, f"Warmup checkpoint epoch {best_epoch}")
 
 STAMP = time.strftime("%Y%m%d_%H%M%S")
-MODEL_NAME = f"actor_object_poguiseplus_clean_fullft_from_warmup_e{best_epoch:03d}_{STAMP}"
+epoch_tag = f"e{best_epoch:03d}" if best_epoch >= 0 else "manual"
+MODEL_NAME = f"actor_object_poguiseplus_clean_fullft_from_warmup_{epoch_tag}_{STAMP}"
 EPOCH_DIR = f"{DATA_DIR}/checkpoints/{MODEL_NAME}/epoch_checkpoints"
 
 print("\nwarmup run:", warmup_run)
 print("warmup metrics:", metrics_path)
 print("selected warmup checkpoint:", START_CKPT)
 print("full fine-tune model:", MODEL_NAME)
+print("full fine-tune epochs:", FULLFT_EPOCHS)
 
 cmd = [
     sys.executable, "-u", "train.py",
@@ -962,8 +1003,8 @@ cmd = [
     "--toyota_actor_background_box_prob", "0",
     "--batch_size", "32",
     "--accum_grad_batches", "2",
-    "--max_epochs", "2",
-    "--t_max_scheduler", "2",
+    "--max_epochs", str(FULLFT_EPOCHS),
+    "--t_max_scheduler", str(FULLFT_EPOCHS),
     "--lr", "5e-7",
     "--lr_head", "3e-5",
     "--lr_head_hm", "3e-5",
