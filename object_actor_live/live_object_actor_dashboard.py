@@ -5,6 +5,7 @@ import json
 import math
 import os
 import socket
+import sys
 import threading
 import time
 import warnings
@@ -16,6 +17,10 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from datasets.object_vocab import DETECTOR_TO_OBJECT, NONE_OBJECT_ID, OBJECT_CLASSES, OBJECT_TO_ID
 from live_actor_dashboard import (
