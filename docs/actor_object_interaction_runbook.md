@@ -58,6 +58,7 @@ python3 -m py_compile \
   modules/heatmap_module.py \
   losses/object_interaction_losses.py \
   train.py
+python3 object_actor_live/smoke_actor_object_decoder_identity.py --device cuda
 ```
 
 Also run a smoke forward. The expected output shape is:

@@ -106,6 +106,10 @@ class ActorObjectDecoder(nn.Module):
         self.ffn_gate_logit = nn.Parameter(
             torch.tensor(_logit(init_ffn_gate), dtype=torch.float32)
         )
+        nn.init.zeros_(self.update_proj[-1].weight)
+        nn.init.zeros_(self.update_proj[-1].bias)
+        nn.init.zeros_(self.ffn[-1].weight)
+        nn.init.zeros_(self.ffn[-1].bias)
 
     def _geometry(self, actor_boxes, object_boxes, num_actors: int):
         batch_size, num_objects, _ = object_boxes.shape
@@ -263,17 +267,26 @@ class ActorObjectDecoder(nn.Module):
             dtype=actor_tokens.dtype
         )
         real_alpha = alpha[..., :num_objects]
+        real_mass = real_alpha.sum(dim=-1, keepdim=True).clamp(0.0, 1.0)
         object_context = value[:, None, :, :] + pair_value
         context = (real_alpha[..., None] * object_context).sum(dim=2)
+        context = context / real_mass.clamp_min(1e-6)
+        context = torch.where(
+            real_mass > 1e-6,
+            context,
+            torch.zeros_like(context),
+        )
 
         update_gate = torch.sigmoid(self.update_gate_logit).to(dtype=actor_tokens.dtype)
         ffn_gate = torch.sigmoid(self.ffn_gate_logit).to(dtype=actor_tokens.dtype)
-        refined_actor = actor_tokens + update_gate * self.update_proj(
+        object_update = self.update_proj(
             self.update_norm(context)
         )
-        refined_actor = refined_actor + ffn_gate * self.ffn(
+        refined_actor = actor_tokens + update_gate * real_mass * object_update
+        ffn_update = self.ffn(
             self.ffn_norm(refined_actor)
         )
+        refined_actor = refined_actor + ffn_gate * real_mass * ffn_update
 
         interaction_heatmap = self._build_interaction_heatmap(
             alpha,
