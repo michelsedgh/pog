@@ -292,6 +292,26 @@ def _expand_heatmap_head_for_object_prompt(module, checkpoint):
     )
 
 
+def _print_trainable_parameters(module):
+    total = 0
+    trainable = 0
+    rows = []
+    for name, param in module.named_parameters():
+        numel = param.numel()
+        total += numel
+        if param.requires_grad:
+            trainable += numel
+            rows.append((name, numel))
+
+    pct = 100.0 * float(trainable) / float(total) if total else 0.0
+    print(
+        f"Trainable parameters: {trainable:,} / {total:,} "
+        f"({pct:.2f}%)"
+    )
+    for name, numel in rows:
+        print(f"TRAINABLE {name} {numel:,}")
+
+
 def build_parser():
     parser = ArgumentParser()
     parser = POGUISE.add_model_specific_args(parser)
@@ -345,6 +365,8 @@ def build_parser():
         default="{epoch:03d}",
     )
     parser.add_argument("--reload_dataloaders_every_n_epochs", type=int, default=0)
+    parser.add_argument("--print_trainable_params", type=int, default=0)
+    parser.add_argument("--exit_after_print_trainable_params", type=int, default=0)
 
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--lr_head", type=float, default=6e-4)
@@ -407,6 +429,11 @@ def main():
             print("Unexpected keys:", result.unexpected_keys)
     elif hparams.actor_prompt:
         _initialize_actor_prompt_from_checkpoint(module, None)
+
+    if hparams.print_trainable_params:
+        _print_trainable_parameters(module)
+        if hparams.exit_after_print_trainable_params:
+            return
 
     datamodule_params = vars(hparams).copy()
     datamodule_params.pop("dataset", None)

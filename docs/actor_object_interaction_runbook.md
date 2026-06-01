@@ -2,6 +2,20 @@
 
 This runbook is for the PO-GUISE+ style actor-object training path.
 
+Current decision: the architecture is ready for a controlled no-new-data test.
+Do not add another residual, specialist, class-prior, or relation-only path before
+this run. The remaining question is whether Toyota plus RF-DETR pseudo-object
+labels contain enough signal for the live laptop failure.
+
+The only approved flow here is:
+
+1. Run the Colab setup cell and reuse its cached paths.
+2. Run the architecture preflight smoke.
+3. Run a two-epoch frozen object-token warmup from the clean actor-slot checkpoint.
+4. Pick the earliest passing checkpoint, not the lowest validation loss.
+5. Only if warmup passes, run a two-epoch short unfreeze.
+6. Test the resulting checkpoint on the saved live laptop tensor.
+
 The model is trained and evaluated with the same object interface used at inference:
 
 - RF-DETR object boxes
@@ -38,7 +52,7 @@ Do not force strong positives for `WatchTV`, `Sitdown`, `Eat`, `Takepills`, or `
 
 ## Cell 1: Colab Setup
 
-Use your full setup cell here. It must install dependencies, pull `/content/pog`, download or reuse the Drive files, mount the frame tar archives, build `/mnt/local-scratch/poguise_data/frames`, and write `/content/poguise_colab_env.sh`.
+Use the full setup cell from the notebook. It must install dependencies, pull `/content/pog`, download or reuse the Drive files, mount the frame tar archives, build `/mnt/local-scratch/poguise_data/frames`, and write `/content/poguise_colab_env.sh`.
 
 The next cells intentionally read `/content/poguise_colab_env.sh` instead of redefining paths. That keeps the notebook consistent with the setup cell and lets later starts reuse:
 
@@ -56,9 +70,236 @@ The next cells intentionally read `/content/poguise_colab_env.sh` instead of red
 #   HARD_NEGATIVE_MANIFEST, FRAME_COUNT_CACHE, and TOYOTA_FRAMES_DIR.
 ```
 
-## Cell 2: Frozen-Backbone PO-GUISE+ Object Warmup
+## Cell 2: Architecture Preflight Smoke
+
+Run this once after Cell 1 and after every `git pull` that changes the object path. This cell does not load Toyota frames or start training. It verifies that the checked-out code is the clean object-token path and that invalid object candidates are truly neutral.
+
+```python
+import os
+import shlex
+import subprocess
+from pathlib import Path
+
+import torch
+
+ENV_FILE = "/content/poguise_colab_env.sh"
+REQUIRED_COMMIT = os.environ.get("POGUISE_REQUIRED_COMMIT", "")
+
+def load_colab_env(path=ENV_FILE):
+    env = {}
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Missing {path}. Run Cell 1 first.")
+    for raw_line in p.read_text().splitlines():
+        line = raw_line.strip()
+        if not line.startswith("export ") or "=" not in line:
+            continue
+        key, value = line[len("export "):].split("=", 1)
+        value = shlex.split(value)[0] if value else ""
+        env[key] = value
+        os.environ[key] = value
+    return env
+
+def run(cmd, cwd=None, check=True):
+    print("$ " + " ".join(shlex.quote(str(x)) for x in cmd), flush=True)
+    result = subprocess.run(
+        cmd,
+        cwd=cwd,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if result.stdout:
+        print(result.stdout, end="", flush=True)
+    if check and result.returncode != 0:
+        raise RuntimeError(f"Command failed with exit code {result.returncode}")
+    return result
+
+ENV = load_colab_env()
+REPO_DIR = ENV["REPO_DIR"]
+
+run(["git", "pull", "--ff-only", "origin", "main"], cwd=REPO_DIR)
+run(["git", "log", "-1", "--oneline"], cwd=REPO_DIR)
+if REQUIRED_COMMIT:
+    run(["git", "merge-base", "--is-ancestor", REQUIRED_COMMIT, "HEAD"], cwd=REPO_DIR)
+
+forbidden_terms = [
+    "none" + "_token",
+    "object" + "_specialist",
+    "object" + "_relation_only",
+    "object" + "_action_gate",
+    "object" + "_delta",
+    "logit" + " residual",
+    "actor_logits" + " \\+",
+]
+forbidden_pattern = "|".join(forbidden_terms)
+result = run(
+    [
+        "git",
+        "grep",
+        "-n",
+        "-E",
+        forbidden_pattern,
+        "--",
+        "models",
+        "modules",
+        "train.py",
+        "docs",
+        "blocks",
+    ],
+    cwd=REPO_DIR,
+    check=False,
+)
+if result.returncode == 0:
+    raise RuntimeError("Stale object path text/code matched the forbidden search above.")
+if result.returncode != 1:
+    raise RuntimeError(f"git grep failed with exit code {result.returncode}")
+print("Stale object path search: clean", flush=True)
+
+import sys
+sys.path.insert(0, REPO_DIR)
+from models.poguise import POGUISE
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+dtype = torch.float16 if device.type == "cuda" else torch.float32
+torch.manual_seed(0)
+
+model = POGUISE(
+    net_size="b",
+    pretrained="none",
+    mode="train",
+    dataset="toyotasm",
+    num_classes=31,
+    n_landmarks=13,
+    hw_out_conv=8,
+    drop_rate=0.0,
+    attn_drop_rate=0.0,
+    drop_path_rate=0.0,
+    head_drop_rate=0.0,
+    keep_rate=1.0,
+    keep_rate_merge=1.0,
+    enhanced_weight_class=1.0,
+    enhanced_weight_heatmap=1.0,
+    sim_metric=0,
+    topk_type=1,
+    merge_mode=0,
+    merge_type="tome",
+    use_register_tokens=0,
+    n_registers=0,
+    actor_prompt=1,
+    num_actor_tokens=8,
+    actor_presence_head=1,
+    actor_bbox_prior_weight=0.1,
+    actor_bbox_prior_expand=1.75,
+    object_prompt=1,
+    num_object_tokens=24,
+    num_object_classes=19,
+    object_bbox_prior_weight=0.05,
+    object_bbox_prior_expand=1.25,
+    object_pool_expand=1.2,
+    object_pair_pool_expand=1.1,
+    object_interaction_hidden_dim=128,
+    object_interaction_dropout=0.0,
+    object_heatmap_size=56,
+    freeze_backbone=0,
+    lr_head_hm=0.0,
+    ret_feat=0,
+    linear_probe=0,
+)
+model.eval().to(device=device, dtype=dtype)
+
+B, T, C, H, W = 1, 16, 3, 224, 224
+K, M = 8, 24
+x = torch.randn(B, T, C, H, W, device=device, dtype=dtype)
+boxes = torch.zeros(B, K, 4, device=device, dtype=dtype)
+boxes[0, 0] = torch.tensor([0.20, 0.20, 0.80, 0.95], device=device, dtype=dtype)
+valid = torch.zeros(B, K, device=device, dtype=torch.bool)
+valid[0, 0] = True
+object_boxes = torch.zeros(B, M, 4, device=device, dtype=dtype)
+object_boxes[0, 0] = torch.tensor([0.35, 0.45, 0.60, 0.62], device=device, dtype=dtype)
+object_boxes[0, 1] = torch.tensor([0.05, 0.10, 0.30, 0.60], device=device, dtype=dtype)
+object_cls = torch.full((B, M), 19, device=device, dtype=torch.long)
+object_cls[0, 0] = 1
+object_cls[0, 1] = 13
+object_conf = torch.zeros(B, M, device=device, dtype=dtype)
+object_conf[0, 0] = 0.9
+object_conf[0, 1] = 0.6
+object_valid = torch.zeros(B, M, device=device, dtype=torch.bool)
+object_valid[0, :2] = True
+
+with torch.inference_mode():
+    net_out = model.net(
+        x.permute(0, 2, 1, 3, 4),
+        boxes=boxes,
+        valid=valid,
+        object_boxes=object_boxes,
+        object_cls=object_cls,
+        object_conf=object_conf,
+        object_valid=object_valid,
+    )
+    pair_visual = net_out[-1]
+    out = model(
+        x,
+        boxes=boxes,
+        valid=valid,
+        object_boxes=object_boxes,
+        object_cls=object_cls,
+        object_conf=object_conf,
+        object_valid=object_valid,
+    )
+    action_logits, heatmaps, presence, selection_logits, interaction_heatmap = out
+
+    all_invalid = torch.zeros_like(object_valid)
+    off = model(
+        x,
+        boxes=boxes,
+        valid=valid,
+        object_boxes=object_boxes,
+        object_cls=object_cls,
+        object_conf=object_conf,
+        object_valid=all_invalid,
+    )
+    off_selection = off[3].float()
+    off_probs = torch.softmax(off_selection, dim=-1)
+    off_heatmap = off[4]
+
+print("device:", device, "dtype:", dtype)
+print("shape action_logits:", tuple(action_logits.shape))
+print("shape heatmaps:", tuple(heatmaps.shape))
+print("shape presence:", tuple(presence.shape))
+print("shape selection:", tuple(selection_logits.shape))
+print("shape interaction:", tuple(interaction_heatmap.shape))
+print("shape pair_visual:", tuple(pair_visual.shape))
+print("all_invalid real_logit_max:", off_selection[..., :-1].max().item())
+print("all_invalid none_prob_min:", off_probs[..., -1].min().item())
+print("all_invalid real_prob_max:", off_probs[..., :-1].max().item())
+print("all_invalid heatmap_abs_max:", off_heatmap.abs().max().item())
+
+assert tuple(action_logits.shape) == (1, 8, 31)
+assert tuple(heatmaps.shape) == (1, 32, 56, 56)
+assert tuple(presence.shape) == (1, 8)
+assert tuple(selection_logits.shape) == (1, 8, 25)
+assert tuple(interaction_heatmap.shape) == (1, 8, 56, 56)
+assert tuple(pair_visual.shape[:3]) == (1, 8, 24)
+assert pair_visual.shape[-1] == model.net.num_features
+assert all(torch.isfinite(t).all().item() for t in out)
+assert torch.isfinite(off_selection[..., -1]).all()
+assert off_probs[..., -1].min().item() > 0.999
+assert off_probs[..., :-1].max().item() < 1e-6
+assert off_heatmap.abs().max().item() < 1e-6
+
+print("Architecture preflight passed.", flush=True)
+```
+
+## Cell 3: Frozen-Backbone PO-GUISE+ Object Warmup
 
 This is the clean Actor-Object Token PO-GUISE+ warmup. The backbone and base actor path stay frozen; only the object token embeddings/projections, visual object grounding, actor-object selection head, and heatmap head train.
+
+The command prints trainable parameter names before dataset setup. During this
+warmup, you should see object token/projection parameters, `object_interaction.*`,
+and heatmap head parameters. You should not see full transformer blocks or
+`model.head`, `actor_head`, or `presence_head` trainable.
 
 ```python
 import os
@@ -261,6 +502,7 @@ cmd = [
     "--epoch_checkpoint_filename", "{epoch:03d}",
     "--default_root_dir", f"{DATA_DIR}/checkpoints",
     "--model_name", MODEL_NAME,
+    "--print_trainable_params", "1",
 ]
 
 run_stream(cmd, cwd=REPO_DIR)
@@ -270,10 +512,11 @@ print("Run:", f"{DATA_DIR}/checkpoints/{MODEL_NAME}")
 print("Epoch checkpoints:", EPOCH_DIR)
 ```
 
-## Cell 3: Check Warmup Metrics
+## Cell 4: Check Warmup Metrics
 
-This cell reads the same setup env file as Cell 2 and only searches the clean warmup run pattern. If you want a specific run, set `RUN_DIR_OVERRIDE` to its full checkpoint directory.
+This cell reads the same setup env file as Cell 3 and only searches the clean warmup run pattern. If you want a specific run, set `RUN_DIR_OVERRIDE` to its full checkpoint directory.
 
+```bash
 cd /content/pog
 
 python3 - <<'PY'
@@ -406,8 +649,9 @@ print("- pass_gate=True means worth considering.")
 print("- Do not trust a checkpoint just because val_loss drops.")
 print("- Best warmup is usually the earliest passing epoch, not necessarily the last.")
 PY
+```
 
-## Cell 4: Short Full Fine-Tune
+## Cell 5: Short Full Fine-Tune
 
 Only run this after the warmup shows positive-erased causal gain and no F1 collapse. The cell refuses to start if no warmup epoch passes the gate.
 
@@ -747,6 +991,7 @@ cmd = [
     "--epoch_checkpoint_filename", "{epoch:03d}",
     "--default_root_dir", f"{DATA_DIR}/checkpoints",
     "--model_name", MODEL_NAME,
+    "--print_trainable_params", "1",
 ]
 
 run_stream(cmd, cwd=REPO_DIR)
@@ -756,12 +1001,57 @@ print("Run:", f"{DATA_DIR}/checkpoints/{MODEL_NAME}")
 print("Epoch checkpoints:", EPOCH_DIR)
 ```
 
-## Cell 5: Check Full Fine-Tune Metrics
+## Cell 6: Check Full Fine-Tune Metrics
 
-Run Cell 3 again with this one line changed:
+Run Cell 4 again with this one line changed:
 
 ```python
 RUN_PATTERN = "actor_object_poguiseplus_clean_fullft_from_warmup_e*"
 ```
 
 Use `RUN_DIR_OVERRIDE` if you want to inspect one exact full fine-tune directory instead of the newest matching run.
+
+## Cell 7: Live Tensor A/B Test
+
+Toyota validation is not enough for the laptop failure because `Uselaptop` can
+be saturated on the Toyota split. After choosing the earliest passing warmup or
+short-unfreeze checkpoint, copy that checkpoint to the Orin and run the saved
+live tensor diagnostic in PyTorch before exporting TensorRT.
+
+On the Orin:
+
+```bash
+cd /home/michel/Documents/poguise
+conda activate voice_id
+
+python object_actor_live/analyze_live_object_sensitivity.py \
+  --checkpoint /path/to/best_object_token_checkpoint.ckpt \
+  --input-pt object_actor_live/latest_epoch001_actor_input.pt \
+  --device cuda \
+  --dtype auto
+```
+
+If the Orin is low on memory, skip the gradient audit:
+
+```bash
+python object_actor_live/analyze_live_object_sensitivity.py \
+  --checkpoint /path/to/best_object_token_checkpoint.ckpt \
+  --input-pt object_actor_live/latest_epoch001_actor_input.pt \
+  --device cuda \
+  --dtype auto \
+  --skip-gradient
+```
+
+Use the checkpoint only if the live tensor shows object sensitivity in the right
+direction:
+
+- `laptop_only` should raise `Uselaptop` relative to `objects_off`, or at least
+  move it meaningfully.
+- `positive_erased_laptop` should lower the laptop-supported action evidence.
+- `laptop_class_changed_to_book` or `laptop_box_moved_away` should change the
+  relevant logits.
+- If the script says no laptop/keyboard object exists in the tensor, save a new
+  tensor while RF-DETR is actually detecting the laptop.
+
+If the live tensor still shows `laptop selected but Uselaptop barely moves`,
+the next blocker is distribution gap, not another object architecture patch.

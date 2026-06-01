@@ -22,6 +22,11 @@ There is one active object path:
 
 The model no longer has a post-backbone object adapter, free action-score overrides, specialist rerankers, or relation-only modes. Object evidence must enter through transformer tokens and affect the actor token before `actor_head`.
 
+This is the final architecture to test before collecting new live-like data. Do
+not add another object bridge or training branch unless the controlled warmup,
+short unfreeze, and live tensor A/B show that this path still cannot move the
+target action logits.
+
 ## Runtime Inputs
 
 Training and inference use the same object contract:
@@ -142,6 +147,7 @@ Frozen object-token warmup:
 - `--object_prompt 1`
 - `--freeze_backbone 1`
 - `--object_warmup_freeze_actor_path 1`
+- actor classifier, presence head, and global classifier are frozen
 - `--object_heatmap_weight 50`
 - `--object_interaction_loss_weight 0.10`
 - `--object_interaction_heatmap_weight 50`

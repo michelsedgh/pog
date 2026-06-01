@@ -348,6 +348,14 @@ class POGUISE(pl.LightningModule):
                 "Object warmup: freezing base actor path; training object tokens, "
                 "actor-object selection, and heatmap head only."
             )
+            for param in self.head.parameters():
+                param.requires_grad = False
+            if self.actor_prompt:
+                for param in self.actor_head.parameters():
+                    param.requires_grad = False
+                if self.presence_head is not None:
+                    for param in self.presence_head.parameters():
+                        param.requires_grad = False
         # Unfreeze the head
         if not object_warmup_freeze_actor_path:
             for param in self.head.parameters():

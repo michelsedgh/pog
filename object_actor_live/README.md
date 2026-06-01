@@ -108,6 +108,41 @@ python object_actor_live/live_object_actor_dashboard.py \
   --smoke
 ```
 
+## 6. Live Tensor Sensitivity Test
+
+Before judging a new object-token checkpoint by the dashboard, test the exact
+saved live tensor in PyTorch. This avoids TensorRT/ONNX/runtime differences and
+answers whether the checkpoint actually changes action logits when the laptop
+object is removed, isolated, moved, or relabeled.
+
+Use an input written by the dashboard with `--debug-save-latest-input`:
+
+```bash
+python object_actor_live/analyze_live_object_sensitivity.py \
+  --checkpoint checkpoints/object_actor/epoch=000.ckpt \
+  --input-pt object_actor_live/latest_epoch001_actor_input.pt \
+  --device cuda \
+  --dtype auto
+```
+
+For low-memory Orin runs:
+
+```bash
+python object_actor_live/analyze_live_object_sensitivity.py \
+  --checkpoint checkpoints/object_actor/epoch=000.ckpt \
+  --input-pt object_actor_live/latest_epoch001_actor_input.pt \
+  --device cuda \
+  --dtype auto \
+  --skip-gradient
+```
+
+The important rows are `objects_on`, `objects_off`, `laptop_only`,
+`positive_erased_laptop`, `laptop_class_changed_to_book`, and
+`laptop_box_moved_away`. A useful checkpoint should move the `Uselaptop` logit
+when those object facts change. If the script says the tensor contains no
+laptop/keyboard object, save a new live tensor while RF-DETR is actually drawing
+the laptop.
+
 ## Notes
 
 - TensorRT engines are hardware/version specific. Build the engine on the Orin Nano that will run it.
