@@ -13,9 +13,9 @@ class ObjectInteractionHead(nn.Module):
       * actor-conditioned object/NONE selection logits
       * actor-conditioned interaction heatmaps built from selected object boxes
 
-    It intentionally does not produce a feature update or logit residual. The
-    action classifier reads actor tokens that have already attended to object
-    tokens inside the transformer.
+    It intentionally does not produce action-score adjustments. The action
+    classifier reads actor tokens that have already attended to object tokens
+    inside the transformer.
     """
 
     def __init__(

@@ -20,7 +20,7 @@ There is one active object path:
    final actor/object tokens plus pooled actor-object union visual features.
 7. Train with visible-object heatmaps, strong-object selection targets, interaction heatmaps, positive-erased counterfactuals, shuffled-object counterfactuals, and objectless consistency.
 
-The model no longer has a post-backbone object adapter, a free logit residual, specialist rerankers, or relation-only modes. Object evidence must enter through transformer tokens and affect the actor token before `actor_head`.
+The model no longer has a post-backbone object adapter, free action-score overrides, specialist rerankers, or relation-only modes. Object evidence must enter through transformer tokens and affect the actor token before `actor_head`.
 
 ## Runtime Inputs
 
