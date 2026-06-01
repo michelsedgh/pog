@@ -322,8 +322,15 @@ class KTPAttention(Attention):
         self.bbox_prior_weight = float(bbox_prior_weight)
         self.needs_full_attention = bool(needs_full_attention)
 
-    def forward_part1(self, x, size=None):
+    def forward_part1(self, x, size=None, key_padding_mask=None):
         B, N, C = x.shape
+        if key_padding_mask is not None:
+            if key_padding_mask.shape != (B, N):
+                raise ValueError(
+                    "key_padding_mask must have shape "
+                    f"{(B, N)}, got {tuple(key_padding_mask.shape)}"
+                )
+            key_padding_mask = key_padding_mask.to(device=x.device, dtype=torch.bool)
         qkv_bias = None
         if self.q_bias is not None:
             qkv_bias = torch.cat(
@@ -345,11 +352,36 @@ class KTPAttention(Attention):
         if self.keep_rate >= 1 and not self.needs_full_attention:
             # use flash attention
             dropout_p = self.attn_drop.p if self.training else 0.0
-            x = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p)
+            attn_mask = None
+            if key_padding_mask is not None and key_padding_mask.any():
+                attn_mask = torch.zeros(
+                    B,
+                    1,
+                    1,
+                    N,
+                    device=x.device,
+                    dtype=q.dtype,
+                )
+                attn_mask = attn_mask.masked_fill(
+                    key_padding_mask[:, None, None, :],
+                    torch.finfo(q.dtype).min,
+                )
+            x = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p=dropout_p,
+            )
             x = x.transpose(1, 2).reshape(B, N, -1)
             attn = None
         else:
             attn = (q * self.scale) @ k.transpose(-2, -1)
+            if key_padding_mask is not None and key_padding_mask.any():
+                attn = attn.masked_fill(
+                    key_padding_mask[:, None, None, :],
+                    torch.finfo(attn.dtype).min,
+                )
             attn = attn.softmax(dim=-1)
 
             attn_for_output = self.attn_drop(attn)
@@ -367,12 +399,24 @@ class KTPAttention(Attention):
             sim_feat = v
         return x, attn, sim_feat
 
-    def forward(self, x, last_idx=None, ws=None, size=None, bbox_token_prior=None):
+    def forward(
+        self,
+        x,
+        last_idx=None,
+        ws=None,
+        size=None,
+        bbox_token_prior=None,
+        key_padding_mask=None,
+    ):
         B, N, C = x.shape
         if self.keep_rate < 1:
-            x, attn, feature = self.forward_part1(x, size)
+            x, attn, feature = self.forward_part1(
+                x, size, key_padding_mask=key_padding_mask
+            )
         else:
-            x, attn, feature = self.forward_part1(x, size)
+            x, attn, feature = self.forward_part1(
+                x, size, key_padding_mask=key_padding_mask
+            )
             return x, last_idx, attn if self.sim_metric == 1 else feature
 
         # get top-k tokens and the corresponding indexes
@@ -382,6 +426,11 @@ class KTPAttention(Attention):
             if num_keep_tokens > 0:
                 # class token query enhancement
                 attn_topk = attn.clone()
+                if key_padding_mask is not None and key_padding_mask.any():
+                    attn_topk = attn_topk.masked_fill(
+                        key_padding_mask[:, None, :, None],
+                        0.0,
+                    )
                 attn_topk[:, :, 0] *= self.enhanced_weight_class
                 if self.n_heatmap_tokens:
                     # heatmap token query enhancement
@@ -501,7 +550,14 @@ class Block(nn.Module):
         else:
             self.gamma_1, self.gamma_2 = None, None
 
-    def forward_KTPpart1(self, x, last_idx, window_size, bbox_token_prior=None):
+    def forward_KTPpart1(
+        self,
+        x,
+        last_idx,
+        window_size,
+        bbox_token_prior=None,
+        key_padding_mask=None,
+    ):
         # check if self._size_attn shape matches with x
         if self.gamma_1 is None:
             tmp, idx, attn = self.attn(
@@ -510,10 +566,17 @@ class Block(nn.Module):
                 window_size,
                 self._size_attn,
                 bbox_token_prior=bbox_token_prior,
+                key_padding_mask=key_padding_mask,
             )
             return self.drop_path(tmp), idx, attn
         else:
-            attn, idx = self.attn(self.norm1(x), last_idx, window_size, self._size_attn)
+            attn, idx = self.attn(
+                self.norm1(x),
+                last_idx,
+                window_size,
+                self._size_attn,
+                key_padding_mask=key_padding_mask,
+            )
             return self.drop_path(self.gamma_1 * attn), idx
 
     def forward_KTP_part2(self, x):
@@ -522,16 +585,34 @@ class Block(nn.Module):
         else:
             return self.drop_path(self.gamma_2 * self.mlp(self.norm2(x)))
 
-    def forward(self, x, last_idx, window_size, bbox_token_prior=None):
+    def forward(
+        self,
+        x,
+        last_idx,
+        window_size,
+        bbox_token_prior=None,
+        key_padding_mask=None,
+    ):
         # attn
         tmp, idx, attn = self.forward_KTPpart1(
-            x, last_idx, window_size, bbox_token_prior=bbox_token_prior
+            x,
+            last_idx,
+            window_size,
+            bbox_token_prior=bbox_token_prior,
+            key_padding_mask=key_padding_mask,
         )
         x = x + tmp
 
         # class token heatmap -centric token pruning
         B, N, C = x.shape
         num_s_tokens = self.n_heatmap_tokens + self.n_key_tokens  # 1 for class token
+        if key_padding_mask is not None:
+            if key_padding_mask.shape != (B, N):
+                raise ValueError(
+                    "key_padding_mask must have shape "
+                    f"{(B, N)}, got {tuple(key_padding_mask.shape)}"
+                )
+            key_padding_mask = key_padding_mask.to(device=x.device, dtype=torch.bool)
         if self.keep_rate < 1:
             x_key = x[:, :num_s_tokens]
             x_nonkey_keep = x[:, num_s_tokens:]
@@ -608,6 +689,15 @@ class Block(nn.Module):
                 idx = torch.gather(last_idx, dim=1, index=idx)
 
             x = torch.cat([x_key, x_nonkey_keep], dim=1)
+            if key_padding_mask is not None:
+                key_mask = key_padding_mask[:, :num_s_tokens]
+                nonkey_mask = torch.zeros(
+                    B,
+                    x_nonkey_keep.shape[1],
+                    dtype=torch.bool,
+                    device=x.device,
+                )
+                key_padding_mask = torch.cat([key_mask, nonkey_mask], dim=1)
         elif self.keep_rate_merge < 1:
             num_s_tokens = self.n_heatmap_tokens + self.n_key_tokens
             x_key = x[:, :num_s_tokens]
@@ -620,9 +710,20 @@ class Block(nn.Module):
             )
             x_nonkey_keep = self.merge_wavg(merge, x_nonkey_keep)
             x = torch.cat([x_key, x_nonkey_keep], dim=1)
+            if key_padding_mask is not None:
+                key_mask = key_padding_mask[:, :num_s_tokens]
+                nonkey_mask = torch.zeros(
+                    B,
+                    x_nonkey_keep.shape[1],
+                    dtype=torch.bool,
+                    device=x.device,
+                )
+                key_padding_mask = torch.cat([key_mask, nonkey_mask], dim=1)
         x = x + self.forward_KTP_part2(x)
+        if key_padding_mask is not None:
+            x = x.masked_fill(key_padding_mask.unsqueeze(-1), 0.0)
 
-        return x, idx
+        return x, idx, key_padding_mask
 
     def bipartite_soft_matching(
         self,
@@ -974,6 +1075,7 @@ class VisionTransformer(nn.Module):
             self.object_cls_embed = nn.Embedding(
                 self.num_object_classes + 1,
                 self.num_features,
+                padding_idx=self.num_object_classes,
             )
             self.object_valid_embed = nn.Embedding(2, self.num_features)
             self.object_bbox_mlp = nn.Sequential(
@@ -994,6 +1096,8 @@ class VisionTransformer(nn.Module):
             )
             nn.init.zeros_(self.object_slot_embed)
             nn.init.normal_(self.object_cls_embed.weight, std=0.02)
+            with torch.no_grad():
+                self.object_cls_embed.weight[self.num_object_classes].zero_()
             nn.init.zeros_(self.object_valid_embed.weight)
             nn.init.zeros_(self.object_bbox_mlp[-1].weight)
             nn.init.zeros_(self.object_bbox_mlp[-1].bias)
@@ -1113,6 +1217,7 @@ class VisionTransformer(nn.Module):
             + self.object_visual_proj(object_visual_feat)
             + self.object_valid_embed(object_valid.long()).to(dtype=dtype)
         )
+        object_tokens = object_tokens * object_valid.to(dtype=dtype).unsqueeze(-1)
         return object_tokens, object_boxes, object_valid, object_conf
 
     def _expand_boxes(self, boxes, expand):
@@ -1333,6 +1438,7 @@ class VisionTransformer(nn.Module):
         object_conf_for_prior = None
         object_tokens = None
         pair_visual_features = None
+        token_key_padding_mask = None
         if self.n_object_tokens > 0:
             (
                 object_tokens,
@@ -1416,11 +1522,29 @@ class VisionTransformer(nn.Module):
 
         # append class token to the beginning of the sequence
         x = torch.cat([self.class_token.expand(B, -1, -1), x], dim=1)
+        if object_valid_for_prior is not None:
+            token_key_padding_mask = torch.zeros(
+                B,
+                x.shape[1],
+                dtype=torch.bool,
+                device=x.device,
+            )
+            object_start = 1 + self.n_actor_tokens
+            object_end = object_start + self.n_object_tokens
+            token_key_padding_mask[:, object_start:object_end] = (
+                ~object_valid_for_prior
+            )
         # keep the global indexes of non-keyframe tokens during pruning
         idx = torch.arange(0, N, device=x.device).unsqueeze(0).repeat(B, 1)
         for i in range(self.depth):
             blk = self.blocks[i]
-            x, idx = blk(x, idx, ws, bbox_token_prior=bbox_token_prior)
+            x, idx, token_key_padding_mask = blk(
+                x,
+                idx,
+                ws,
+                bbox_token_prior=bbox_token_prior,
+                key_padding_mask=token_key_padding_mask,
+            )
 
         if self.n_actor_tokens > 0:
             actor_start = 1

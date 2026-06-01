@@ -66,6 +66,18 @@ object_token =
 + object_valid_embed(object_valid)
 ```
 
+Invalid/padded object slots are neutralized before transformer attention:
+
+- the NONE object class id uses `padding_idx=num_object_classes`
+- invalid object tokens are zeroed after token construction
+- invalid object-token key positions are masked in every attention block
+- invalid object-token query rows are excluded from token-pruning attention scores
+- invalid object-token features are zeroed after each block
+
+This makes `objects_off` and `positive_erased` mean that the corresponding
+object evidence is genuinely unavailable to the actor tokens, not just hidden
+from the later selection loss.
+
 The pooling is fixed-grid tensor math over the patch embedding output, not
 ROIAlign. This keeps the path compatible with ONNX export and avoids dynamic
 crop operations.
