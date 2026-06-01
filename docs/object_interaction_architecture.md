@@ -152,20 +152,31 @@ Frozen object-token warmup:
 - `--object_prompt 1`
 - `--freeze_backbone 1`
 - `--object_warmup_freeze_actor_path 1`
+- `--object_unfreeze_last_blocks 2`
 - actor classifier, presence head, and global classifier are frozen
 - `--object_heatmap_weight 50`
 - `--object_interaction_loss_weight 0.10`
 - `--object_interaction_heatmap_weight 50`
-- `--object_counterfactual_margin_weight 0.10`
+- `--object_counterfactual_margin_weight 0.05`
 - `--object_counterfactual_margin 0.05`
+- `--object_action_sensitivity_weight 0.10`
+- `--object_action_sensitivity_margin 0.05`
+- `--object_action_group_sensitivity_weight 0.10`
+- `--object_action_group_sensitivity_margin 0.05`
 - `--object_objectless_consistency_weight 0.02`
 - `--kp_loss_weight 1000`
+- `--lr 5e-7`
 - `--lr_head 5e-5`
 - `--lr_head_hm 5e-5`
 - `--class_balanced_sampler 1`
 - `--hard_negative_sampler 1`
 - `--hard_negative_prob 0.15`
 - `--max_epochs 2`
+
+`--object_unfreeze_last_blocks 2` is intentional. The actor/object decoder
+learns explicit binding, while the final transformer blocks learn to carry
+object-token evidence into actor tokens. Do not unfreeze the whole model during
+warmup.
 
 Only after the frozen warmup passes, run a short integrated fine-tune:
 

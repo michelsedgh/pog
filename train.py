@@ -323,16 +323,17 @@ def _validate_object_prompt_initialization(module):
         return
 
     with torch.no_grad():
-        weight = net.object_cls_embed.weight.detach().float()
         padding_idx = getattr(net.object_cls_embed, "padding_idx", None)
         if padding_idx is None:
+            weight = net.object_cls_embed.weight.detach().float()
             real_weight = weight
             padding_abs_max = 0.0
         else:
+            net.object_cls_embed.weight[int(padding_idx)].zero_()
+            weight = net.object_cls_embed.weight.detach().float()
             real_mask = torch.ones(weight.shape[0], dtype=torch.bool, device=weight.device)
             real_mask[int(padding_idx)] = False
             real_weight = weight[real_mask]
-            net.object_cls_embed.weight[int(padding_idx)].zero_()
             padding_abs_max = float(weight[int(padding_idx)].abs().max().item())
 
         real_abs_max = float(real_weight.abs().max().item()) if real_weight.numel() else 0.0
