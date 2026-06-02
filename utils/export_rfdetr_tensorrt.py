@@ -14,7 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Export RF-DETR to ONNX and TensorRT for the object actor dashboard."
+        description="Export RF-DETR to ONNX and TensorRT for teacher-cache generation or visualization."
     )
     parser.add_argument(
         "--model-size",
@@ -22,8 +22,13 @@ def parse_args():
         choices=["nano", "small", "medium", "base", "large", "xlarge", "2xlarge"],
     )
     parser.add_argument("--weights", default=None)
-    parser.add_argument("--out-dir", default="object_actor_live/exports/rfdetr_nano")
-    parser.add_argument("--shape", type=int, default=0, help="Static square input size. 0 keeps RF-DETR default.")
+    parser.add_argument("--out-dir", default="exports/rfdetr_nano")
+    parser.add_argument(
+        "--shape",
+        type=int,
+        default=0,
+        help="Static square input size. 0 keeps the RF-DETR default.",
+    )
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--opset", type=int, default=17)
     parser.add_argument("--trtexec", default=None)

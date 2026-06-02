@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import argparse
 import os
 import sys
@@ -7,12 +8,7 @@ import traceback
 import numpy as np
 import torch
 
-from datasets.object_vocab import (
-    NONE_OBJECT_ID,
-    NUM_OBJECT_CLASSES,
-    OBJECT_CLASSES,
-    OBJECT_TO_ID,
-)
+from datasets.object_vocab import NONE_OBJECT_ID, OBJECT_CLASSES, OBJECT_TO_ID
 from datasets.toyotasm import CS_DICT, ToyotaSMDataset
 
 
@@ -24,23 +20,24 @@ class SmokeReport:
     def check(self, condition, message, details=None):
         if bool(condition):
             self.passed += 1
-            print(f"[PASS] {message}")
+            print(f"[PASS] {message}", flush=True)
             return
         self.failed += 1
-        print(f"[FAIL] {message}")
+        print(f"[FAIL] {message}", flush=True)
         if details is not None:
-            print(f"       {details}")
+            print(f"       {details}", flush=True)
 
     def finish(self):
-        print(f"\nSummary: {self.passed} passed, {self.failed} failed")
+        print(f"\nSummary: {self.passed} passed, {self.failed} failed", flush=True)
         return self.failed == 0
 
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="Smoke-test Toyota object-prompt dataset outputs."
+        description="Smoke-test Toyota actor-conditioned interaction heatmap targets."
     )
     parser.add_argument("--data_dir", default=os.getenv("DATA_DIR", "."))
+    parser.add_argument("--toyota_frame_source", default="mp4_zip", choices=["mp4_zip", "frames"])
     parser.add_argument("--toyota_mp4_zip", default=os.getenv("MP4_ZIP"))
     parser.add_argument("--toyota_skeleton_zip", default=os.getenv("SKELETON_ZIP"))
     parser.add_argument("--object_detector_cache", required=True)
@@ -55,26 +52,27 @@ def build_parser():
         "--toyota_frame_count_cache", default=os.getenv("FRAME_COUNT_CACHE")
     )
     parser.add_argument("--toyota_max_samples", type=int, default=64)
-    parser.add_argument("--scan_samples", type=int, default=32)
+    parser.add_argument("--scan_samples", type=int, default=64)
     parser.add_argument("--sample_index", type=int, default=None)
     parser.add_argument("--n_frames", type=int, default=16)
     parser.add_argument("--n_landmarks", type=int, default=13)
     parser.add_argument("--num_actor_tokens", type=int, default=8)
-    parser.add_argument("--num_object_tokens", type=int, default=24)
-    parser.add_argument("--num_object_classes", type=int, default=NUM_OBJECT_CLASSES)
     parser.add_argument("--num_classes", type=int, default=31)
     parser.add_argument("--object_conf_threshold", type=float, default=0.25)
+    parser.add_argument("--object_camera_allowlist", default=None)
+    parser.add_argument("--object_ignore_regions", default=None)
+    parser.add_argument("--object_track_iou_threshold", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
-        "--allow_empty_object_sample",
+        "--allow_no_interaction_sample",
         action="store_true",
-        help="Do not fail if no cached objects are found in the scanned samples.",
+        help="Do not fail if the scan finds no strong-action interaction target.",
     )
     return parser
 
 
 def dataset_kwargs(args, synthetic_two_actor=False):
-    return {
+    kwargs = {
         "data_dir": args.data_dir,
         "set_type": "train",
         "task_type": "CS",
@@ -86,15 +84,14 @@ def dataset_kwargs(args, synthetic_two_actor=False):
         "jitter_scales_max": 320,
         "actor_prompt": 1,
         "num_actor_tokens": args.num_actor_tokens,
-        "object_prompt": 1,
+        "actor_interaction_heatmaps": 1,
         "object_detector_cache": args.object_detector_cache,
-        "num_object_tokens": args.num_object_tokens,
-        "num_object_classes": args.num_object_classes,
+        "object_camera_allowlist": args.object_camera_allowlist,
+        "object_ignore_regions": args.object_ignore_regions,
         "object_conf_threshold": args.object_conf_threshold,
-        "toyota_frame_source": "mp4_zip",
-        "toyota_mp4_zip": args.toyota_mp4_zip,
+        "object_track_iou_threshold": args.object_track_iou_threshold,
+        "toyota_frame_source": args.toyota_frame_source,
         "toyota_skeleton_zip": args.toyota_skeleton_zip,
-        "toyota_video_cache_dir": args.toyota_video_cache_dir,
         "toyota_frame_count_cache": args.toyota_frame_count_cache,
         "toyota_split_source": "auto",
         "toyota_max_samples": args.toyota_max_samples,
@@ -103,6 +100,10 @@ def dataset_kwargs(args, synthetic_two_actor=False):
         "toyota_synthetic_three_actor_prob": 0.0,
         "toyota_synthetic_same_class_prob": 0.0,
     }
+    if args.toyota_frame_source == "mp4_zip":
+        kwargs["toyota_mp4_zip"] = args.toyota_mp4_zip
+        kwargs["toyota_video_cache_dir"] = args.toyota_video_cache_dir
+    return kwargs
 
 
 def build_dataset(args, synthetic_two_actor=False):
@@ -120,31 +121,30 @@ def action_name(label):
 
 
 def print_target_summary(name, target):
-    print(f"\n{name}")
+    print(f"\n{name}", flush=True)
     for key in (
-        "object_boxes",
-        "object_cls",
-        "object_conf",
-        "object_valid",
+        "boxes",
+        "valid",
+        "actions",
         "interaction_cls",
         "interaction_valid",
-        "interaction_positive_mask",
         "interaction_heatmap",
         "interaction_heatmap_valid",
     ):
         value = target[key]
-        print(f"{key}: {tuple(value.shape)} {value.dtype}")
+        print(f"{key}: {tuple(value.shape)} {value.dtype}", flush=True)
     valid_actions = target["actions"][target["valid"]]
     action_text = [action_name(label) for label in valid_actions.tolist()]
-    object_ids = target["object_cls"][target["object_valid"]].tolist()
-    object_text = [OBJECT_CLASSES[int(cls_id)] for cls_id in object_ids]
-    print("actions:", action_text)
-    print("objects:", object_text)
-    print("interaction_cls:", target["interaction_cls"])
-    print("interaction_valid:", target["interaction_valid"])
+    interactions = []
+    for slot in torch.nonzero(target["interaction_valid"], as_tuple=False).flatten():
+        cls_id = int(target["interaction_cls"][slot])
+        cls_name = "NONE" if cls_id == NONE_OBJECT_ID else OBJECT_CLASSES[cls_id]
+        interactions.append(f"slot{int(slot)}:{cls_name}")
+    print("actions:", action_text, flush=True)
+    print("interactions:", interactions or "none", flush=True)
 
 
-def validate_object_target(name, frames, target, args, report):
+def validate_interaction_target(name, frames, target, args, report):
     print_target_summary(name, target)
 
     report.check(
@@ -154,73 +154,11 @@ def validate_object_target(name, frames, target, args, report):
     )
     report.check(torch.isfinite(frames).all(), f"{name}: frames are finite")
 
-    object_boxes = target["object_boxes"]
-    object_cls = target["object_cls"]
-    object_conf = target["object_conf"]
-    object_valid = target["object_valid"].bool()
+    actor_valid = target["valid"].bool()
     interaction_cls = target["interaction_cls"]
     interaction_valid = target["interaction_valid"].bool()
-    interaction_positive_mask = target["interaction_positive_mask"].bool()
     interaction_heatmap = target["interaction_heatmap"]
     interaction_heatmap_valid = target["interaction_heatmap_valid"].bool()
-
-    report.check(
-        object_boxes.shape == (args.num_object_tokens, 4),
-        f"{name}: object_boxes shape is [M, 4]",
-        object_boxes.shape,
-    )
-    report.check(
-        object_cls.shape == (args.num_object_tokens,),
-        f"{name}: object_cls shape is [M]",
-        object_cls.shape,
-    )
-    report.check(
-        object_conf.shape == (args.num_object_tokens,),
-        f"{name}: object_conf shape is [M]",
-        object_conf.shape,
-    )
-    report.check(
-        object_valid.shape == (args.num_object_tokens,),
-        f"{name}: object_valid shape is [M]",
-        object_valid.shape,
-    )
-    report.check(object_valid.dtype == torch.bool, f"{name}: object_valid is bool")
-    report.check(torch.isfinite(object_boxes).all(), f"{name}: object boxes finite")
-    report.check(torch.isfinite(object_conf).all(), f"{name}: object conf finite")
-    report.check(
-        bool(((object_boxes >= 0.0) & (object_boxes <= 1.0)).all()),
-        f"{name}: object boxes normalized to [0, 1]",
-    )
-    if object_valid.any():
-        valid_boxes = object_boxes[object_valid]
-        positive_area = (valid_boxes[:, 2] > valid_boxes[:, 0]) & (
-            valid_boxes[:, 3] > valid_boxes[:, 1]
-        )
-        report.check(
-            bool(positive_area.all()),
-            f"{name}: valid object boxes have positive area",
-            valid_boxes,
-        )
-        report.check(
-            bool(
-                (
-                    (object_cls[object_valid] >= 0)
-                    & (object_cls[object_valid] < args.num_object_classes)
-                ).all()
-            ),
-            f"{name}: valid object classes are in [0, C_obj)",
-            object_cls[object_valid],
-        )
-        report.check(
-            bool((object_conf[object_valid] > 0).all()),
-            f"{name}: valid object confidence is positive",
-            object_conf[object_valid],
-        )
-    report.check(
-        bool((object_cls[~object_valid] == NONE_OBJECT_ID).all()),
-        f"{name}: invalid object class ids use NONE pad",
-        object_cls,
-    )
 
     report.check(
         interaction_cls.shape == (args.num_actor_tokens,),
@@ -233,18 +171,6 @@ def validate_object_target(name, frames, target, args, report):
         interaction_valid.shape,
     )
     report.check(interaction_valid.dtype == torch.bool, f"{name}: interaction_valid is bool")
-    report.check(
-        interaction_positive_mask.shape == (
-            args.num_actor_tokens,
-            args.num_object_tokens + 1,
-        ),
-        f"{name}: interaction_positive_mask shape is [K, M+1]",
-        interaction_positive_mask.shape,
-    )
-    report.check(
-        interaction_positive_mask.dtype == torch.bool,
-        f"{name}: interaction_positive_mask is bool",
-    )
     report.check(
         interaction_heatmap.shape == (args.num_actor_tokens, 56, 56),
         f"{name}: interaction_heatmap shape is [K, 56, 56]",
@@ -267,13 +193,14 @@ def validate_object_target(name, frames, target, args, report):
         bool(((interaction_heatmap >= 0.0) & (interaction_heatmap <= 1.0)).all()),
         f"{name}: interaction_heatmap is in [0, 1]",
     )
-    if interaction_heatmap_valid.any():
-        valid_max = interaction_heatmap[interaction_heatmap_valid].flatten(1).max(dim=1).values
-        report.check(
-            bool((valid_max > 0).all()),
-            f"{name}: valid interaction heatmaps contain blobs",
-            valid_max,
-        )
+    report.check(
+        bool((interaction_valid <= actor_valid).all()),
+        f"{name}: interaction targets only exist on valid actor slots",
+    )
+    report.check(
+        bool((interaction_heatmap_valid <= interaction_valid).all()),
+        f"{name}: heatmap-valid slots are supervised interaction slots",
+    )
     report.check(
         bool(((interaction_cls >= 0) & (interaction_cls <= NONE_OBJECT_ID)).all()),
         f"{name}: interaction classes are object ids or NONE",
@@ -281,56 +208,46 @@ def validate_object_target(name, frames, target, args, report):
     )
     report.check(
         bool((interaction_cls[~interaction_valid] == NONE_OBJECT_ID).all()),
-        f"{name}: uncertain interaction labels are NONE with invalid mask",
+        f"{name}: ignored interactions use NONE class",
         interaction_cls,
     )
 
-    present_objects = set(int(v) for v in object_cls[object_valid].tolist())
-    actions = target["actions"].long()
-    valid_actor_slots = torch.nonzero(target["valid"].bool(), as_tuple=False).flatten()
-    for slot in valid_actor_slots.tolist():
-        name_for_slot = action_name(actions[slot])
-        if name_for_slot == "Uselaptop" and OBJECT_TO_ID["laptop"] in present_objects:
-            report.check(
-                bool(
-                    interaction_valid[slot]
-                    and int(interaction_cls[slot]) == OBJECT_TO_ID["laptop"]
-                ),
-                f"{name}: Uselaptop gets laptop interaction when laptop is detected",
-            )
-        if name_for_slot == "Readbook" and OBJECT_TO_ID["book"] in present_objects:
-            report.check(
-                bool(
-                    interaction_valid[slot]
-                    and int(interaction_cls[slot]) == OBJECT_TO_ID["book"]
-                ),
-                f"{name}: Readbook gets book interaction when book is detected",
-            )
-        if name_for_slot == "WatchTV" and bool(interaction_valid[slot]):
-            report.check(
-                False,
-                f"{name}: WatchTV context objects do not become interaction CE targets",
-                interaction_cls[slot],
-            )
+    if interaction_heatmap_valid.any():
+        valid_max = interaction_heatmap[interaction_heatmap_valid].flatten(1).max(dim=1).values
+        report.check(
+            bool((valid_max > 0).all()),
+            f"{name}: valid interaction heatmaps contain visible blobs",
+            valid_max,
+        )
+
+    for slot in torch.nonzero(actor_valid, as_tuple=False).flatten().tolist():
+        name_for_slot = action_name(target["actions"][slot])
         if name_for_slot == "WatchTV":
             report.check(
                 not bool(interaction_valid[slot]),
-                f"{name}: WatchTV context objects are object-token evidence only",
-            )
-        if name_for_slot in {"Sitdown", "Eat.Attable", "Eat.Snack", "Takepills"}:
-            report.check(
-                not bool(interaction_valid[slot]),
-                f"{name}: {name_for_slot} weak/context objects are not interaction CE targets",
+                f"{name}: WatchTV is not a forced interacted-object target",
             )
         if name_for_slot == "Usetablet":
             report.check(
                 not bool(interaction_valid[slot]),
-                f"{name}: Usetablet does not force a COCO phone/tablet surrogate",
+                f"{name}: Usetablet does not force a COCO phone surrogate",
             )
         if name_for_slot == "Drink.Fromcan":
             report.check(
                 not bool(interaction_valid[slot]),
                 f"{name}: Drink.Fromcan has no forced COCO object target",
+            )
+        if name_for_slot == "Uselaptop" and bool(interaction_valid[slot]):
+            report.check(
+                int(interaction_cls[slot]) == OBJECT_TO_ID["laptop"],
+                f"{name}: Uselaptop supervised by laptop when detector supplies a target",
+                interaction_cls[slot],
+            )
+        if name_for_slot == "Readbook" and bool(interaction_valid[slot]):
+            report.check(
+                int(interaction_cls[slot]) == OBJECT_TO_ID["book"],
+                f"{name}: Readbook supervised by book when detector supplies a target",
+                interaction_cls[slot],
             )
 
 
@@ -349,15 +266,15 @@ def pick_sample(ds, args, report):
         frames, target = ds[idx]
         if first is None:
             first = (idx, frames, target)
-        if target["object_valid"].bool().any():
+        if target["interaction_heatmap_valid"].bool().any():
             return idx, frames, target
 
-    if args.allow_empty_object_sample:
+    if args.allow_no_interaction_sample:
         return first
 
     report.check(
         False,
-        f"found at least one sample with object_valid=True in first {max_scan} samples",
+        f"found at least one strong-action interaction target in first {max_scan} samples",
     )
     return first
 
@@ -367,19 +284,16 @@ def run_smoke(args):
     np.random.seed(args.seed)
     report = SmokeReport()
 
-    for name, path in (
-        ("toyota_mp4_zip", args.toyota_mp4_zip),
+    required_paths = [
         ("toyota_skeleton_zip", args.toyota_skeleton_zip),
         ("object_detector_cache", args.object_detector_cache),
-    ):
+    ]
+    if args.toyota_frame_source == "mp4_zip":
+        required_paths.append(("toyota_mp4_zip", args.toyota_mp4_zip))
+    for name, path in required_paths:
         report.check(path is not None, f"{name} is set")
         if path is not None:
             report.check(os.path.exists(path), f"{name} exists", path)
-    report.check(
-        args.num_object_classes == NUM_OBJECT_CLASSES,
-        f"num_object_classes is {NUM_OBJECT_CLASSES}",
-        args.num_object_classes,
-    )
     if report.failed:
         return report.finish()
 
@@ -388,14 +302,18 @@ def run_smoke(args):
     if sample is None:
         return report.finish()
     idx, frames, target = sample
-    validate_object_target(f"object_sample_{idx}", frames, target, args, report)
+    validate_interaction_target(
+        f"interaction_sample_{idx}", frames, target, args, report
+    )
 
     synthetic_ds = build_dataset(args, synthetic_two_actor=True)
     sample = pick_sample(synthetic_ds, args, report)
     if sample is None:
         return report.finish()
     idx, frames, target = sample
-    validate_object_target(f"synthetic_object_sample_{idx}", frames, target, args, report)
+    validate_interaction_target(
+        f"synthetic_interaction_sample_{idx}", frames, target, args, report
+    )
 
     return report.finish()
 

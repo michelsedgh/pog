@@ -9,6 +9,7 @@ from collections import Counter, defaultdict
 
 from datasets.object_vocab import (
     OBJECT_TO_ID,
+    STRONG_ACTION_OBJECTS,
     object_allowed_for_file_id,
     object_box_ignored_for_file_id,
     parse_object_camera_allowlist,
@@ -54,35 +55,21 @@ CS_DICT = {
 ID_TO_ACTION = {idx - 1: name for name, idx in CS_DICT.items()}
 ACTION_TO_ID = {name: idx - 1 for name, idx in CS_DICT.items()}
 
+ACTION_DISTRACTORS = {
+    "Uselaptop": ["book", "tv_monitor", "remote"],
+    "Readbook": ["laptop", "keyboard_mouse", "tv_monitor", "remote"],
+    "Usetelephone": ["tv_monitor", "remote", "laptop", "book"],
+    "Drink.Frombottle": ["cup", "glass"],
+    "Drink.Fromcup": ["bottle", "glass"],
+    "Drink.Fromglass": ["cup", "bottle"],
+}
+
 ACTION_OBJECTS = {
-    "Uselaptop": {
-        "positive": ["laptop", "keyboard_mouse"],
-        "distractor": ["book", "tv_monitor", "remote"],
-    },
-    "Readbook": {
-        "positive": ["book"],
-        "distractor": ["laptop", "keyboard_mouse", "tv_monitor", "remote"],
-    },
-    "WatchTV": {
-        "positive": ["tv_monitor", "remote"],
-        "distractor": ["laptop", "keyboard_mouse", "book"],
-    },
-    "Usetelephone": {
-        "positive": ["phone"],
-        "distractor": ["tv_monitor", "remote", "laptop", "book"],
-    },
-    "Drink.Frombottle": {
-        "positive": ["bottle"],
-        "distractor": ["cup", "glass"],
-    },
-    "Drink.Fromcup": {
-        "positive": ["cup"],
-        "distractor": ["bottle", "glass"],
-    },
-    "Drink.Fromglass": {
-        "positive": ["glass"],
-        "distractor": ["cup", "bottle"],
-    },
+    action: {
+        "positive": list(objects),
+        "distractor": ACTION_DISTRACTORS.get(action, []),
+    }
+    for action, objects in STRONG_ACTION_OBJECTS.items()
 }
 
 GROUPS = {

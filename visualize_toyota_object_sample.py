@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import argparse
 import os
 import sys
@@ -8,7 +9,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 
-from datasets.object_vocab import NONE_OBJECT_ID, NUM_OBJECT_CLASSES, OBJECT_CLASSES
+from datasets.object_vocab import NONE_OBJECT_ID, OBJECT_CLASSES
 from datasets.toyotasm import CS_DICT, ToyotaSMDataset
 
 
@@ -18,9 +19,10 @@ STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="Render Toyota object-prompt dataset overlays."
+        description="Render Toyota actor interaction heatmap teacher overlays."
     )
     parser.add_argument("--data_dir", default=os.getenv("DATA_DIR", "."))
+    parser.add_argument("--toyota_frame_source", default="mp4_zip", choices=["mp4_zip", "frames"])
     parser.add_argument("--toyota_mp4_zip", default=os.getenv("MP4_ZIP"))
     parser.add_argument("--toyota_skeleton_zip", default=os.getenv("SKELETON_ZIP"))
     parser.add_argument("--object_detector_cache", required=True)
@@ -34,30 +36,31 @@ def build_parser():
     parser.add_argument(
         "--toyota_frame_count_cache", default=os.getenv("FRAME_COUNT_CACHE")
     )
-    parser.add_argument("--output_dir", default="toyota_object_visualizations")
+    parser.add_argument("--output_dir", default="toyota_interaction_visualizations")
     parser.add_argument("--count", type=int, default=100)
     parser.add_argument("--start_index", type=int, default=0)
     parser.add_argument("--toyota_max_samples", type=int, default=256)
     parser.add_argument("--n_frames", type=int, default=16)
     parser.add_argument("--n_landmarks", type=int, default=13)
     parser.add_argument("--num_actor_tokens", type=int, default=8)
-    parser.add_argument("--num_object_tokens", type=int, default=24)
-    parser.add_argument("--num_object_classes", type=int, default=NUM_OBJECT_CLASSES)
     parser.add_argument("--object_conf_threshold", type=float, default=0.25)
+    parser.add_argument("--object_camera_allowlist", default=None)
+    parser.add_argument("--object_ignore_regions", default=None)
+    parser.add_argument("--object_track_iou_threshold", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--synthetic_two_actor", action="store_true")
     parser.add_argument("--contact_sheet", type=int, default=1)
     parser.add_argument("--contact_cols", type=int, default=4)
     parser.add_argument(
-        "--only_with_objects",
+        "--only_with_interactions",
         action="store_true",
-        help="Skip samples without valid object tokens.",
+        help="Skip samples without a strong-action interaction heatmap target.",
     )
     return parser
 
 
 def dataset_kwargs(args):
-    return {
+    kwargs = {
         "data_dir": args.data_dir,
         "set_type": "train",
         "task_type": "CS",
@@ -69,15 +72,14 @@ def dataset_kwargs(args):
         "jitter_scales_max": 320,
         "actor_prompt": 1,
         "num_actor_tokens": args.num_actor_tokens,
-        "object_prompt": 1,
+        "actor_interaction_heatmaps": 1,
         "object_detector_cache": args.object_detector_cache,
-        "num_object_tokens": args.num_object_tokens,
-        "num_object_classes": args.num_object_classes,
+        "object_camera_allowlist": args.object_camera_allowlist,
+        "object_ignore_regions": args.object_ignore_regions,
         "object_conf_threshold": args.object_conf_threshold,
-        "toyota_frame_source": "mp4_zip",
-        "toyota_mp4_zip": args.toyota_mp4_zip,
+        "object_track_iou_threshold": args.object_track_iou_threshold,
+        "toyota_frame_source": args.toyota_frame_source,
         "toyota_skeleton_zip": args.toyota_skeleton_zip,
-        "toyota_video_cache_dir": args.toyota_video_cache_dir,
         "toyota_frame_count_cache": args.toyota_frame_count_cache,
         "toyota_split_source": "auto",
         "toyota_max_samples": args.toyota_max_samples,
@@ -86,6 +88,10 @@ def dataset_kwargs(args):
         "toyota_synthetic_three_actor_prob": 0.0,
         "toyota_synthetic_same_class_prob": 0.0,
     }
+    if args.toyota_frame_source == "mp4_zip":
+        kwargs["toyota_mp4_zip"] = args.toyota_mp4_zip
+        kwargs["toyota_video_cache_dir"] = args.toyota_video_cache_dir
+    return kwargs
 
 
 def action_name(label):
@@ -127,14 +133,11 @@ def heatmap_overlay(image, heatmap, valid=None):
 def draw_overlay(frames, target, output_path, sample_idx):
     middle = frames.shape[0] // 2
     image = denormalize_frame(frames, middle)
-    if "interaction_heatmap" in target:
-        image = heatmap_overlay(
-            image,
-            target["interaction_heatmap"],
-            target.get("interaction_heatmap_valid", None).bool()
-            if "interaction_heatmap_valid" in target
-            else None,
-        )
+    image = heatmap_overlay(
+        image,
+        target["interaction_heatmap"],
+        target["interaction_heatmap_valid"].bool(),
+    )
     draw = ImageDraw.Draw(image)
 
     valid_actor_slots = torch.nonzero(target["valid"].bool(), as_tuple=False).flatten()
@@ -143,35 +146,15 @@ def draw_overlay(frames, target, output_path, sample_idx):
         draw_normalized_box(draw, box, color=(40, 255, 80), width=3)
         label = action_name(int(target["actions"][slot]))
         x1, y1 = box[0] * 224, box[1] * 224
-        draw.text((x1 + 3, y1 + 3), f"actor{slot} {label}", fill=(255, 255, 0))
-
-    valid_object_slots = torch.nonzero(
-        target["object_valid"].bool(), as_tuple=False
-    ).flatten()
-    for slot in valid_object_slots.tolist():
-        box = target["object_boxes"][slot].tolist()
-        cls_id = int(target["object_cls"][slot])
-        cls_name = OBJECT_CLASSES.get(cls_id, f"obj{cls_id}")
-        conf = float(target["object_conf"][slot])
-        draw_normalized_box(draw, box, color=(80, 160, 255), width=2)
-        x1, y1 = box[0] * 224, box[1] * 224
-        draw.text((x1 + 3, y1 + 14), f"{cls_name} {conf:.2f}", fill=(255, 255, 255))
-
-    y = 6
-    draw.rectangle((0, 0, 224, 42), fill=(0, 0, 0))
-    draw.text((6, y), f"sample {sample_idx}", fill=(255, 255, 0))
-    y += 12
-    interactions = []
-    for slot in valid_actor_slots.tolist():
+        suffix = ""
         if bool(target["interaction_valid"][slot]):
             cls_id = int(target["interaction_cls"][slot])
             cls_name = "NONE" if cls_id == NONE_OBJECT_ID else OBJECT_CLASSES[cls_id]
-            interactions.append(f"a{slot}:{cls_name}")
-    draw.text(
-        (6, y),
-        "interaction " + (", ".join(interactions) if interactions else "ignored"),
-        fill=(255, 255, 0),
-    )
+            suffix = f" -> {cls_name}"
+        draw.text((x1 + 3, y1 + 3), f"actor{slot} {label}{suffix}", fill=(255, 255, 0))
+
+    draw.rectangle((0, 0, 224, 30), fill=(0, 0, 0))
+    draw.text((6, 6), f"sample {sample_idx}", fill=(255, 255, 0))
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     image.save(output_path)
@@ -212,13 +195,15 @@ def main():
         idx = int(args.start_index)
         while idx < len(ds) and written < args.count:
             frames, target = ds[idx]
-            if args.only_with_objects and not bool(target["object_valid"].any()):
+            if args.only_with_interactions and not bool(
+                target["interaction_heatmap_valid"].any()
+            ):
                 idx += 1
                 continue
             output_path = os.path.join(args.output_dir, f"sample_{idx:05d}.jpg")
             draw_overlay(frames, target, output_path, idx)
             output_paths.append(output_path)
-            print(output_path)
+            print(output_path, flush=True)
             written += 1
             idx += 1
         if written == 0:
@@ -226,7 +211,7 @@ def main():
         if args.contact_sheet:
             sheet_path = os.path.join(args.output_dir, "contact_sheet.jpg")
             build_contact_sheet(output_paths, sheet_path, max(1, int(args.contact_cols)))
-            print(sheet_path)
+            print(sheet_path, flush=True)
         return 0
     except Exception:
         traceback.print_exc()

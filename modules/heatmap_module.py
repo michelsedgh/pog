@@ -8,10 +8,7 @@ import pandas as pd
 import os
 from losses.softtarget import SoftTargetCrossEntropy
 from losses.heatmap_loss import KeypointMSELoss
-from losses.object_interaction_losses import (
-    interaction_heatmap_loss,
-    positive_object_selection_loss,
-)
+from losses.interaction_heatmap_losses import interaction_heatmap_loss
 import pickle
 from datasets.object_vocab import GROUPS
 from datasets.toyotasm import CS_DICT, CV_DICT
@@ -42,8 +39,9 @@ class HeatmapModule(pl.LightningModule):
 
         hparams = self.model.hparams
         self.actor_prompt = bool(hparams.get("actor_prompt", 0))
-        self.object_prompt = bool(hparams.get("object_prompt", 0))
-        self.num_object_classes = int(hparams.get("num_object_classes", 0) or 0)
+        self.actor_interaction_heatmaps = bool(
+            hparams.get("actor_interaction_heatmaps", 0)
+        )
         self.num_classes = hparams.num_classes
         self.dataset_name = hparams.dataset_artifact
 
@@ -120,26 +118,6 @@ class HeatmapModule(pl.LightningModule):
             hparams.get("actor_val_diagnostic_max_pairs", 8)
         )
         self.group_indices = self._build_group_indices()
-        if self.object_prompt:
-            self.val_acc_macro_objects_on = torchmetrics.Accuracy(
-                task="multiclass", num_classes=hparams.num_classes, average="macro"
-            )
-            self.val_f1_objects_on = torchmetrics.F1Score(
-                num_classes=hparams.num_classes, average="macro", task="multiclass"
-            )
-            self.val_acc_macro_objects_off = torchmetrics.Accuracy(
-                task="multiclass", num_classes=hparams.num_classes, average="macro"
-            )
-            self.val_f1_objects_off = torchmetrics.F1Score(
-                num_classes=hparams.num_classes, average="macro", task="multiclass"
-            )
-            self.val_acc_macro_objects_shuffled = torchmetrics.Accuracy(
-                task="multiclass", num_classes=hparams.num_classes, average="macro"
-            )
-            self.val_f1_objects_shuffled = torchmetrics.F1Score(
-                num_classes=hparams.num_classes, average="macro", task="multiclass"
-            )
-
     def load_state_dict(self, state_dict, strict=True, assign=False):
         result = super().load_state_dict(state_dict, strict=strict, assign=assign)
         if self.actor_prompt and not strict:
@@ -148,10 +126,8 @@ class HeatmapModule(pl.LightningModule):
                 "model.net.actor_slot_embed",
                 "model.net.valid_embed",
                 "model.net.bbox_mlp",
-                "model.net.object_",
                 "model.actor_head",
                 "model.presence_head",
-                "model.object_interaction",
             ]
             if self.model.hparams.get("use_register_tokens", 0):
                 allowed_missing.append("model.net.register_tokens")
@@ -187,10 +163,6 @@ class HeatmapModule(pl.LightningModule):
         boxes=None,
         valid=None,
         action_labels=None,
-        object_boxes=None,
-        object_cls=None,
-        object_conf=None,
-        object_valid=None,
     ):
         # Forward function that is run when visualizing the graph
         return self.model(
@@ -198,10 +170,6 @@ class HeatmapModule(pl.LightningModule):
             boxes=boxes,
             valid=valid,
             action_labels=action_labels,
-            object_boxes=object_boxes,
-            object_cls=object_cls,
-            object_conf=object_conf,
-            object_valid=object_valid,
         )
 
     def _actor_prompt_param_name(self, name):
@@ -214,42 +182,18 @@ class HeatmapModule(pl.LightningModule):
             )
         )
 
-    def _object_prompt_param_name(self, name):
-        return name.startswith(
-            (
-                "object_slot_embed",
-                "object_cls_embed",
-                "object_valid_embed",
-                "object_bbox_mlp",
-                "object_conf_mlp",
-                "object_visual_proj",
-            )
-        )
-
-    def _object_prompt_params(self):
-        if not self.object_prompt:
+    def _interaction_unfrozen_backbone_params(self):
+        if not self.actor_interaction_heatmaps:
             return []
-        return [
-            param
-            for name, param in self.model.net.named_parameters()
-            if self._object_prompt_param_name(name)
-        ]
-
-    def _object_interaction_params(self):
-        return list(self.model.object_interaction.parameters())
-
-    def _object_unfrozen_backbone_params(self):
-        if not self.object_prompt:
-            return []
-        count = int(self.model.hparams.get("object_unfreeze_last_blocks", 0) or 0)
+        count = int(self.model.hparams.get("interaction_unfreeze_last_blocks", 0) or 0)
         if count <= 0:
             return []
         blocks = getattr(self.model.net, "blocks", None)
         if blocks is None:
-            raise ValueError("object_unfreeze_last_blocks requires model.net.blocks")
+            raise ValueError("interaction_unfreeze_last_blocks requires model.net.blocks")
         if count > len(blocks):
             raise ValueError(
-                f"object_unfreeze_last_blocks={count} exceeds depth={len(blocks)}"
+                f"interaction_unfreeze_last_blocks={count} exceeds depth={len(blocks)}"
             )
         params = []
         for block in blocks[-count:]:
@@ -264,17 +208,14 @@ class HeatmapModule(pl.LightningModule):
         if not self.actor_prompt:
             return list(self.model.head.parameters())
 
-        if self.object_prompt and self.model.hparams.get(
-            "object_warmup_freeze_actor_path", 0
+        if self.actor_interaction_heatmaps and self.model.hparams.get(
+            "interaction_warmup_freeze_actor_path", 0
         ):
-            return self._object_prompt_params() + self._object_interaction_params()
+            return []
 
         params = list(self.model.actor_head.parameters())
         if self.model.presence_head is not None:
             params += list(self.model.presence_head.parameters())
-        if self.object_prompt:
-            params += self._object_prompt_params()
-            params += self._object_interaction_params()
         for name, param in self.model.net.named_parameters():
             if self._actor_prompt_param_name(name):
                 params.append(param)
@@ -284,8 +225,6 @@ class HeatmapModule(pl.LightningModule):
         params = []
         for name, param in self.model.net.named_parameters():
             if self.actor_prompt and self._actor_prompt_param_name(name):
-                continue
-            if self.object_prompt and self._object_prompt_param_name(name):
                 continue
             if not include_heatmap_head and "heatmap_head" in name:
                 continue
@@ -308,7 +247,7 @@ class HeatmapModule(pl.LightningModule):
                 groups[group_name] = torch.tensor(indices, dtype=torch.long)
         return groups
 
-    def _object_audit_action_indices(self):
+    def _interaction_audit_action_indices(self):
         label_dict = self._toyota_label_dict()
         action_names = (
             "Uselaptop",
@@ -327,129 +266,6 @@ class HeatmapModule(pl.LightningModule):
             indices.append((metric_name, int(label_dict[action_name]) - 1))
         return indices
 
-    def _positive_object_erase_valid(self, target, object_valid):
-        if "interaction_positive_mask" not in target:
-            raise ValueError(
-                "positive object modes require interaction_positive_mask"
-            )
-        positive_mask = target["interaction_positive_mask"].to(
-            device=object_valid.device,
-            dtype=torch.bool,
-        )
-        actor_valid = target["valid"].to(
-            device=object_valid.device,
-            dtype=torch.bool,
-        )
-        real_object_count = min(object_valid.shape[-1], positive_mask.shape[-1] - 1)
-        erase_mask = (
-            positive_mask[..., :real_object_count]
-            & actor_valid[..., None]
-        ).any(dim=1) & object_valid[..., :real_object_count]
-        erase_valid = torch.zeros_like(object_valid)
-        erase_valid[..., :real_object_count] = erase_mask
-        return erase_valid, real_object_count
-
-    def _object_kwargs(self, target, mode="on"):
-        if not self.object_prompt:
-            return {}
-        required = (
-            "object_boxes",
-            "object_cls",
-            "object_conf",
-            "object_valid",
-        )
-        missing = [key for key in required if key not in target]
-        if missing:
-            raise ValueError(f"object_prompt target is missing keys: {missing}")
-
-        kwargs = {
-            "object_boxes": target["object_boxes"].float(),
-            "object_cls": target["object_cls"].long(),
-            "object_conf": target["object_conf"].float(),
-            "object_valid": target["object_valid"].bool(),
-        }
-        if mode == "on":
-            kwargs["object_valid"] = self.model._apply_object_dropout(
-                kwargs["object_valid"]
-            )
-            return kwargs
-        if mode == "off":
-            kwargs["object_valid"] = torch.zeros_like(kwargs["object_valid"])
-            return kwargs
-        if mode == "positive_erased":
-            erase_valid, real_object_count = self._positive_object_erase_valid(
-                target,
-                kwargs["object_valid"],
-            )
-            erase_mask = erase_valid[..., :real_object_count]
-            kwargs["object_valid"] = kwargs["object_valid"].clone()
-            kwargs["object_valid"][..., :real_object_count] = (
-                kwargs["object_valid"][..., :real_object_count]
-                & ~erase_mask
-            )
-            kwargs["object_erase_boxes"] = kwargs["object_boxes"]
-            kwargs["object_erase_valid"] = erase_valid
-            return kwargs
-        if mode == "shuffled":
-            batch_size = kwargs["object_valid"].shape[0]
-            if batch_size < 2:
-                return None
-            perm = self._label_mismatched_object_indices(
-                target,
-                batch_size,
-                kwargs["object_valid"].device,
-            )
-            if perm is None:
-                return None
-            return {
-                key: value.index_select(0, perm.to(device=value.device))
-                for key, value in kwargs.items()
-            }
-        raise ValueError(f"Unsupported object mode: {mode}")
-
-    def _primary_action_labels(self, target):
-        actions = target["actions"].long()
-        valid = target["valid"].bool()
-        has_actor = valid.any(dim=1)
-        first_slot = valid.long().argmax(dim=1)
-        labels = actions[
-            torch.arange(actions.shape[0], device=actions.device),
-            first_slot,
-        ]
-        return labels.masked_fill(~has_actor, -1)
-
-    def _label_mismatched_object_indices(self, target, batch_size, device):
-        labels = self._primary_action_labels(target).to(device=device)
-        if labels.shape[0] != batch_size:
-            raise ValueError(
-                "Object shuffle batch size does not match target labels: "
-                f"{batch_size} vs {labels.shape[0]}"
-            )
-        indices = torch.arange(batch_size, device=device)
-        valid_label = labels >= 0
-        perm = torch.empty(batch_size, dtype=torch.long, device=device)
-        for i in range(batch_size):
-            if bool(valid_label[i]):
-                candidates = indices[valid_label & (labels != labels[i])]
-            else:
-                candidates = indices[indices != i]
-            if candidates.numel() == 0:
-                return None
-            label_offset = int(labels[i].item()) if bool(valid_label[i]) else 0
-            choice = (i * 9973 + label_offset * 37) % int(candidates.numel())
-            perm[i] = candidates[choice]
-        return perm
-
-    def _selection_logits_for_target_action(self, selection_logits, target):
-        if selection_logits is None:
-            return None
-        if selection_logits.ndim == 3:
-            return selection_logits
-        raise RuntimeError(
-            "Object selection must have shape [B, K, M+1] for the clean "
-            f"object-token path; got {tuple(selection_logits.shape)}"
-        )
-
     def _pose_heatmap_pred(self, hm_preds):
         if not torch.is_tensor(hm_preds):
             return hm_preds
@@ -458,84 +274,18 @@ class HeatmapModule(pl.LightningModule):
             return hm_preds[:, :0]
         return hm_preds[:, :n_pose]
 
-    def _log_interaction_metrics(self, selection_logits, target, valid, stage):
-        if (
-            selection_logits is None
-            or "interaction_valid" not in target
-            or "interaction_positive_mask" not in target
-        ):
-            return
-        valid_count = valid.sum().clamp_min(1)
-        inter_valid = target["interaction_valid"].to(
-            device=valid.device, dtype=torch.bool
-        ) & valid
-        self._log_scalar(
-            f"{stage}_interaction_target_frac",
-            inter_valid.float().sum() / valid_count,
-            int(valid_count.item()),
-        )
-        if not inter_valid.any():
-            return
-        positive_mask = target["interaction_positive_mask"].to(
-            device=selection_logits.device, dtype=torch.bool
-        )
-        inter_valid = inter_valid & positive_mask.any(dim=-1)
-        self._log_scalar(
-            f"{stage}_interaction_target_usable_frac",
-            inter_valid.float().sum() / valid_count,
-            int(valid_count.item()),
-        )
-        if not inter_valid.any():
-            return
-        pred = selection_logits.argmax(dim=-1)
-        correct = positive_mask.gather(dim=-1, index=pred.unsqueeze(-1)).squeeze(-1)
-        self._log_scalar(
-            f"{stage}_interaction_select_acc",
-            correct.float().mean(),
-            inter_valid.sum().item(),
-        )
-        probs = torch.softmax(selection_logits.float(), dim=-1)
-        select_mass = (probs * positive_mask.float()).sum(dim=-1)
-        self._log_scalar(
-            f"{stage}_interaction_select_mass",
-            select_mass[inter_valid].mean(),
-            inter_valid.sum().item(),
-        )
-        none_slot = positive_mask.shape[-1] - 1
-        none_mask = inter_valid & positive_mask[..., none_slot]
-        object_mask = inter_valid & ~positive_mask[..., none_slot]
-        if object_mask.any():
-            self._log_scalar(
-                f"{stage}_interaction_select_acc_object",
-                correct[object_mask].float().mean(),
-                object_mask.sum().item(),
+    def _interaction_heatmap_pred(self, hm_preds):
+        if not torch.is_tensor(hm_preds) or not self.actor_interaction_heatmaps:
+            return None
+        n_pose = int(self.model.hparams.n_landmarks)
+        n_actor = int(self.model.hparams.get("num_actor_tokens", 8))
+        end = n_pose + n_actor
+        if hm_preds.shape[1] < end:
+            raise RuntimeError(
+                "Interaction heatmaps require heatmap channels "
+                f"[pose={n_pose} + actors={n_actor}], got {hm_preds.shape[1]}"
             )
-            self._log_scalar(
-                f"{stage}_interaction_select_mass_object",
-                select_mass[object_mask].mean(),
-                object_mask.sum().item(),
-            )
-            self._log_scalar(
-                f"{stage}_interaction_target_object_frac",
-                object_mask.float().sum() / valid_count,
-                int(valid_count.item()),
-            )
-        if none_mask.any():
-            self._log_scalar(
-                f"{stage}_interaction_select_acc_none",
-                correct[none_mask].float().mean(),
-                none_mask.sum().item(),
-            )
-            self._log_scalar(
-                f"{stage}_interaction_select_mass_none",
-                select_mass[none_mask].mean(),
-                none_mask.sum().item(),
-            )
-            self._log_scalar(
-                f"{stage}_interaction_target_none_frac",
-                none_mask.float().sum() / valid_count,
-                int(valid_count.item()),
-            )
+        return hm_preds[:, n_pose:end]
 
     def _log_interaction_heatmap_metrics(
         self,
@@ -629,7 +379,7 @@ class HeatmapModule(pl.LightningModule):
 
     def _log_action_metrics(self, prefix, preds, labels):
         pred_labels = preds.argmax(dim=-1)
-        for metric_name, action_idx in self._object_audit_action_indices():
+        for metric_name, action_idx in self._interaction_audit_action_indices():
             mask = labels == int(action_idx)
             if not mask.any():
                 continue
@@ -643,14 +393,16 @@ class HeatmapModule(pl.LightningModule):
         # We will support Adam or SGD as optimizers.
         if self.model.hparams.freeze_backbone:
             head_params = self._head_params()
-            params = [
-                {
-                    "params": head_params,
-                    "lr": self.lr_head,
-                    "weight_decay": self.weight_decay_head,
-                },
-            ]
-            unfrozen_backbone_params = self._object_unfrozen_backbone_params()
+            params = []
+            if head_params:
+                params.append(
+                    {
+                        "params": head_params,
+                        "lr": self.lr_head,
+                        "weight_decay": self.weight_decay_head,
+                    }
+                )
+            unfrozen_backbone_params = self._interaction_unfrozen_backbone_params()
             if unfrozen_backbone_params:
                 params.append(
                     {
@@ -660,7 +412,7 @@ class HeatmapModule(pl.LightningModule):
                     }
                 )
             if (
-                self.object_prompt
+                self.actor_interaction_heatmaps
                 and getattr(self.model.hparams, "lr_head_hm", None)
                 and self.model.hparams.lr_head_hm
             ):
@@ -670,6 +422,11 @@ class HeatmapModule(pl.LightningModule):
                         "lr": self.model.hparams.lr_head_hm,
                         "weight_decay": self.model.hparams.weight_decay_head_hm,
                     },
+                )
+            if not params:
+                raise ValueError(
+                    "No trainable parameters selected. For interaction warmup, set "
+                    "--lr_head_hm > 0 or --interaction_unfreeze_last_blocks > 0."
                 )
             optimizer = optim.AdamW(params)
         else:
@@ -789,25 +546,13 @@ class HeatmapModule(pl.LightningModule):
         if not valid.any():
             raise ValueError(f"{stage} actor batch has no valid actor slots")
 
-        object_kwargs = self._object_kwargs(target, mode="on")
         data = self.model(
             imgs,
             boxes=boxes,
             valid=valid,
             action_labels=actions,
-            **object_kwargs,
         )
-        (
-            preds,
-            hm_preds,
-            presence_logits,
-            selection_logits,
-            interaction_heatmap,
-        ) = self._unpack_model_data(data)
-        target_action_selection_logits = self._selection_logits_for_target_action(
-            selection_logits,
-            target,
-        )
+        preds, hm_preds, presence_logits = self._unpack_model_data(data)
 
         valid_preds = preds[valid]
         valid_labels = actions[valid]
@@ -868,63 +613,8 @@ class HeatmapModule(pl.LightningModule):
             elif kp_loss_weight > 0.0:
                 loss = loss + loss_kp * kp_loss_weight
 
-        if self.object_prompt:
-            dropped_positive = None
-            if (
-                target_action_selection_logits is not None
-                and "interaction_positive_mask" in target
-            ):
-                inter_valid = target["interaction_valid"].to(
-                    device=valid.device, dtype=torch.bool
-                ) & valid
-                original_positive_mask = target["interaction_positive_mask"].to(
-                    device=target_action_selection_logits.device, dtype=torch.bool
-                )
-                positive_mask = original_positive_mask.clone()
-                effective_object_valid = object_kwargs["object_valid"].to(
-                    device=target_action_selection_logits.device, dtype=torch.bool
-                )
-                real_object_count = min(
-                    effective_object_valid.shape[-1],
-                    positive_mask.shape[-1] - 1,
-                )
-                positive_mask[..., :real_object_count] = (
-                    positive_mask[..., :real_object_count]
-                    & effective_object_valid[:, None, :real_object_count]
-                )
-                dropped_positive = (
-                    original_positive_mask[..., :real_object_count]
-                    & ~effective_object_valid[:, None, :real_object_count]
-                ).any(dim=-1)
-                if inter_valid.any():
-                    inter_valid = inter_valid & positive_mask.any(dim=-1)
-                loss_interaction = positive_object_selection_loss(
-                    target_action_selection_logits,
-                    positive_mask,
-                    inter_valid,
-                )
-                if loss_interaction is None:
-                    loss_interaction = target_action_selection_logits.new_zeros(())
-                loss = loss + loss_interaction * self.model.hparams.get(
-                    "object_interaction_loss_weight", 0.03
-                )
-                self.log(
-                    f"{stage}_loss_interaction",
-                    loss_interaction,
-                    on_step=stage == "train",
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                    sync_dist=True,
-                )
-                if stage != "train":
-                    self._log_interaction_metrics(
-                        target_action_selection_logits,
-                        target,
-                        valid,
-                        stage,
-                    )
-
+        if self.actor_interaction_heatmaps:
+            interaction_heatmap = self._interaction_heatmap_pred(hm_preds)
             if (
                 interaction_heatmap is not None
                 and "interaction_heatmap" in target
@@ -933,10 +623,6 @@ class HeatmapModule(pl.LightningModule):
                 heatmap_valid = target["interaction_heatmap_valid"].to(
                     device=valid.device, dtype=torch.bool
                 ) & valid
-                if dropped_positive is not None:
-                    heatmap_valid = heatmap_valid & ~dropped_positive.to(
-                        device=heatmap_valid.device
-                    )
                 target_heatmap = target["interaction_heatmap"].to(
                     device=interaction_heatmap.device,
                     dtype=interaction_heatmap.dtype,
@@ -949,7 +635,7 @@ class HeatmapModule(pl.LightningModule):
                 if loss_interaction_heatmap is None:
                     loss_interaction_heatmap = interaction_heatmap.new_zeros(())
                 loss = loss + loss_interaction_heatmap * self.model.hparams.get(
-                    "object_interaction_heatmap_weight", 25.0
+                    "actor_interaction_heatmap_weight", 25.0
                 )
                 self.log(
                     f"{stage}_loss_interaction_heatmap",
@@ -979,27 +665,12 @@ class HeatmapModule(pl.LightningModule):
         )
 
     def _unpack_model_data(self, data):
-        if len(data) == 5:
-            (
-                preds,
-                hm_preds,
-                presence_logits,
-                selection_logits,
-                interaction_heatmap,
-            ) = data
-        elif len(data) == 4:
-            preds, hm_preds, presence_logits, selection_logits = data
-            interaction_heatmap = None
-        elif len(data) == 3:
+        if len(data) == 3:
             preds, hm_preds, presence_logits = data
-            selection_logits = None
-            interaction_heatmap = None
         else:
             preds, hm_preds = data
             presence_logits = None
-            selection_logits = None
-            interaction_heatmap = None
-        return preds, hm_preds, presence_logits, selection_logits, interaction_heatmap
+        return preds, hm_preds, presence_logits
 
     def _first_actor_targets(self, imgs, target):
         valid = target["valid"].bool()
@@ -1107,7 +778,7 @@ class HeatmapModule(pl.LightningModule):
         diag_boxes[:, 0] = boxes
         diag_valid[:, 0] = True
         data = self.model(imgs, boxes=diag_boxes, valid=diag_valid)
-        _, _, presence_logits, _, _ = self._unpack_model_data(data)
+        _, _, presence_logits = self._unpack_model_data(data)
         if presence_logits is None:
             return
         probs = torch.sigmoid(presence_logits.float())
@@ -1134,7 +805,7 @@ class HeatmapModule(pl.LightningModule):
             batch_size, num_actor_tokens, device=boxes.device, dtype=torch.bool
         )
         data = self.model(imgs, boxes=diag_boxes, valid=diag_valid)
-        preds, _, _, _, _ = self._unpack_model_data(data)
+        preds, _, _ = self._unpack_model_data(data)
         pred_labels = preds.argmax(dim=-1)
         expanded_labels = labels[:, None].expand(-1, num_actor_tokens)
         slot_correct = (pred_labels == expanded_labels).float()
@@ -1250,7 +921,7 @@ class HeatmapModule(pl.LightningModule):
                 continue
             pair_imgs, pair_boxes, pair_valid, pair_labels = batch
             data = self.model(pair_imgs, boxes=pair_boxes, valid=pair_valid)
-            preds, _, _, _, _ = self._unpack_model_data(data)
+            preds, _, _ = self._unpack_model_data(data)
             pair_preds = preds[:, :2].argmax(dim=-1)
             correct = (pair_preds == pair_labels).float()
             self._log_scalar(
@@ -1274,10 +945,6 @@ class HeatmapModule(pl.LightningModule):
             return
         valid = target["valid"].bool()
         self._log_actor_presence_diagnostics(full_presence_logits, valid)
-        if self.object_prompt:
-            # Synthetic actor-box diagnostics do not have a corresponding edited
-            # object-token layout, so they are only valid for actor-only models.
-            return
 
         first_targets = self._first_actor_targets(imgs, target)
         if first_targets is None:
@@ -1287,289 +954,6 @@ class HeatmapModule(pl.LightningModule):
         self._log_actor_pair_diagnostics(diag_imgs, diag_boxes, diag_labels)
         self._log_actor_background_presence(diag_imgs, diag_boxes)
 
-    def _actor_preds_for_object_mode(self, imgs, target, mode):
-        object_kwargs = self._object_kwargs(target, mode=mode)
-        if object_kwargs is None:
-            return None
-        data = self.model(
-            imgs,
-            boxes=target["boxes"].float(),
-            valid=target["valid"].bool(),
-            **object_kwargs,
-        )
-        preds, _, _, _, _ = self._unpack_model_data(data)
-        valid = target["valid"].bool()
-        labels = target["actions"].long()
-        return preds[valid], labels[valid]
-
-    def _classification_margin(self, logits, labels):
-        true_logits = logits.gather(1, labels[:, None]).squeeze(1)
-        other_logits = logits.clone()
-        other_logits.scatter_(1, labels[:, None], -torch.inf)
-        return true_logits - other_logits.max(dim=1).values
-
-    def _log_object_ablation_shift_metrics(
-        self,
-        normal_logits,
-        labels,
-        positive_erased=None,
-        off=None,
-        shuffled=None,
-    ):
-        if labels.numel() == 0:
-            return
-
-        normal_true = normal_logits.gather(1, labels[:, None]).squeeze(1)
-        normal_margin = self._classification_margin(normal_logits, labels)
-
-        for mode_name, mode_data in (
-            ("positive_erased", positive_erased),
-            ("off", off),
-            ("shuffled", shuffled),
-        ):
-            if mode_data is None:
-                continue
-            mode_logits, mode_labels = mode_data
-            if mode_logits.shape != normal_logits.shape or not torch.equal(
-                mode_labels,
-                labels,
-            ):
-                raise ValueError(
-                    f"Object {mode_name} diagnostic returned misaligned logits/labels"
-                )
-
-            mode_true = mode_logits.gather(1, labels[:, None]).squeeze(1)
-            mode_margin = self._classification_margin(mode_logits, labels)
-            pred_changed = normal_logits.argmax(dim=1) != mode_logits.argmax(dim=1)
-            self._log_scalar(
-                f"val_object_logit_shift_l1_on_vs_{mode_name}",
-                (normal_logits - mode_logits).abs().mean(),
-                normal_logits.numel(),
-            )
-            self._log_scalar(
-                f"val_object_true_logit_gain_on_vs_{mode_name}",
-                (normal_true - mode_true).mean(),
-                labels.numel(),
-            )
-            self._log_scalar(
-                f"val_object_margin_gain_on_vs_{mode_name}",
-                (normal_margin - mode_margin).mean(),
-                labels.numel(),
-            )
-            self._log_scalar(
-                f"val_object_pred_changed_on_vs_{mode_name}",
-                pred_changed.float().mean(),
-                labels.numel(),
-            )
-
-    def _log_object_interaction_causal_metrics(
-        self,
-        normal_logits,
-        labels,
-        target,
-        positive_erased=None,
-        shuffled=None,
-    ):
-        if labels.numel() == 0 or "interaction_positive_mask" not in target:
-            return
-
-        valid = target["valid"].to(device=normal_logits.device, dtype=torch.bool)
-        positive_mask = target["interaction_positive_mask"].to(
-            device=normal_logits.device,
-            dtype=torch.bool,
-        )
-        inter_valid = target["interaction_valid"].to(
-            device=normal_logits.device,
-            dtype=torch.bool,
-        ) & valid
-        none_slot = positive_mask.shape[-1] - 1
-        object_interaction = (
-            inter_valid
-            & positive_mask[..., :none_slot].any(dim=-1)
-        )
-        object_mask = object_interaction[valid]
-        if not object_mask.any():
-            return
-
-        normal_object = normal_logits[object_mask]
-        labels_object = labels[object_mask]
-        normal_true = normal_object.gather(
-            1,
-            labels_object[:, None],
-        ).squeeze(1)
-        normal_margin = self._classification_margin(normal_object, labels_object)
-
-        for mode_name, mode_data in (
-            ("positive_erased", positive_erased),
-            ("shuffled", shuffled),
-        ):
-            if mode_data is None:
-                continue
-            mode_logits, mode_labels = mode_data
-            if mode_logits.shape != normal_logits.shape or not torch.equal(
-                mode_labels,
-                labels,
-            ):
-                raise ValueError(
-                    f"Object {mode_name} causal diagnostic returned misaligned "
-                    "logits/labels"
-                )
-            mode_object = mode_logits[object_mask]
-            mode_true = mode_object.gather(
-                1,
-                labels_object[:, None],
-            ).squeeze(1)
-            mode_margin = self._classification_margin(mode_object, labels_object)
-            self._log_scalar(
-                f"val_object_interaction_true_logit_gain_on_vs_{mode_name}",
-                (normal_true - mode_true).mean(),
-                labels_object.numel(),
-            )
-            self._log_scalar(
-                f"val_object_interaction_margin_gain_on_vs_{mode_name}",
-                (normal_margin - mode_margin).mean(),
-                labels_object.numel(),
-            )
-
-    def _log_object_ablation_eval(self, imgs, target, normal_preds, labels):
-        if not self.object_prompt:
-            return
-
-        self.val_acc_macro_objects_on(normal_preds, labels)
-        self.val_f1_objects_on(normal_preds, labels)
-        self.log(
-            "val_acc_macro_objects_on",
-            self.val_acc_macro_objects_on,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-            sync_dist=True,
-        )
-        self.log(
-            "val_f1_objects_on",
-            self.val_f1_objects_on,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-            sync_dist=True,
-        )
-        self._log_group_metrics("val_{group}_objects_on", normal_preds, labels)
-        self._log_action_metrics("val_action_{action}_objects_on", normal_preds, labels)
-
-        positive_erased = self._actor_preds_for_object_mode(
-            imgs,
-            target,
-            "positive_erased",
-        )
-        if positive_erased is not None:
-            erased_preds, erased_labels = positive_erased
-            self._log_group_metrics(
-                "val_{group}_objects_positive_erased",
-                erased_preds,
-                erased_labels,
-            )
-            self._log_action_metrics(
-                "val_action_{action}_objects_positive_erased",
-                erased_preds,
-                erased_labels,
-            )
-        else:
-            erased_preds = None
-            erased_labels = None
-
-        off = self._actor_preds_for_object_mode(imgs, target, "off")
-        if off is not None:
-            off_preds, off_labels = off
-            self.val_acc_macro_objects_off(off_preds, off_labels)
-            self.val_f1_objects_off(off_preds, off_labels)
-            self.log(
-                "val_acc_macro_objects_off",
-                self.val_acc_macro_objects_off,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-                sync_dist=True,
-            )
-            self.log(
-                "val_f1_objects_off",
-                self.val_f1_objects_off,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-                sync_dist=True,
-            )
-            self._log_group_metrics("val_{group}_objects_off", off_preds, off_labels)
-            self._log_action_metrics(
-                "val_action_{action}_objects_off",
-                off_preds,
-                off_labels,
-            )
-        else:
-            off_preds = None
-            off_labels = None
-
-        shuffled = self._actor_preds_for_object_mode(imgs, target, "shuffled")
-        if shuffled is not None:
-            shuffled_preds, shuffled_labels = shuffled
-            self.val_acc_macro_objects_shuffled(shuffled_preds, shuffled_labels)
-            self.val_f1_objects_shuffled(shuffled_preds, shuffled_labels)
-            self.log(
-                "val_acc_macro_objects_shuffled",
-                self.val_acc_macro_objects_shuffled,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-                sync_dist=True,
-            )
-            self.log(
-                "val_f1_objects_shuffled",
-                self.val_f1_objects_shuffled,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-                sync_dist=True,
-            )
-            self._log_group_metrics(
-                "val_{group}_objects_shuffled",
-                shuffled_preds,
-                shuffled_labels,
-            )
-            self._log_action_metrics(
-                "val_action_{action}_objects_shuffled",
-                shuffled_preds,
-                shuffled_labels,
-            )
-        else:
-            shuffled_preds = None
-            shuffled_labels = None
-
-        off_data = None if off_preds is None else (off_preds, off_labels)
-        erased_data = (
-            None if erased_preds is None else (erased_preds, erased_labels)
-        )
-        shuffled_data = (
-            None if shuffled_preds is None else (shuffled_preds, shuffled_labels)
-        )
-        self._log_object_ablation_shift_metrics(
-            normal_preds,
-            labels,
-            positive_erased=erased_data,
-            off=off_data,
-            shuffled=shuffled_data,
-        )
-        self._log_object_interaction_causal_metrics(
-            normal_preds,
-            labels,
-            target,
-            positive_erased=erased_data,
-            shuffled=shuffled_data,
-        )
     def training_step(self, batch, batch_idx):
         # "batch" is the output of the training data loader.
         if isinstance(batch, torch._utils.ExceptionWrapper):
@@ -1700,7 +1084,7 @@ class HeatmapModule(pl.LightningModule):
             self.val_acc_macro(preds, labels)
             self.val_f1(preds, labels)
             self._log_group_metrics("val_group_{group}_acc", preds, labels)
-            self._log_object_ablation_eval(imgs, target, preds, labels)
+            self._log_action_metrics("val_action_{action}_acc", preds, labels)
             self.validation_step_outputs["preds"].append(preds.detach())
             self.validation_step_outputs["labels"].append(labels.detach())
             self.log(
@@ -1924,9 +1308,8 @@ class HeatmapModule(pl.LightningModule):
             actions = target["actions"].long()
             boxes = target["boxes"].float()
             valid = target["valid"].bool()
-            object_kwargs = self._object_kwargs(target, mode="on")
-            data = self.model(imgs, boxes=boxes, valid=valid, **object_kwargs)
-            preds, hm, _, _, _ = self._unpack_model_data(data)
+            data = self.model(imgs, boxes=boxes, valid=valid)
+            preds, hm, _ = self._unpack_model_data(data)
             preds = preds.float()
 
             if self.model.hparams.n_landmarks > 0 and "heatmap" in target:
@@ -1985,7 +1368,7 @@ class HeatmapModule(pl.LightningModule):
             with open(filename.format(i), "wb") as f:
                 pickle.dump(labels, f)
         data = self.model(imgs)  # only use class preds
-        preds, hm, _, _, _ = self._unpack_model_data(data)
+        preds, hm, _ = self._unpack_model_data(data)
         # convert preds from bfloat16 to float32
         preds = preds.float()
         if len(batch) == 6:

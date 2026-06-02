@@ -393,10 +393,7 @@ class TorchActorBackend:
     def __call__(self, clip, boxes, valid):
         with torch.inference_mode():
             output = self.model(clip, boxes=boxes, valid=valid)
-            if len(output) == 4:
-                logits, _heatmap, presence, _interaction = output
-            else:
-                logits, _heatmap, presence = output
+            logits, _heatmap, presence = output
         return logits, presence
 
 

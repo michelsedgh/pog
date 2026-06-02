@@ -201,48 +201,80 @@ def _initialize_actor_prompt_from_checkpoint(module, checkpoint):
                 torch.nn.init.zeros_(last.bias)
                 initialized.append("bbox_mlp_final")
 
-        if hasattr(net, "object_slot_embed") and not _checkpoint_has_key(
-            checkpoint, "model.net.object_slot_embed"
-        ):
-            net.object_slot_embed.zero_()
-            initialized.append("object_slot_embed")
-
-        if hasattr(net, "object_cls_embed"):
-            with torch.no_grad():
-                padding_idx = getattr(net.object_cls_embed, "padding_idx", None)
-                if padding_idx is not None:
-                    net.object_cls_embed.weight[padding_idx].zero_()
-            if not _checkpoint_has_key(checkpoint, "model.net.object_cls_embed.weight"):
-                initialized.append("object_cls_embed_constructor_init")
-
-        if hasattr(net, "object_valid_embed") and not _checkpoint_has_key(
-            checkpoint, "model.net.object_valid_embed.weight"
-        ):
-            net.object_valid_embed.weight.zero_()
-            initialized.append("object_valid_embed")
-
-        if hasattr(net, "object_bbox_mlp") and not _checkpoint_has_key(
-            checkpoint, "model.net.object_bbox_mlp.2.weight"
-        ):
-            last = net.object_bbox_mlp[-1]
-            if isinstance(last, torch.nn.Linear):
-                torch.nn.init.zeros_(last.weight)
-                torch.nn.init.zeros_(last.bias)
-                initialized.append("object_bbox_mlp_final")
-
-        if hasattr(net, "object_conf_mlp") and not _checkpoint_has_key(
-            checkpoint, "model.net.object_conf_mlp.2.weight"
-        ):
-            last = net.object_conf_mlp[-1]
-            if isinstance(last, torch.nn.Linear):
-                torch.nn.init.zeros_(last.weight)
-                torch.nn.init.zeros_(last.bias)
-                initialized.append("object_conf_mlp_final")
-
     if initialized:
         print(
             "Initialized actor-prompt modules from current class path: "
             + ", ".join(initialized)
+        )
+
+
+def _adapt_heatmap_final_layer_checkpoint(module, checkpoint):
+    if checkpoint is None:
+        return
+    state_dict = checkpoint.get("state_dict", {})
+    key_w = "model.net.heatmap_head.final_layer.weight"
+    key_b = "model.net.heatmap_head.final_layer.bias"
+    if key_w not in state_dict or key_b not in state_dict:
+        return
+
+    final_layer = getattr(module.model.net.heatmap_head, "final_layer", None)
+    if final_layer is None:
+        return
+
+    target_w = final_layer.weight
+    target_b = final_layer.bias
+    old_w = state_dict[key_w]
+    old_b = state_dict[key_b]
+    if old_w.shape == target_w.shape and old_b.shape == target_b.shape:
+        return
+
+    if old_w.shape[1:] != target_w.shape[1:] or old_b.ndim != target_b.ndim:
+        raise RuntimeError(
+            "Cannot adapt heatmap final layer checkpoint shape: "
+            f"{tuple(old_w.shape)} -> {tuple(target_w.shape)}"
+        )
+
+    new_w = target_w.detach().clone()
+    new_b = target_b.detach().clone()
+    new_w.zero_()
+    new_b.zero_()
+    copy_channels = min(old_w.shape[0], target_w.shape[0])
+    new_w[:copy_channels].copy_(old_w[:copy_channels])
+    new_b[:copy_channels].copy_(old_b[:copy_channels])
+    state_dict[key_w] = new_w
+    state_dict[key_b] = new_b
+    print(
+        "Adapted heatmap final layer from "
+        f"{old_w.shape[0]} to {target_w.shape[0]} channels; "
+        "copied existing channels and zero-initialized new channels."
+    )
+
+
+def _validate_no_deprecated_object_path(checkpoint):
+    if checkpoint is None:
+        return
+    state_dict = checkpoint.get("state_dict", {})
+    deprecated = [
+        key
+        for key in state_dict
+        if any(
+            needle in key
+            for needle in (
+                "object_interaction",
+                "object_cls_embed",
+                "object_slot_embed",
+                "object_bbox_mlp",
+                "object_conf_mlp",
+                "object_visual_proj",
+            )
+        )
+    ]
+    if deprecated:
+        preview = ", ".join(deprecated[:12])
+        raise ValueError(
+            "Deprecated object-token checkpoint detected. The active model uses "
+            "RF-DETR only as an interaction-heatmap teacher and has no runtime "
+            f"object-token path. First deprecated keys: {preview}"
         )
 
 
@@ -264,44 +296,6 @@ def _print_trainable_parameters(module):
     )
     for name, numel in rows:
         print(f"TRAINABLE {name} {numel:,}")
-
-
-def _validate_object_prompt_initialization(module):
-    model = module.model
-    if not getattr(model, "object_prompt", False):
-        return
-    net = getattr(model, "net", None)
-    if net is None or not hasattr(net, "object_cls_embed"):
-        return
-
-    with torch.no_grad():
-        padding_idx = getattr(net.object_cls_embed, "padding_idx", None)
-        if padding_idx is None:
-            weight = net.object_cls_embed.weight.detach().float()
-            real_weight = weight
-            padding_abs_max = 0.0
-        else:
-            net.object_cls_embed.weight[int(padding_idx)].zero_()
-            weight = net.object_cls_embed.weight.detach().float()
-            real_mask = torch.ones(weight.shape[0], dtype=torch.bool, device=weight.device)
-            real_mask[int(padding_idx)] = False
-            real_weight = weight[real_mask]
-            padding_abs_max = float(weight[int(padding_idx)].abs().max().item())
-
-        real_abs_max = float(real_weight.abs().max().item()) if real_weight.numel() else 0.0
-        real_std = float(real_weight.std().item()) if real_weight.numel() > 1 else 0.0
-        print(
-            "Object class embedding init: "
-            f"real_abs_max={real_abs_max:.6e} "
-            f"real_std={real_std:.6e} "
-            f"padding_abs_max={padding_abs_max:.6e}"
-        )
-        if real_abs_max == 0.0:
-            raise RuntimeError(
-                "Object class embeddings for real object classes are all zero. "
-                "This would make laptop/book/phone/etc. indistinguishable at "
-                "object-token initialization."
-            )
 
 
 def build_parser():
@@ -373,8 +367,7 @@ def build_parser():
     parser.add_argument("--mixup", type=int, default=0)
     parser.add_argument("--target_kp_loss_weight", type=int, default=0)
     parser.add_argument("--kp_loss_weight", type=float, default=1000.0)
-    parser.add_argument("--object_interaction_loss_weight", type=float, default=0.03)
-    parser.add_argument("--object_warmup_freeze_actor_path", type=int, default=0)
+    parser.add_argument("--interaction_warmup_freeze_actor_path", type=int, default=0)
     parser.add_argument("--log_kp_loss_weight", type=int, default=0)
     parser.add_argument("--grad_weights", type=int, default=0)
     parser.add_argument("--deepspeed_optim", type=int, default=0)
@@ -388,20 +381,22 @@ def main():
     args = parser.parse_args()
     cli_overrides = _explicit_cli_overrides(parser, args)
     checkpoint = _load_checkpoint(args.model_file)
+    _validate_no_deprecated_object_path(checkpoint)
     hparams = _merged_hparams(args, cli_overrides, checkpoint)
 
     if hparams.actor_prompt and hparams.mixup:
         raise ValueError("actor_prompt training requires --mixup 0")
     if hparams.actor_prompt and hparams.grad_weights:
         raise ValueError("actor_prompt training requires --grad_weights 0")
-    if hparams.object_prompt and not hparams.actor_prompt:
-        raise ValueError("object_prompt requires actor_prompt")
+    if hparams.actor_interaction_heatmaps and not hparams.actor_prompt:
+        raise ValueError("actor_interaction_heatmaps requires actor_prompt")
 
     seed_everything(hparams.seed)
     dataset = _dataset_class(hparams.dataset)
     module = HeatmapModule(model=POGUISE, **vars(hparams))
 
     if checkpoint is not None:
+        _adapt_heatmap_final_layer_checkpoint(module, checkpoint)
         strict = (
             bool(hparams.strict_load)
             if hparams.strict_load is not None
@@ -415,8 +410,6 @@ def main():
             print("Unexpected keys:", result.unexpected_keys)
     elif hparams.actor_prompt:
         _initialize_actor_prompt_from_checkpoint(module, None)
-
-    _validate_object_prompt_initialization(module)
 
     if hparams.print_trainable_params:
         _print_trainable_parameters(module)
