@@ -251,28 +251,46 @@ class NashMTL(WeightMethod):
         if self.step % self.update_weights_every == 0:
             self.step += 1
 
+            shared_parameters = list(shared_parameters)
+            if not shared_parameters:
+                raise RuntimeError("NashMTL requires at least one shared parameter")
+
             grads = {}
             for i, loss in enumerate(losses):
-                g = list(
-                    torch.autograd.grad(loss, shared_parameters, retain_graph=True)
+                g = torch.autograd.grad(
+                    loss,
+                    shared_parameters,
+                    retain_graph=True,
+                    allow_unused=True,
                 )
-                grad = torch.cat([torch.flatten(grad) for grad in g])
+                grad = torch.cat(
+                    [
+                        torch.flatten(grad)
+                        if grad is not None
+                        else torch.zeros_like(param).flatten()
+                        for grad, param in zip(g, shared_parameters)
+                    ]
+                )
                 grads[i] = grad
 
             G = torch.stack(tuple(v for v in grads.values()))
             GTG = torch.mm(G, G.t())
 
-            self.normalization_factor = (
-                torch.norm(GTG).detach().cpu().numpy().reshape((1,))
-            )
-            GTG = GTG / self.normalization_factor.item()
-            alpha = self.solve_optimization(GTG.cpu().detach().numpy())
-            alpha = torch.from_numpy(alpha)
+            normalization = torch.norm(GTG).detach()
+            if not torch.isfinite(normalization) or float(normalization.item()) <= 0:
+                alpha = self.prvs_alpha
+            else:
+                self.normalization_factor = normalization.cpu().numpy().reshape((1,))
+                GTG = GTG / self.normalization_factor.item()
+                alpha = self.solve_optimization(GTG.cpu().detach().numpy())
+                if alpha is None:
+                    alpha = self.prvs_alpha
 
         else:
             self.step += 1
             alpha = self.prvs_alpha
 
+        alpha = torch.as_tensor(alpha, device=losses.device, dtype=losses.dtype)
         weighted_loss = sum([losses[i] * alpha[i] for i in range(len(alpha))])
         extra_outputs["weights"] = alpha
         return weighted_loss, extra_outputs

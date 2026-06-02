@@ -8,7 +8,12 @@ import traceback
 import numpy as np
 import torch
 
-from datasets.object_vocab import NONE_OBJECT_ID, OBJECT_CLASSES, OBJECT_TO_ID
+from datasets.object_vocab import (
+    NONE_OBJECT_ID,
+    OBJECT_CLASSES,
+    OBJECT_TO_ID,
+    STRONG_ACTION_OBJECTS,
+)
 from datasets.toyotasm import CS_DICT, ToyotaSMDataset
 
 
@@ -237,16 +242,17 @@ def validate_interaction_target(name, frames, target, args, report):
                 not bool(interaction_valid[slot]),
                 f"{name}: Drink.Fromcan has no forced COCO object target",
             )
-        if name_for_slot == "Uselaptop" and bool(interaction_valid[slot]):
+        if name_for_slot in STRONG_ACTION_OBJECTS and bool(interaction_valid[slot]):
+            expected_ids = {
+                OBJECT_TO_ID[object_name]
+                for object_name in STRONG_ACTION_OBJECTS[name_for_slot]
+            }
             report.check(
-                int(interaction_cls[slot]) == OBJECT_TO_ID["laptop"],
-                f"{name}: Uselaptop supervised by laptop when detector supplies a target",
-                interaction_cls[slot],
-            )
-        if name_for_slot == "Readbook" and bool(interaction_valid[slot]):
-            report.check(
-                int(interaction_cls[slot]) == OBJECT_TO_ID["book"],
-                f"{name}: Readbook supervised by book when detector supplies a target",
+                int(interaction_cls[slot]) in expected_ids,
+                (
+                    f"{name}: {name_for_slot} supervised by declared "
+                    "strong object target"
+                ),
                 interaction_cls[slot],
             )
 

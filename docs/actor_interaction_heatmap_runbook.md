@@ -49,11 +49,17 @@ Usetelephone     -> phone
 Drink.Fromcup    -> cup
 Drink.Frombottle -> bottle
 Drink.Fromglass  -> glass
+Pour.Frombottle  -> bottle
+Cutbread         -> utensil
+Cook.Cut         -> utensil
+Cook.Stir        -> utensil or bowl
+Cook.Cleandishes -> sink
+Cook.Usestove    -> cooking_appliance
 ```
 
-WatchTV, Sitdown, Eat, Takepills, Cook, Walk, Enter, Leave, and Laydown do not
-receive forced interacted-object heatmap targets. This prevents context objects
-from becoming false action evidence.
+WatchTV, Sitdown, Eat, Takepills, Walk, Enter, Leave, and Laydown do not receive
+forced interacted-object heatmap targets. This prevents context objects from
+becoming false action evidence.
 
 For each valid actor slot, the dataset selects one actor-associated track from
 the matching object class. It does not merge every matching object in the scene.
@@ -70,12 +76,16 @@ cd "$REPO_DIR"
 git pull --ff-only origin main
 git log -1 --oneline
 
+python3 -m pip install --quiet cvxpy ecos
+
 python3 -m py_compile \
   blocks/poguise.py \
   models/poguise.py \
   modules/heatmap_module.py \
   datasets/toyotasm.py \
   losses/interaction_heatmap_losses.py \
+  losses/poguiseplus_losses.py \
+  grad_weights/nash_mtl.py \
   train.py \
   smoke_toyota_object_dataset.py \
   visualize_toyota_object_sample.py \
@@ -128,12 +138,13 @@ python3 -u train.py \
   --interaction_heatmap_sigma 1.5 \
   --freeze_backbone 1 --interaction_warmup_freeze_actor_path 1 \
   --interaction_unfreeze_last_blocks 2 \
-  --actor_interaction_heatmap_weight 25 \
   --class_balanced_sampler 1 --hard_negative_sampler 1 \
   --hard_negative_manifest "$HARD_NEGATIVE_MANIFEST" --hard_negative_prob 0.15 \
   --keep_rate 0.6 --keep_rate_merge 0.3 --merge_type tome --merge_mode 0 \
   --sim_metric 0 --topk_type 1 \
-  --mixup 0 --grad_weights 0 --kp_loss_weight 1000 --kp_only 0 \
+  --mixup 0 --grad_weights 1 --nash_update_weights_every 20 --nash_max_norm 1.0 \
+  --poguiseplus_heatmap_loss_weight 1.0 --poguiseplus_heatmap_log_eps 1e-6 \
+  --kp_only 0 \
   --toyota_pose_guided_sampling 1 --toyota_min_pose_frames 1 \
   --toyota_synthetic_warmup_epochs 0 \
   --batch_size 64 --accum_grad_batches 1 --max_epochs 3 --t_max_scheduler 3 \
@@ -166,6 +177,9 @@ Important metrics:
 val_interaction_heatmap_iou
 val_interaction_heatmap_positive_mean
 val_interaction_heatmap_center_l2
+val_loss_heatmap_log
+train_nash_weight_action
+train_nash_weight_heatmap
 val_group_laptop_book_tv_acc
 val_group_phone_tv_acc
 val_group_drink_cup_bottle_glass_acc
@@ -176,6 +190,12 @@ val_action_Usetelephone_acc
 val_action_Drink_Fromcup_acc
 val_action_Drink_Frombottle_acc
 val_action_Drink_Fromglass_acc
+val_action_Pour_Frombottle_acc
+val_action_Cutbread_acc
+val_action_Cook_Cut_acc
+val_action_Cook_Stir_acc
+val_action_Cook_Cleandishes_acc
+val_action_Cook_Usestove_acc
 val_acc_macro
 val_f1
 ```
@@ -212,12 +232,13 @@ python3 -u train.py \
   --interaction_heatmap_sigma 1.5 \
   --freeze_backbone 0 --interaction_warmup_freeze_actor_path 0 \
   --interaction_unfreeze_last_blocks 0 \
-  --actor_interaction_heatmap_weight 10 \
   --class_balanced_sampler 1 --hard_negative_sampler 1 \
   --hard_negative_manifest "$HARD_NEGATIVE_MANIFEST" --hard_negative_prob 0.15 \
   --keep_rate 0.6 --keep_rate_merge 0.3 --merge_type tome --merge_mode 0 \
   --sim_metric 0 --topk_type 1 \
-  --mixup 0 --grad_weights 0 --kp_loss_weight 1000 --kp_only 0 \
+  --mixup 0 --grad_weights 1 --nash_update_weights_every 20 --nash_max_norm 1.0 \
+  --poguiseplus_heatmap_loss_weight 1.0 --poguiseplus_heatmap_log_eps 1e-6 \
+  --kp_only 0 \
   --toyota_pose_guided_sampling 1 --toyota_min_pose_frames 1 \
   --toyota_synthetic_warmup_epochs 0 \
   --batch_size 48 --accum_grad_batches 1 --max_epochs 4 --t_max_scheduler 4 \

@@ -9,6 +9,7 @@ import os
 from losses.softtarget import SoftTargetCrossEntropy
 from losses.heatmap_loss import KeypointMSELoss
 from losses.interaction_heatmap_losses import interaction_heatmap_loss
+from losses.poguiseplus_losses import heatmap_frobenius_loss
 import pickle
 from datasets.object_vocab import GROUPS
 from datasets.toyotasm import CS_DICT, CV_DICT
@@ -41,6 +42,13 @@ class HeatmapModule(pl.LightningModule):
         self.actor_prompt = bool(hparams.get("actor_prompt", 0))
         self.actor_interaction_heatmaps = bool(
             hparams.get("actor_interaction_heatmaps", 0)
+        )
+        self.actor_poguiseplus_loss = self.actor_prompt and self.actor_interaction_heatmaps
+        self.poguiseplus_heatmap_loss_weight = float(
+            hparams.get("poguiseplus_heatmap_loss_weight", 1.0)
+        )
+        self.poguiseplus_heatmap_log_eps = float(
+            hparams.get("poguiseplus_heatmap_log_eps", 1e-6)
         )
         self.num_classes = hparams.num_classes
         self.dataset_name = hparams.dataset_artifact
@@ -231,6 +239,21 @@ class HeatmapModule(pl.LightningModule):
             params.append(param)
         return params
 
+    def _nash_shared_parameters(self):
+        params = []
+        for name, param in self.model.net.named_parameters():
+            if not param.requires_grad:
+                continue
+            if "heatmap_head" in name:
+                continue
+            params.append(param)
+        if not params:
+            raise RuntimeError(
+                "Nash-MTL requires trainable shared backbone parameters. "
+                "Unfreeze at least one transformer block or disable --grad_weights."
+            )
+        return params
+
     def _toyota_label_dict(self):
         return CS_DICT if self.model.hparams.get("task_type", "CS") == "CS" else CV_DICT
 
@@ -257,6 +280,12 @@ class HeatmapModule(pl.LightningModule):
             "Drink.Frombottle",
             "Drink.Fromcup",
             "Drink.Fromglass",
+            "Pour.Frombottle",
+            "Cutbread",
+            "Cook.Cut",
+            "Cook.Stir",
+            "Cook.Cleandishes",
+            "Cook.Usestove",
         )
         indices = []
         for action_name in action_names:
@@ -479,21 +508,27 @@ class HeatmapModule(pl.LightningModule):
                     },
                 )
 
-            if self.model.hparams.grad_weights and self.model.hparams.n_landmarks > 0:
+            if self.model.hparams.grad_weights and (
+                self.model.hparams.n_landmarks > 0 or self.actor_interaction_heatmaps
+            ):
                 if NashMTL is None:
                     raise ImportError("cvxpy is required when grad_weights is enabled")
                 self.grad_weight = NashMTL(
                     n_tasks=2,
-                    update_weights_every=20,
+                    update_weights_every=int(
+                        self.model.hparams.get("nash_update_weights_every", 20)
+                    ),
+                    max_norm=float(self.model.hparams.get("nash_max_norm", 1.0)),
                     device=self.model.device,
                 )
-                params.append(
-                    {
-                        "params": self.grad_weight.parameters(),
-                        "lr": 0.025,
-                        # "weight_decay": self.weight_decay,
-                    },
-                )
+                nash_params = list(self.grad_weight.parameters())
+                if nash_params:
+                    params.append(
+                        {
+                            "params": nash_params,
+                            "lr": 0.025,
+                        },
+                    )
             if self.model.hparams.deepspeed_optim:
                 if DeepSpeedCPUAdam is None:
                     raise ImportError(
@@ -516,26 +551,37 @@ class HeatmapModule(pl.LightningModule):
         return [optimizer], [scheduler]
 
     def backward(self, loss):
-        if self.model.hparams.grad_weights and self.model.hparams.n_landmarks > 0:
-            losses = [loss[0], loss[1]]
-            action_head_params = (
-                self.model.actor_head.parameters()
-                if self.actor_prompt
-                else self.model.head.parameters()
+        if (
+            self.model.hparams.grad_weights
+            and torch.is_tensor(loss)
+            and loss.ndim > 0
+        ):
+            if loss.numel() != 2:
+                raise RuntimeError(
+                    f"Nash-MTL expects two tasks [action, heatmap], got {loss.numel()}"
+                )
+            _, extra_outputs = self.grad_weight.backward(
+                losses=loss,
+                shared_parameters=self._nash_shared_parameters(),
             )
-            lst = [
-                action_head_params,
-                self.model.net.heatmap_head.parameters(),
-            ]
-            self.grad_weight.backward(
-                losses=losses,
-                shared_parameters=[
-                    param
-                    for name, param in self.model.net.named_parameters()
-                    if "heatmap_head" not in name
-                ],
-                task_specific_parameters=lst,
-            )
+            weights = None if extra_outputs is None else extra_outputs.get("weights")
+            if torch.is_tensor(weights) and weights.numel() == 2:
+                self.log(
+                    "train_nash_weight_action",
+                    weights[0].detach(),
+                    on_step=True,
+                    on_epoch=True,
+                    logger=True,
+                    sync_dist=True,
+                )
+                self.log(
+                    "train_nash_weight_heatmap",
+                    weights[1].detach(),
+                    on_step=True,
+                    on_epoch=True,
+                    logger=True,
+                    sync_dist=True,
+                )
         else:
             loss.backward()
 
@@ -557,7 +603,6 @@ class HeatmapModule(pl.LightningModule):
         valid_preds = preds[valid]
         valid_labels = actions[valid]
         loss_action = loss_fn(valid_preds, valid_labels)
-        loss = loss_action
         self.log(
             f"{stage}_loss_action",
             loss_action,
@@ -568,11 +613,12 @@ class HeatmapModule(pl.LightningModule):
             sync_dist=True,
         )
 
+        loss_action_task = loss_action
         if presence_logits is not None:
             loss_presence = F.binary_cross_entropy_with_logits(
                 presence_logits, valid.float()
             )
-            loss = loss + loss_presence * self.model.hparams.get(
+            loss_action_task = loss_action_task + loss_presence * self.model.hparams.get(
                 "presence_loss_weight", 0.05
             )
             self.log(
@@ -586,6 +632,7 @@ class HeatmapModule(pl.LightningModule):
             )
 
         loss_kp = None
+        loss_pose_frobenius = None
         if self.model.hparams.n_landmarks > 0:
             labels_kp = target["heatmap"]
             kp_vis = target["kp_vis"]
@@ -603,16 +650,29 @@ class HeatmapModule(pl.LightningModule):
             else:
                 loss_kp = self.kp_loss(pose_hm_preds, labels_kp, mask=kp_vis)
 
-            if stage == "train" and self.model.hparams.log_kp_loss_weight:
-                loss_kp = torch.log(loss_kp + 1e-6)
-            kp_loss_weight = float(self.model.hparams.kp_loss_weight)
-            if self.model.hparams.get("kp_only", False):
-                loss = loss * 1e-6 + loss_kp * kp_loss_weight
-            elif stage == "train" and self.model.hparams.grad_weights:
-                loss = torch.stack([loss, loss_kp * kp_loss_weight])
-            elif kp_loss_weight > 0.0:
-                loss = loss + loss_kp * kp_loss_weight
+            loss_pose_frobenius = heatmap_frobenius_loss(
+                pose_hm_preds,
+                labels_kp.to(device=pose_hm_preds.device, dtype=pose_hm_preds.dtype),
+                mask=kp_vis.to(device=pose_hm_preds.device),
+            )
+            self.log(
+                f"{stage}_loss_pose_heatmap_frobenius",
+                loss_pose_frobenius,
+                on_step=stage == "train",
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
 
+            if (
+                not self.actor_poguiseplus_loss
+                and stage == "train"
+                and self.model.hparams.log_kp_loss_weight
+            ):
+                loss_kp = torch.log(loss_kp + 1e-6)
+
+        loss_interaction_frobenius = None
         if self.actor_interaction_heatmaps:
             interaction_heatmap = self._interaction_heatmap_pred(hm_preds)
             if (
@@ -634,12 +694,23 @@ class HeatmapModule(pl.LightningModule):
                 )
                 if loss_interaction_heatmap is None:
                     loss_interaction_heatmap = interaction_heatmap.new_zeros(())
-                loss = loss + loss_interaction_heatmap * self.model.hparams.get(
-                    "actor_interaction_heatmap_weight", 25.0
+                loss_interaction_frobenius = heatmap_frobenius_loss(
+                    interaction_heatmap,
+                    target_heatmap,
+                    valid=heatmap_valid,
                 )
                 self.log(
                     f"{stage}_loss_interaction_heatmap",
                     loss_interaction_heatmap,
+                    on_step=stage == "train",
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                    sync_dist=True,
+                )
+                self.log(
+                    f"{stage}_loss_interaction_heatmap_frobenius",
+                    loss_interaction_frobenius,
                     on_step=stage == "train",
                     on_epoch=True,
                     prog_bar=False,
@@ -653,6 +724,59 @@ class HeatmapModule(pl.LightningModule):
                         heatmap_valid,
                         stage,
                     )
+
+        if self.actor_poguiseplus_loss:
+            if loss_pose_frobenius is None and loss_interaction_frobenius is None:
+                raise RuntimeError(
+                    "Actor PO-GUISE+ loss requires pose or interaction heatmaps"
+                )
+            heatmap_terms = []
+            if loss_pose_frobenius is not None:
+                heatmap_terms.append(loss_pose_frobenius)
+            if loss_interaction_frobenius is not None:
+                heatmap_terms.append(loss_interaction_frobenius)
+            loss_heatmap_raw = torch.stack(heatmap_terms).sum()
+            loss_heatmap_task = torch.log(
+                loss_heatmap_raw + self.poguiseplus_heatmap_log_eps
+            )
+            self.log(
+                f"{stage}_loss_heatmap_frobenius",
+                loss_heatmap_raw,
+                on_step=stage == "train",
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+            self.log(
+                f"{stage}_loss_heatmap_log",
+                loss_heatmap_task,
+                on_step=stage == "train",
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+            if stage == "train" and self.model.hparams.grad_weights:
+                loss = torch.stack([loss_action_task, loss_heatmap_task])
+            elif self.model.hparams.get("kp_only", False):
+                loss = loss_action_task * 1e-6 + (
+                    loss_heatmap_task * self.poguiseplus_heatmap_loss_weight
+                )
+            else:
+                loss = loss_action_task + (
+                    loss_heatmap_task * self.poguiseplus_heatmap_loss_weight
+                )
+        else:
+            loss = loss_action_task
+            if loss_kp is not None:
+                kp_loss_weight = float(self.model.hparams.kp_loss_weight)
+                if self.model.hparams.get("kp_only", False):
+                    loss = loss * 1e-6 + loss_kp * kp_loss_weight
+                elif stage == "train" and self.model.hparams.grad_weights:
+                    loss = torch.stack([loss, loss_kp * kp_loss_weight])
+                elif kp_loss_weight > 0.0:
+                    loss = loss + loss_kp * kp_loss_weight
 
         return (
             loss,

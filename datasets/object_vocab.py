@@ -240,6 +240,12 @@ STRONG_ACTION_OBJECTS = {
     "Drink.Frombottle": ("bottle",),
     "Drink.Fromcup": ("cup",),
     "Drink.Fromglass": ("glass",),
+    "Pour.Frombottle": ("bottle",),
+    "Cutbread": ("utensil",),
+    "Cook.Cut": ("utensil",),
+    "Cook.Stir": ("utensil", "bowl"),
+    "Cook.Cleandishes": ("sink",),
+    "Cook.Usestove": ("cooking_appliance",),
 }
 
 GROUPS = {

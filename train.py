@@ -370,6 +370,10 @@ def build_parser():
     parser.add_argument("--interaction_warmup_freeze_actor_path", type=int, default=0)
     parser.add_argument("--log_kp_loss_weight", type=int, default=0)
     parser.add_argument("--grad_weights", type=int, default=0)
+    parser.add_argument("--nash_update_weights_every", type=int, default=20)
+    parser.add_argument("--nash_max_norm", type=float, default=1.0)
+    parser.add_argument("--poguiseplus_heatmap_loss_weight", type=float, default=1.0)
+    parser.add_argument("--poguiseplus_heatmap_log_eps", type=float, default=1e-6)
     parser.add_argument("--deepspeed_optim", type=int, default=0)
     parser.add_argument("--kp_only", type=int, default=0)
 
@@ -386,8 +390,11 @@ def main():
 
     if hparams.actor_prompt and hparams.mixup:
         raise ValueError("actor_prompt training requires --mixup 0")
-    if hparams.actor_prompt and hparams.grad_weights:
-        raise ValueError("actor_prompt training requires --grad_weights 0")
+    if hparams.actor_prompt and hparams.grad_weights and not hparams.actor_interaction_heatmaps:
+        raise ValueError(
+            "actor_prompt --grad_weights is supported only for "
+            "actor_interaction_heatmaps PO-GUISE+ training"
+        )
     if hparams.actor_interaction_heatmaps and not hparams.actor_prompt:
         raise ValueError("actor_interaction_heatmaps requires actor_prompt")
 

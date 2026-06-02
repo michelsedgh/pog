@@ -484,11 +484,6 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--actor_val_diagnostic_max_pairs", type=int, default=8)
         parser.add_argument("--actor_interaction_heatmaps", type=int, default=0)
         parser.add_argument("--interaction_unfreeze_last_blocks", type=int, default=0)
-        parser.add_argument(
-            "--actor_interaction_heatmap_weight",
-            type=float,
-            default=25.0,
-        )
         parser.add_argument("--ret_feat", type=int, default=0)
         parser.add_argument("--linear_probe", type=int, default=0)
 

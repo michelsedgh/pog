@@ -11,6 +11,10 @@ CORE_COLUMNS = [
     "val_acc_macro",
     "val_f1",
     "val_loss_interaction_heatmap",
+    "val_loss_heatmap_log",
+    "val_loss_heatmap_frobenius",
+    "train_nash_weight_action",
+    "train_nash_weight_heatmap",
     "val_interaction_heatmap_iou",
     "val_interaction_heatmap_positive_mean",
     "val_interaction_heatmap_center_l2",
@@ -32,6 +36,12 @@ ACTIONS = [
     "Drink_Fromcup",
     "Drink_Frombottle",
     "Drink_Fromglass",
+    "Pour_Frombottle",
+    "Cutbread",
+    "Cook_Cut",
+    "Cook_Stir",
+    "Cook_Cleandishes",
+    "Cook_Usestove",
 ]
 
 
@@ -108,6 +118,16 @@ def print_row(title, row):
         f"iou {metric(row, 'val_interaction_heatmap_iou'):.4f}, "
         f"positive {metric(row, 'val_interaction_heatmap_positive_mean'):.4f}, "
         f"center_l2 {metric(row, 'val_interaction_heatmap_center_l2'):.2f}"
+    )
+    print(
+        "poguise+ heatmap loss: "
+        f"log {metric(row, 'val_loss_heatmap_log'):.4f}, "
+        f"fro {metric(row, 'val_loss_heatmap_frobenius'):.4f}"
+    )
+    print(
+        "nash weights: "
+        f"action {metric(row, 'train_nash_weight_action'):.4f}, "
+        f"heatmap {metric(row, 'train_nash_weight_heatmap'):.4f}"
     )
     print(f"interaction_score: {metric(row, 'interaction_score'):.4f}")
 
