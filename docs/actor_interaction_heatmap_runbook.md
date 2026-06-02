@@ -71,7 +71,9 @@ missing detector labels and context objects from becoming false action evidence.
 For each valid actor slot, the dataset selects one actor-associated track from
 the matching object class. It does not merge every matching object in the scene.
 The selected track is scored by proximity/overlap with the actor box and detector
-confidence, then converted into a clip-level center-Gaussian motion heatmap.
+confidence, then converted into a clip-level center-Gaussian motion heatmap. The
+clip target is max-aggregated over sampled frames, so a clean sparse detection
+still gives a strong spatial target instead of being diluted by clip length.
 
 Training keeps a strict teacher contract:
 

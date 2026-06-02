@@ -1469,7 +1469,7 @@ class ToyotaSMDataset(Dataset):
                 frame_heatmaps[sample_pos],
                 self._interaction_heatmap_from_box(box),
             )
-        return frame_heatmaps.mean(dim=0).clamp_(0.0, 1.0)
+        return frame_heatmaps.max(dim=0).values.clamp_(0.0, 1.0)
 
     def _normalized_object_box(self, entry, height, width):
         width = float(width)
