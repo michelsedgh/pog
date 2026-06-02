@@ -18,7 +18,9 @@ There is one active object path:
 5. Use the final actor tokens directly for action classification.
 6. Predict actor/object selection and actor-conditioned interaction heatmaps from
    final actor/object tokens plus pooled actor-object union visual features.
-7. Train with strong-object selection targets, actor-conditioned interaction heatmaps, light positive-erased/shuffled counterfactuals, and optional objectless consistency.
+7. Train with strong-object selection targets and actor-conditioned interaction
+   heatmaps. Positive-erased and shuffled object modes are diagnostics, not
+   training losses.
 
 The model no longer has a post-backbone object adapter, free action-score overrides, specialist rerankers, or relation-only modes. Object evidence must enter through transformer tokens and affect the actor token before `actor_head`.
 
@@ -136,11 +138,11 @@ Use the normal action CE as the main task, plus:
 - pose heatmap loss
 - actor/object selection loss
 - actor-conditioned interaction heatmap loss
-- light positive-erased and shuffled-object margin loss
-- optional objectless consistency loss
 - actor presence loss
 
-Positive-erased removes only the positive interacted-object candidates and leaves distractors visible. This is the key counterfactual test for whether the model learned the interacted object rather than a general object prior.
+There is no all-visible-object heatmap target. Positive-erased removes only the
+positive interacted-object candidates and leaves distractors visible, but this is
+used as a validation diagnostic rather than a training branch.
 
 ## Training Schedule
 
@@ -153,12 +155,8 @@ Frozen object-token warmup:
 - `--object_warmup_freeze_actor_path 1`
 - `--object_unfreeze_last_blocks 2`
 - actor classifier, presence head, and global classifier are frozen
-- `--object_heatmap_weight 0`
 - `--object_interaction_loss_weight 0.03`
 - `--object_interaction_heatmap_weight 25`
-- `--object_counterfactual_margin_weight 0.01`
-- `--object_counterfactual_margin 0.05`
-- `--object_objectless_consistency_weight 0.0`
 - `--kp_loss_weight 1000`
 - `--lr 5e-7`
 - `--lr_head 5e-5`
@@ -190,7 +188,7 @@ Do not judge only raw global macro/F1. A pass requires:
 - shuffled-object margin gain is positive
 - selection mass and selection accuracy are sane
 - interacted-object heatmap IoU/positive response are nonzero
-- objectless classes remain stable
+- weak/context classes remain stable
 - per-class checks for `Uselaptop`, `Readbook`, `WatchTV`, `Usetelephone`, and drink classes do not reveal a hidden regression
 
-Toyota validation cannot fully prove the live couch-laptop case because `Uselaptop` is often already saturated there. The real live A/B remains necessary, but the model architecture must pass the object counterfactual metrics first.
+Toyota validation cannot fully prove the live couch-laptop case because `Uselaptop` is often already saturated there. The real live A/B remains necessary, but the model architecture must pass the object diagnostic metrics first.

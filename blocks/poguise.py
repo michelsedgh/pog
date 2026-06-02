@@ -959,8 +959,7 @@ class VisionTransformer(nn.Module):
         self.HW_OUT_CONV = (hw_out_conv, hw_out_conv)
         self.n_heatmap_tokens = self.HW_OUT_CONV[0] * self.HW_OUT_CONV[1]
         self.n_landmarks = int(n_landmarks)
-        self.n_object_heatmap_channels = self.num_object_classes if self.object_prompt else 0
-        self.n_heatmap_out_channels = self.n_landmarks + self.n_object_heatmap_channels
+        self.n_heatmap_out_channels = self.n_landmarks
         if self.n_heatmap_out_channels == 0:
             self.n_heatmap_tokens = 0
         self.mode = mode

@@ -233,57 +233,13 @@ def object_box_ignored_for_file_id(box_xyxy, file_id, width, height, ignore_regi
             return True
     return False
 
-ACTION_TO_OBJECT_GROUPS = {
-    "Cook.Cleandishes": ["sink", "bowl", "utensil", "cup"],
-    "Cook.Cleanup": ["sink", "dining_table", "bowl", "utensil", "cup"],
-    "Cook.Cut": ["utensil", "food_snack", "bowl"],
-    "Cook.Stir": ["utensil", "bowl", "cup"],
-    "Cook.Usestove": ["cooking_appliance"],
-    "Cutbread": ["utensil", "food_snack"],
-    "Drink.Frombottle": ["bottle"],
-    "Drink.Fromcan": [],
-    "Drink.Fromcup": ["cup"],
-    "Drink.Fromglass": ["glass"],
-    "Eat.Attable": ["food_snack", "bowl", "utensil", "dining_table"],
-    "Eat.Snack": ["food_snack", "bowl"],
-    "Enter": [],
-    "Getup": [],
-    "Laydown": [],
-    "Leave": [],
-    "Makecoffee.Pourgrains": ["cup"],
-    "Makecoffee.Pourwater": ["cup"],
-    "Maketea.Boilwater": ["cup"],
-    "Maketea.Insertteabag": ["cup"],
-    "Pour.Frombottle": ["bottle", "cup"],
-    "Pour.Fromcan": ["cup"],
-    "Pour.Fromkettle": ["cup"],
-    "Readbook": ["book"],
-    "Sitdown": ["chair", "couch"],
-    "Takepills": ["cup"],
-    "Uselaptop": ["laptop", "keyboard_mouse"],
-    "Usetablet": [],
-    "Usetelephone": ["phone"],
-    "Walk": [],
-    "WatchTV": ["tv_monitor", "remote", "couch"],
-}
-
-ACTION_TO_OBJECT = ACTION_TO_OBJECT_GROUPS
-
 STRONG_ACTION_OBJECTS = {
-    ("Uselaptop", "laptop"),
-    ("Readbook", "book"),
-    ("Usetelephone", "phone"),
-    ("Drink.Frombottle", "bottle"),
-    ("Drink.Fromcup", "cup"),
-    ("Drink.Fromglass", "glass"),
-}
-
-OBJECTLESS_ACTIONS = {
-    "Enter",
-    "Getup",
-    "Laydown",
-    "Leave",
-    "Walk",
+    "Uselaptop": ("laptop", "keyboard_mouse"),
+    "Readbook": ("book",),
+    "Usetelephone": ("phone",),
+    "Drink.Frombottle": ("bottle",),
+    "Drink.Fromcup": ("cup",),
+    "Drink.Fromglass": ("glass",),
 }
 
 GROUPS = {

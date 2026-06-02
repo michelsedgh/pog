@@ -108,12 +108,12 @@ def draw_normalized_box(draw, box, color, width=3):
     draw.rectangle((x1 * 224, y1 * 224, x2 * 224, y2 * 224), outline=color, width=width)
 
 
-def heatmap_overlay(image, object_heatmap, object_heatmap_valid=None):
-    if object_heatmap_valid is None:
-        object_heatmap_valid = object_heatmap.flatten(1).amax(dim=1) > 0
-    if not object_heatmap_valid.any():
+def heatmap_overlay(image, heatmap, valid=None):
+    if valid is None:
+        valid = heatmap.flatten(1).amax(dim=1) > 0
+    if not valid.any():
         return image
-    hm = object_heatmap[object_heatmap_valid].max(dim=0).values
+    hm = heatmap[valid].max(dim=0).values
     hm = hm.detach().cpu().numpy()
     if float(hm.max()) <= 0:
         return image
@@ -127,13 +127,14 @@ def heatmap_overlay(image, object_heatmap, object_heatmap_valid=None):
 def draw_overlay(frames, target, output_path, sample_idx):
     middle = frames.shape[0] // 2
     image = denormalize_frame(frames, middle)
-    image = heatmap_overlay(
-        image,
-        target["object_heatmap"],
-        target.get("object_heatmap_valid", None).bool()
-        if "object_heatmap_valid" in target
-        else None,
-    )
+    if "interaction_heatmap" in target:
+        image = heatmap_overlay(
+            image,
+            target["interaction_heatmap"],
+            target.get("interaction_heatmap_valid", None).bool()
+            if "interaction_heatmap_valid" in target
+            else None,
+        )
     draw = ImageDraw.Draw(image)
 
     valid_actor_slots = torch.nonzero(target["valid"].bool(), as_tuple=False).flatten()

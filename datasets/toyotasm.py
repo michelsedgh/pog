@@ -14,15 +14,12 @@ import re
 import shutil
 import tempfile
 import zipfile
-import zlib
 from utils.ntu import frame_utils as utils
 from datasets.object_vocab import (
-    ACTION_TO_OBJECT,
     DETECTOR_TO_OBJECT,
     NONE_OBJECT_ID,
     NUM_OBJECT_CLASSES,
     OBJECT_TO_ID,
-    OBJECTLESS_ACTIONS,
     STRONG_ACTION_OBJECTS,
     object_box_ignored_for_file_id,
     object_allowed_for_file_id,
@@ -150,17 +147,11 @@ class ToyotaSMDataset(Dataset):
         self.object_conf_threshold = float(kwargs.get("object_conf_threshold", 0.25))
         if not 0 <= self.object_conf_threshold <= 1:
             raise ValueError("object_conf_threshold must be in [0, 1]")
-        self.object_heatmap_size = int(kwargs.get("object_heatmap_size", 56))
-        if self.object_heatmap_size != 56:
-            raise ValueError("Toyota object_heatmap_size must be 56")
-        self.object_heatmap_negative_weight = float(
-            kwargs.get("object_heatmap_negative_weight", 0.05)
+        self.interaction_heatmap_size = int(
+            kwargs.get("interaction_heatmap_size", 56)
         )
-        if not 0 <= self.object_heatmap_negative_weight <= 1:
-            raise ValueError("object_heatmap_negative_weight must be in [0, 1]")
-        self.object_none_target_prob = float(kwargs.get("object_none_target_prob", 0.3))
-        if not 0 <= self.object_none_target_prob <= 1:
-            raise ValueError("object_none_target_prob must be in [0, 1]")
+        if self.interaction_heatmap_size != 56:
+            raise ValueError("Toyota interaction_heatmap_size must be 56")
         self.object_track_iou_threshold = float(
             kwargs.get("object_track_iou_threshold", 0.2)
         )
@@ -257,7 +248,10 @@ class ToyotaSMDataset(Dataset):
         self._num_retries = 5
         self._video_size_cache = {}
         self.needs_skeleton = self.n_landmarks > 0 or self.actor_prompt
-        self.heatmap_size = (self.object_heatmap_size, self.object_heatmap_size)
+        self.heatmap_size = (
+            self.interaction_heatmap_size,
+            self.interaction_heatmap_size,
+        )
         if self.n_landmarks:
             if UDPHeatmap is None:
                 raise ImportError("mmpose is required when n_landmarks is greater than 0")
@@ -420,9 +414,7 @@ class ToyotaSMDataset(Dataset):
             "--num_object_classes", type=int, default=NUM_OBJECT_CLASSES
         )
         parser.add_argument("--object_conf_threshold", type=float, default=0.25)
-        parser.add_argument("--object_heatmap_size", type=int, default=56)
-        parser.add_argument("--object_heatmap_negative_weight", type=float, default=0.05)
-        parser.add_argument("--object_none_target_prob", type=float, default=0.3)
+        parser.add_argument("--interaction_heatmap_size", type=int, default=56)
         parser.add_argument("--object_track_iou_threshold", type=float, default=0.2)
         parser.add_argument("--toyota_pose_guided_sampling", type=int, default=1)
         parser.add_argument("--toyota_min_pose_frames", type=int, default=1)
@@ -929,7 +921,6 @@ class ToyotaSMDataset(Dataset):
                             actor_target,
                             height=frames.shape[2],
                             width=frames.shape[3],
-                            file_id=file_id,
                         )
                     )
             if self.n_landmarks:
@@ -1257,29 +1248,12 @@ class ToyotaSMDataset(Dataset):
                 dst_slot
             )
 
-        heatmap_width = targets[0]["object_heatmap"].shape[-1]
+        heatmap_width = self.heatmap_size[-1]
         heatmap_bounds = self._scale_panel_bounds(
             bounds,
             source_width=canvas_width,
             target_width=heatmap_width,
         )
-        object_heatmap = self._compose_synthetic_heatmaps(
-            [target["object_heatmap"] for target in targets],
-            heatmap_bounds,
-            combine="max",
-        ).clamp_(0, 1)
-        object_heatmap_valid = torch.stack(
-            [target["object_heatmap_valid"].bool() for target in targets]
-        ).any(dim=0)
-        object_heatmap_weight = self._compose_synthetic_heatmaps(
-            [target["object_heatmap_weight"] for target in targets],
-            heatmap_bounds,
-            combine="max",
-        ).clamp_(
-            float(self.object_heatmap_negative_weight),
-            1.0,
-        )
-
         interaction_cls = torch.full(
             (self.num_actor_tokens,), NONE_OBJECT_ID, dtype=torch.long
         )
@@ -1332,76 +1306,12 @@ class ToyotaSMDataset(Dataset):
             "object_cls": object_cls,
             "object_conf": object_conf,
             "object_valid": object_valid,
-            "object_heatmap": object_heatmap,
-            "object_heatmap_valid": object_heatmap_valid,
-            "object_heatmap_weight": object_heatmap_weight,
             "interaction_cls": interaction_cls,
             "interaction_valid": interaction_valid,
             "interaction_positive_mask": interaction_positive_mask,
             "interaction_heatmap": interaction_heatmap,
             "interaction_heatmap_valid": interaction_heatmap_valid,
         }
-
-    def _blur_object_heatmap(self, heatmap, sigma=1.0):
-        if sigma <= 0 or heatmap.numel() == 0:
-            return heatmap
-        radius = int(math.ceil(float(sigma) * 3.0))
-        coords = torch.arange(-radius, radius + 1, dtype=heatmap.dtype)
-        kernel_1d = torch.exp(-(coords**2) / (2.0 * float(sigma) ** 2))
-        kernel_1d = kernel_1d / kernel_1d.sum().clamp_min(1e-12)
-        kernel_2d = kernel_1d[:, None] * kernel_1d[None, :]
-        kernel = kernel_2d.view(1, 1, *kernel_2d.shape).repeat(
-            heatmap.shape[0], 1, 1, 1
-        )
-        blurred = F.conv2d(
-            heatmap.unsqueeze(0),
-            kernel,
-            padding=radius,
-            groups=heatmap.shape[0],
-        ).squeeze(0)
-        return torch.maximum(heatmap, blurred).clamp_(0.0, 1.0)
-
-    def _build_object_heatmaps(self, object_entries, height, width):
-        hm_h, hm_w = self.heatmap_size
-        frame_heatmaps = torch.zeros(
-            (self.n_frames, self.num_object_classes, hm_h, hm_w),
-            dtype=torch.float32,
-        )
-        valid = torch.zeros(self.num_object_classes, dtype=torch.bool)
-        for entry in object_entries:
-            cls_id = int(entry["cls_id"])
-            if cls_id < 0 or cls_id >= self.num_object_classes:
-                continue
-            x1, y1, x2, y2 = [float(v) for v in entry["xyxy"].tolist()]
-            x1h = int(
-                math.floor(max(0.0, min(float(width), x1)) * hm_w / float(width))
-            )
-            y1h = int(
-                math.floor(max(0.0, min(float(height), y1)) * hm_h / float(height))
-            )
-            x2h = int(
-                math.ceil(max(0.0, min(float(width), x2)) * hm_w / float(width))
-            )
-            y2h = int(
-                math.ceil(max(0.0, min(float(height), y2)) * hm_h / float(height))
-            )
-            x1h = int(np.clip(x1h, 0, hm_w - 1))
-            y1h = int(np.clip(y1h, 0, hm_h - 1))
-            x2h = int(np.clip(x2h, x1h + 1, hm_w))
-            y2h = int(np.clip(y2h, y1h + 1, hm_h))
-            confidence = float(np.clip(float(entry["conf"]), 0.0, 1.0))
-            frame_heatmaps[int(entry["sample_pos"]), cls_id, y1h:y2h, x1h:x2h] = (
-                torch.maximum(
-                    frame_heatmaps[int(entry["sample_pos"]), cls_id, y1h:y2h, x1h:x2h],
-                    torch.tensor(confidence, dtype=torch.float32),
-                )
-            )
-            valid[cls_id] = True
-        heatmap = frame_heatmaps.max(dim=0).values.clamp_(0.0, 1.0)
-        heatmap = self._blur_object_heatmap(heatmap, sigma=1.0)
-        weight = torch.full_like(heatmap, float(self.object_heatmap_negative_weight))
-        weight = torch.where(heatmap > 0, torch.ones_like(weight), weight)
-        return heatmap, valid, weight
 
     def _box_iou(self, box_a, box_b):
         ax1, ay1, ax2, ay2 = [float(v) for v in box_a]
@@ -1509,17 +1419,6 @@ class ToyotaSMDataset(Dataset):
                 return action_name
         return None
 
-    def _use_none_interaction_target(self, file_id, slot):
-        if self.object_none_target_prob <= 0:
-            return False
-        if self.object_none_target_prob >= 1:
-            return True
-        if self.set_type == "train":
-            return bool(np.random.random() < self.object_none_target_prob)
-        key = f"{file_id}:{int(slot)}:{self.toyota_seed}".encode("utf-8")
-        value = zlib.crc32(key) / float(2**32 - 1)
-        return value < self.object_none_target_prob
-
     def _interaction_heatmap_from_box(self, box):
         hm_h, hm_w = self.heatmap_size
         box = box.float().clamp(0.0, 1.0)
@@ -1544,7 +1443,6 @@ class ToyotaSMDataset(Dataset):
         object_boxes,
         object_cls,
         object_valid,
-        file_id,
     ):
         interaction_cls = torch.full(
             (self.num_actor_tokens,), NONE_OBJECT_ID, dtype=torch.long
@@ -1566,41 +1464,33 @@ class ToyotaSMDataset(Dataset):
             if action_label < 0:
                 continue
             action_name = self._action_name_from_label(action_label)
-            if action_name is None or action_name not in ACTION_TO_OBJECT:
+            if action_name is None:
                 continue
-            expected_names = ACTION_TO_OBJECT[action_name]
-            if expected_names:
-                positive_ids = {
-                    int(OBJECT_TO_ID[object_name])
-                    for object_name in expected_names
-                    if (action_name, object_name) in STRONG_ACTION_OBJECTS
-                    and object_name in OBJECT_TO_ID
-                }
-                if positive_ids:
-                    positive_slots = [
-                        idx
-                        for idx in torch.nonzero(object_valid, as_tuple=False)
-                        .flatten()
-                        .tolist()
-                        if int(object_cls[idx]) in positive_ids
-                    ]
-                    if positive_slots:
-                        interaction_positive_mask[slot, positive_slots] = True
-                        interaction_cls[slot] = int(object_cls[positive_slots[0]])
-                        interaction_valid[slot] = True
-                        heatmaps = [
-                            self._interaction_heatmap_from_box(object_boxes[idx])
-                            for idx in positive_slots
-                        ]
-                        interaction_heatmap[slot] = torch.stack(heatmaps).max(dim=0).values
-                        interaction_heatmap_valid[slot] = True
-            elif action_name in OBJECTLESS_ACTIONS and self._use_none_interaction_target(
-                file_id,
-                slot,
-            ):
-                interaction_positive_mask[slot, self.num_object_tokens] = True
-                interaction_cls[slot] = NONE_OBJECT_ID
-                interaction_valid[slot] = True
+            positive_ids = {
+                int(OBJECT_TO_ID[object_name])
+                for object_name in STRONG_ACTION_OBJECTS.get(action_name, ())
+                if object_name in OBJECT_TO_ID
+            }
+            if not positive_ids:
+                continue
+            positive_slots = [
+                idx
+                for idx in torch.nonzero(object_valid, as_tuple=False)
+                .flatten()
+                .tolist()
+                if int(object_cls[idx]) in positive_ids
+            ]
+            if not positive_slots:
+                continue
+            interaction_positive_mask[slot, positive_slots] = True
+            interaction_cls[slot] = int(object_cls[positive_slots[0]])
+            interaction_valid[slot] = True
+            heatmaps = [
+                self._interaction_heatmap_from_box(object_boxes[idx])
+                for idx in positive_slots
+            ]
+            interaction_heatmap[slot] = torch.stack(heatmaps).max(dim=0).values
+            interaction_heatmap_valid[slot] = True
 
         return (
             interaction_cls,
@@ -1616,15 +1506,7 @@ class ToyotaSMDataset(Dataset):
         actor_target,
         height,
         width,
-        file_id,
     ):
-        object_heatmap, object_heatmap_valid, object_heatmap_weight = (
-            self._build_object_heatmaps(
-                object_entries,
-                height,
-                width,
-            )
-        )
         object_boxes, object_cls, object_conf, object_valid = self._pack_object_tokens(
             object_entries,
             height,
@@ -1641,16 +1523,12 @@ class ToyotaSMDataset(Dataset):
             object_boxes,
             object_cls,
             object_valid,
-            file_id,
         )
         return {
             "object_boxes": object_boxes,
             "object_cls": object_cls,
             "object_conf": object_conf,
             "object_valid": object_valid,
-            "object_heatmap": object_heatmap,
-            "object_heatmap_valid": object_heatmap_valid,
-            "object_heatmap_weight": object_heatmap_weight,
             "interaction_cls": interaction_cls,
             "interaction_valid": interaction_valid,
             "interaction_positive_mask": interaction_positive_mask,

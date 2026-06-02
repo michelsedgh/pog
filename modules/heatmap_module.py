@@ -10,8 +10,6 @@ from losses.softtarget import SoftTargetCrossEntropy
 from losses.heatmap_loss import KeypointMSELoss
 from losses.object_interaction_losses import (
     interaction_heatmap_loss,
-    objectless_consistency_loss,
-    positive_erased_margin_loss,
     positive_object_selection_loss,
 )
 import pickle
@@ -442,146 +440,6 @@ class HeatmapModule(pl.LightningModule):
             perm[i] = candidates[choice]
         return perm
 
-    def _actor_logits_for_object_mode(self, imgs, target, mode):
-        object_kwargs = self._object_kwargs(target, mode=mode)
-        if object_kwargs is None:
-            return None
-        data = self.model(
-            imgs,
-            boxes=target["boxes"].float(),
-            valid=target["valid"].bool(),
-            **object_kwargs,
-        )
-        preds, _, _, _, _ = self._unpack_model_data(data)
-        return preds
-
-    def _counterfactual_branch_logits(self, imgs, target, mode):
-        if bool(self.model.hparams.get("object_counterfactual_branch_grad", 0)):
-            return self._actor_logits_for_object_mode(imgs, target, mode)
-        with torch.no_grad():
-            return self._actor_logits_for_object_mode(imgs, target, mode)
-
-    def _object_counterfactual_loss(
-        self,
-        imgs,
-        target,
-        normal_logits,
-        valid,
-        normal_object_valid,
-    ):
-        valid = valid.to(device=normal_logits.device, dtype=torch.bool)
-        margin_weight = float(
-            self.model.hparams.get("object_counterfactual_margin_weight", 0.01)
-        )
-        consistency_weight = float(
-            self.model.hparams.get("object_objectless_consistency_weight", 0.0)
-        )
-        if margin_weight <= 0.0 and consistency_weight <= 0.0:
-            return normal_logits.new_zeros(())
-        if (
-            "interaction_valid" not in target
-            or "interaction_positive_mask" not in target
-        ):
-            return normal_logits.new_zeros(())
-
-        labels = target["actions"].long()
-        positive_mask = target["interaction_positive_mask"].to(
-            device=normal_logits.device,
-            dtype=torch.bool,
-        )
-        normal_object_valid = normal_object_valid.to(
-            device=normal_logits.device,
-            dtype=torch.bool,
-        )
-        real_object_count = min(
-            normal_object_valid.shape[-1],
-            positive_mask.shape[-1] - 1,
-        )
-        positive_mask = positive_mask.clone()
-        positive_mask[..., :real_object_count] = (
-            positive_mask[..., :real_object_count]
-            & normal_object_valid[:, None, :real_object_count]
-        )
-        inter_valid = target["interaction_valid"].to(
-            device=normal_logits.device,
-            dtype=torch.bool,
-        ) & valid
-        none_slot = positive_mask.shape[-1] - 1
-        object_interaction = inter_valid & positive_mask[..., :none_slot].any(dim=-1)
-        none_interaction = inter_valid & positive_mask[..., none_slot]
-
-        normal_valid = normal_logits[valid].float()
-        labels_valid = labels.to(device=normal_logits.device)[valid]
-        object_mask = object_interaction[valid]
-        none_mask = none_interaction[valid]
-
-        erased_logits = None
-        shuffled_logits = None
-        if margin_weight > 0.0 and object_mask.any():
-            erased_logits = self._counterfactual_branch_logits(
-                imgs,
-                target,
-                "positive_erased",
-            )
-            shuffled_logits = self._counterfactual_branch_logits(
-                imgs,
-                target,
-                "shuffled",
-            )
-
-        weighted_loss = normal_logits.new_zeros(())
-        if erased_logits is not None or shuffled_logits is not None:
-            margin = float(self.model.hparams.get("object_counterfactual_margin", 0.05))
-            loss_margin = positive_erased_margin_loss(
-                normal_valid,
-                labels_valid,
-                object_mask,
-                margin,
-                erased_logits=None if erased_logits is None else erased_logits[valid].float(),
-                shuffled_logits=(
-                    None if shuffled_logits is None else shuffled_logits[valid].float()
-                ),
-            )
-        else:
-            loss_margin = None
-
-        if loss_margin is not None:
-            weighted_loss = weighted_loss + loss_margin * margin_weight
-            self.log(
-                "train_loss_object_counterfactual_margin",
-                loss_margin,
-                on_step=True,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-                sync_dist=True,
-            )
-
-        loss_consistency = None
-        if consistency_weight > 0.0 and none_mask.any():
-            with torch.no_grad():
-                off_logits = self._actor_logits_for_object_mode(imgs, target, "off")
-            if off_logits is not None:
-                loss_consistency = objectless_consistency_loss(
-                    normal_valid,
-                    off_logits[valid].float(),
-                    none_mask,
-                )
-
-        if loss_consistency is not None:
-            weighted_loss = weighted_loss + loss_consistency * consistency_weight
-            self.log(
-                "train_loss_objectless_consistency",
-                loss_consistency,
-                on_step=True,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-                sync_dist=True,
-            )
-
-        return weighted_loss
-
     def _selection_logits_for_target_action(self, selection_logits, target):
         if selection_logits is None:
             return None
@@ -599,100 +457,6 @@ class HeatmapModule(pl.LightningModule):
         if n_pose <= 0:
             return hm_preds[:, :0]
         return hm_preds[:, :n_pose]
-
-    def _object_heatmap_pred(self, hm_preds):
-        if not self.object_prompt or not torch.is_tensor(hm_preds):
-            return None
-        n_pose = int(self.model.hparams.n_landmarks)
-        return hm_preds[:, n_pose : n_pose + self.num_object_classes]
-
-    def _object_heatmap_loss(self, pred_obj, target_obj, object_weight):
-        if pred_obj is None:
-            return None
-        weight = object_weight.to(device=pred_obj.device, dtype=pred_obj.dtype)
-        if weight.ndim == 2:
-            weight = weight[:, :, None, None]
-        if weight.sum() <= 0:
-            return pred_obj.new_zeros(())
-        loss = (pred_obj - target_obj.to(dtype=pred_obj.dtype)) ** 2
-        return (loss * weight).sum() / weight.sum().clamp_min(1.0)
-
-    def _log_object_heatmap_metrics(self, pred_obj, target, stage):
-        if pred_obj is None or "object_heatmap" not in target:
-            return
-        target_obj = target["object_heatmap"].to(device=pred_obj.device)
-        if "object_heatmap_valid" in target:
-            object_valid = target["object_heatmap_valid"].to(
-                device=pred_obj.device, dtype=torch.bool
-            )
-        else:
-            object_valid = target_obj.flatten(2).amax(dim=2) > 0
-        if not object_valid.any():
-            return
-
-        probs = pred_obj.float().clamp(0.0, 1.0)
-        pred_bin = probs > 0.3
-        target_bin = target_obj.float() > 0.3
-        valid_mask = object_valid[:, :, None, None]
-        valid_values = probs.masked_select(valid_mask.expand_as(probs))
-        if valid_values.numel() > 0:
-            self._log_scalar(
-                f"{stage}_obj_pred_max",
-                valid_values.max(),
-                object_valid.sum().item(),
-            )
-            self._log_scalar(
-                f"{stage}_obj_pred_mean",
-                valid_values.mean(),
-                object_valid.sum().item(),
-            )
-
-        intersection = (pred_bin & target_bin & valid_mask).float().sum()
-        union = ((pred_bin | target_bin) & valid_mask).float().sum()
-        if union > 0:
-            self._log_scalar(
-                f"{stage}_obj_iou",
-                intersection / union.clamp_min(1.0),
-                object_valid.sum().item(),
-            )
-
-        visible = target_bin.flatten(2).any(dim=2) & object_valid
-        if visible.any():
-            positive_values = probs.masked_select(target_bin & valid_mask)
-            if positive_values.numel() > 0:
-                self._log_scalar(
-                    f"{stage}_obj_pred_positive_mean",
-                    positive_values.mean(),
-                    visible.sum().item(),
-                )
-            pred_visible = pred_bin.flatten(2).any(dim=2) & object_valid
-            self._log_scalar(
-                f"{stage}_obj_recall_visible",
-                (pred_visible & visible).float().sum() / visible.float().sum(),
-                visible.sum().item(),
-            )
-            pred_flat = probs.flatten(2)
-            target_flat = target_obj.float().flatten(2)
-            pred_idx = pred_flat.argmax(dim=2)
-            target_idx = target_flat.argmax(dim=2)
-            width = pred_obj.shape[-1]
-            pred_xy = torch.stack(
-                [pred_idx % width, torch.div(pred_idx, width, rounding_mode="floor")],
-                dim=-1,
-            ).float()
-            target_xy = torch.stack(
-                [
-                    target_idx % width,
-                    torch.div(target_idx, width, rounding_mode="floor"),
-                ],
-                dim=-1,
-            ).float()
-            center_l2 = torch.linalg.norm(pred_xy - target_xy, dim=-1)
-            self._log_scalar(
-                f"{stage}_obj_center_l2",
-                center_l2[visible].mean(),
-                visible.sum().item(),
-            )
 
     def _log_interaction_metrics(self, selection_logits, target, valid, stage):
         if (
@@ -1105,43 +869,6 @@ class HeatmapModule(pl.LightningModule):
                 loss = loss + loss_kp * kp_loss_weight
 
         if self.object_prompt:
-            pred_obj = self._object_heatmap_pred(hm_preds)
-            object_heatmap_weight = float(
-                self.model.hparams.get("object_heatmap_weight", 0.0)
-            )
-            if (
-                object_heatmap_weight > 0.0
-                and pred_obj is not None
-                and "object_heatmap" in target
-            ):
-                target_obj = target["object_heatmap"].to(device=pred_obj.device)
-                if "object_heatmap_weight" in target:
-                    object_weight = target["object_heatmap_weight"].to(
-                        device=pred_obj.device
-                    )
-                else:
-                    object_weight = target["object_heatmap_valid"].to(
-                        device=pred_obj.device, dtype=torch.float32
-                    )
-                loss_obj = self._object_heatmap_loss(
-                    pred_obj,
-                    target_obj,
-                    object_weight,
-                )
-                if loss_obj is not None:
-                    loss = loss + loss_obj * object_heatmap_weight
-                    self.log(
-                        f"{stage}_obj_heatmap_loss",
-                        loss_obj,
-                        on_step=stage == "train",
-                        on_epoch=True,
-                        prog_bar=False,
-                        logger=True,
-                        sync_dist=True,
-                    )
-                    if stage != "train":
-                        self._log_object_heatmap_metrics(pred_obj, target, stage)
-
             dropped_positive = None
             if (
                 target_action_selection_logits is not None
@@ -1240,15 +967,6 @@ class HeatmapModule(pl.LightningModule):
                         heatmap_valid,
                         stage,
                     )
-
-            if stage == "train":
-                loss = loss + self._object_counterfactual_loss(
-                    imgs,
-                    target,
-                    preds,
-                    valid,
-                    object_kwargs["object_valid"],
-                )
 
         return (
             loss,

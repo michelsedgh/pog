@@ -433,7 +433,9 @@ class POGUISE(pl.LightningModule):
         dropout = float(self.hparams.get("object_interaction_dropout", 0.1))
         if not 0 <= dropout < 1:
             raise ValueError("object_interaction_dropout must be in [0, 1)")
-        interaction_heatmap_size = int(self.hparams.get("object_heatmap_size", 56))
+        interaction_heatmap_size = int(
+            self.hparams.get("interaction_heatmap_size", 56)
+        )
         init_update_gate = float(
             self.hparams.get("object_decoder_update_gate_init", 0.02)
         )

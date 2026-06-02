@@ -246,54 +246,6 @@ def _initialize_actor_prompt_from_checkpoint(module, checkpoint):
         )
 
 
-def _expand_heatmap_head_for_object_prompt(module, checkpoint):
-    if checkpoint is None or not getattr(module.model, "object_prompt", False):
-        return
-    state_dict = checkpoint.get("state_dict", {})
-    weight_key = "model.net.heatmap_head.final_layer.weight"
-    bias_key = "model.net.heatmap_head.final_layer.bias"
-    if weight_key not in state_dict:
-        return
-
-    new_weight_ref = module.model.net.heatmap_head.final_layer.weight
-    old_weight = state_dict[weight_key]
-    if old_weight.shape == new_weight_ref.shape:
-        return
-    if old_weight.ndim != new_weight_ref.ndim or old_weight.shape[1:] != new_weight_ref.shape[1:]:
-        raise RuntimeError(
-            "Cannot expand heatmap final layer: old weight shape "
-            f"{tuple(old_weight.shape)} is incompatible with new shape "
-            f"{tuple(new_weight_ref.shape)}"
-        )
-    if old_weight.shape[0] > new_weight_ref.shape[0]:
-        raise RuntimeError(
-            "Checkpoint heatmap head has more channels than the current model: "
-            f"{old_weight.shape[0]} > {new_weight_ref.shape[0]}"
-        )
-
-    new_weight = torch.zeros_like(new_weight_ref.detach().cpu())
-    new_weight[: old_weight.shape[0]] = old_weight.detach().cpu()
-    state_dict[weight_key] = new_weight
-
-    if bias_key in state_dict:
-        new_bias_ref = module.model.net.heatmap_head.final_layer.bias
-        old_bias = state_dict[bias_key]
-        if old_bias.shape[0] > new_bias_ref.shape[0]:
-            raise RuntimeError(
-                "Checkpoint heatmap bias has more channels than the current model: "
-                f"{old_bias.shape[0]} > {new_bias_ref.shape[0]}"
-            )
-        new_bias = torch.zeros_like(new_bias_ref.detach().cpu())
-        new_bias[: old_bias.shape[0]] = old_bias.detach().cpu()
-        state_dict[bias_key] = new_bias
-
-    print(
-        "Expanded heatmap final layer from "
-        f"{old_weight.shape[0]} to {new_weight_ref.shape[0]} channels; "
-        "copied existing pose channels and zero-initialized new object channels."
-    )
-
-
 def _print_trainable_parameters(module):
     total = 0
     trainable = 0
@@ -421,13 +373,8 @@ def build_parser():
     parser.add_argument("--mixup", type=int, default=0)
     parser.add_argument("--target_kp_loss_weight", type=int, default=0)
     parser.add_argument("--kp_loss_weight", type=float, default=1000.0)
-    parser.add_argument("--object_heatmap_weight", type=float, default=0.0)
     parser.add_argument("--object_interaction_loss_weight", type=float, default=0.03)
     parser.add_argument("--object_warmup_freeze_actor_path", type=int, default=0)
-    parser.add_argument("--object_counterfactual_margin_weight", type=float, default=0.01)
-    parser.add_argument("--object_counterfactual_margin", type=float, default=0.05)
-    parser.add_argument("--object_counterfactual_branch_grad", type=int, default=0)
-    parser.add_argument("--object_objectless_consistency_weight", type=float, default=0.0)
     parser.add_argument("--log_kp_loss_weight", type=int, default=0)
     parser.add_argument("--grad_weights", type=int, default=0)
     parser.add_argument("--deepspeed_optim", type=int, default=0)
@@ -455,7 +402,6 @@ def main():
     module = HeatmapModule(model=POGUISE, **vars(hparams))
 
     if checkpoint is not None:
-        _expand_heatmap_head_for_object_prompt(module, checkpoint)
         strict = (
             bool(hparams.strict_load)
             if hparams.strict_load is not None

@@ -126,11 +126,11 @@ def print_target_summary(name, target):
         "object_cls",
         "object_conf",
         "object_valid",
-        "object_heatmap",
-        "object_heatmap_valid",
-        "object_heatmap_weight",
         "interaction_cls",
         "interaction_valid",
+        "interaction_positive_mask",
+        "interaction_heatmap",
+        "interaction_heatmap_valid",
     ):
         value = target[key]
         print(f"{key}: {tuple(value.shape)} {value.dtype}")
@@ -158,11 +158,11 @@ def validate_object_target(name, frames, target, args, report):
     object_cls = target["object_cls"]
     object_conf = target["object_conf"]
     object_valid = target["object_valid"].bool()
-    object_heatmap = target["object_heatmap"]
-    object_heatmap_valid = target["object_heatmap_valid"].bool()
-    object_heatmap_weight = target["object_heatmap_weight"]
     interaction_cls = target["interaction_cls"]
     interaction_valid = target["interaction_valid"].bool()
+    interaction_positive_mask = target["interaction_positive_mask"].bool()
+    interaction_heatmap = target["interaction_heatmap"]
+    interaction_heatmap_valid = target["interaction_heatmap_valid"].bool()
 
     report.check(
         object_boxes.shape == (args.num_object_tokens, 4),
@@ -223,51 +223,6 @@ def validate_object_target(name, frames, target, args, report):
     )
 
     report.check(
-        object_heatmap.shape == (args.num_object_classes, 56, 56),
-        f"{name}: object_heatmap shape is [C_obj, 56, 56]",
-        object_heatmap.shape,
-    )
-    report.check(
-        object_heatmap_valid.shape == (args.num_object_classes,),
-        f"{name}: object_heatmap_valid shape is [C_obj]",
-        object_heatmap_valid.shape,
-    )
-    report.check(
-        object_heatmap_valid.dtype == torch.bool,
-        f"{name}: object_heatmap_valid is bool",
-    )
-    report.check(
-        object_heatmap_weight.shape == (args.num_object_classes, 56, 56),
-        f"{name}: object_heatmap_weight shape is [C_obj, 56, 56]",
-        object_heatmap_weight.shape,
-    )
-    report.check(torch.isfinite(object_heatmap).all(), f"{name}: object heatmap finite")
-    report.check(
-        torch.isfinite(object_heatmap_weight).all(),
-        f"{name}: object heatmap weights finite",
-    )
-    report.check(
-        bool(((object_heatmap >= 0.0) & (object_heatmap <= 1.0)).all()),
-        f"{name}: object heatmap is in [0, 1]",
-    )
-    report.check(
-        bool(((object_heatmap_weight >= 0.0) & (object_heatmap_weight <= 1.0)).all()),
-        f"{name}: object heatmap weights are in [0, 1]",
-    )
-    if object_valid.any():
-        report.check(
-            bool(object_heatmap_valid.any()),
-            f"{name}: object heatmap has valid channels when objects exist",
-        )
-    if object_heatmap_valid.any():
-        visible_max = object_heatmap[object_heatmap_valid].flatten(1).max(dim=1).values
-        report.check(
-            bool((visible_max > 0).all()),
-            f"{name}: valid object heatmap channels contain blobs",
-            visible_max,
-        )
-
-    report.check(
         interaction_cls.shape == (args.num_actor_tokens,),
         f"{name}: interaction_cls shape is [K]",
         interaction_cls.shape,
@@ -278,6 +233,47 @@ def validate_object_target(name, frames, target, args, report):
         interaction_valid.shape,
     )
     report.check(interaction_valid.dtype == torch.bool, f"{name}: interaction_valid is bool")
+    report.check(
+        interaction_positive_mask.shape == (
+            args.num_actor_tokens,
+            args.num_object_tokens + 1,
+        ),
+        f"{name}: interaction_positive_mask shape is [K, M+1]",
+        interaction_positive_mask.shape,
+    )
+    report.check(
+        interaction_positive_mask.dtype == torch.bool,
+        f"{name}: interaction_positive_mask is bool",
+    )
+    report.check(
+        interaction_heatmap.shape == (args.num_actor_tokens, 56, 56),
+        f"{name}: interaction_heatmap shape is [K, 56, 56]",
+        interaction_heatmap.shape,
+    )
+    report.check(
+        interaction_heatmap_valid.shape == (args.num_actor_tokens,),
+        f"{name}: interaction_heatmap_valid shape is [K]",
+        interaction_heatmap_valid.shape,
+    )
+    report.check(
+        interaction_heatmap_valid.dtype == torch.bool,
+        f"{name}: interaction_heatmap_valid is bool",
+    )
+    report.check(
+        torch.isfinite(interaction_heatmap).all(),
+        f"{name}: interaction_heatmap finite",
+    )
+    report.check(
+        bool(((interaction_heatmap >= 0.0) & (interaction_heatmap <= 1.0)).all()),
+        f"{name}: interaction_heatmap is in [0, 1]",
+    )
+    if interaction_heatmap_valid.any():
+        valid_max = interaction_heatmap[interaction_heatmap_valid].flatten(1).max(dim=1).values
+        report.check(
+            bool((valid_max > 0).all()),
+            f"{name}: valid interaction heatmaps contain blobs",
+            valid_max,
+        )
     report.check(
         bool(((interaction_cls >= 0) & (interaction_cls <= NONE_OBJECT_ID)).all()),
         f"{name}: interaction classes are object ids or NONE",
@@ -319,7 +315,7 @@ def validate_object_target(name, frames, target, args, report):
         if name_for_slot == "WatchTV":
             report.check(
                 not bool(interaction_valid[slot]),
-                f"{name}: WatchTV context objects are heatmap/token evidence only",
+                f"{name}: WatchTV context objects are object-token evidence only",
             )
         if name_for_slot in {"Sitdown", "Eat.Attable", "Eat.Snack", "Takepills"}:
             report.check(

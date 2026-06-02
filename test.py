@@ -207,7 +207,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_object_tokens", type=int, default=None)
     parser.add_argument("--num_object_classes", type=int, default=None)
     parser.add_argument("--object_conf_threshold", type=float, default=None)
-    parser.add_argument("--object_heatmap_size", type=int, default=None)
+    parser.add_argument("--interaction_heatmap_size", type=int, default=None)
     parser.add_argument("--toyota_actor_box_expand", type=float, default=None)
     parser.add_argument("--toyota_pose_landmarks", type=int, default=None)
 

@@ -28,12 +28,12 @@ class rule. Object evidence must change the actor token that the normal
 - All detected objects are still fed as object tokens.
 - `positive_erased` now removes positive object tokens and erases the positive
   object patch-grid features before the transformer.
-- The all-visible-object heatmap loss is off by default. Object supervision is
+- There is no all-visible-object heatmap loss. Object supervision is
   concentrated on actor-conditioned interacted-object heatmaps for reliable
   action/object pairs.
-- The only counterfactual training branches are positive-erased and shuffled
-  objects. There is no sufficiency, class-swap, group-CE, specialist, or
-  logit-residual path.
+- Positive-erased and shuffled object modes are validation diagnostics only.
+  There is no sufficiency, class-swap, group-CE, counterfactual training loss,
+  objectless consistency loss, specialist, or logit-residual path.
 - Invalid object tokens remain masked in transformer attention and neutral in
   token construction.
 
@@ -70,7 +70,7 @@ Also run a smoke forward. The expected output shape is:
 
 ```text
 action_logits:       [1, 8, 31]
-heatmaps:            [1, 32, 56, 56]
+heatmaps:            [1, 13, 56, 56]
 presence_logits:     [1, 8]
 selection_logits:    [1, 8, 25]
 interaction_heatmap: [1, 8, 56, 56]
@@ -95,11 +95,8 @@ Important flags:
 --lr_head_hm 5e-5
 --object_decoder_update_gate_init 0.02
 --object_decoder_ffn_gate_init 0.02
---object_heatmap_weight 0
 --object_interaction_loss_weight 0.03
 --object_interaction_heatmap_weight 25
---object_counterfactual_margin_weight 0.01
---object_objectless_consistency_weight 0.0
 --class_balanced_sampler 1
 --hard_negative_sampler 0
 --max_epochs 2
@@ -172,10 +169,10 @@ python3 object_actor_live/summarize_object_metrics.py \
 ```
 
 The summarizer prints global on/off/shuffled metrics, object-interaction margins,
-selection mass/accuracy, interacted-object heatmap metrics, and per-class/per-group object
-ablations for the object-sensitive actions. A useful checkpoint should show
-positive interaction margins and per-class object gains without letting shuffled
-objects beat real objects on the target groups.
+selection mass/accuracy, interacted-object heatmap metrics, and per-class/per-group
+object ablations for the object-sensitive actions. A useful checkpoint should
+show positive diagnostic margins and per-class object gains without letting
+shuffled objects beat real objects on the target groups.
 
 ## Live Tensor Sensitivity Test
 
