@@ -97,6 +97,10 @@ Important flags:
 --object_action_sensitivity_margin 0.05
 --object_action_group_sensitivity_weight 0.10
 --object_action_group_sensitivity_margin 0.05
+--object_sufficiency_weight 0.10
+--object_class_swap_weight 0.10
+--object_class_swap_margin 0.05
+--object_group_ce_weight 0.10
 --object_objectless_consistency_weight 0.02
 --max_epochs 2
 --t_max_scheduler 2
@@ -123,6 +127,10 @@ obviously broken. Use a short run:
 
 Keep the sensitivity losses on. Stop early if objects-on falls below both
 objects-off and shuffled.
+
+If CUDA memory is tight, prefer `--batch_size 32 --accum_grad_batches 2`.
+The object-sufficient and class-swapped branches are real training branches, so
+they need activation memory.
 
 ## Metrics That Matter
 
@@ -165,7 +173,10 @@ python3 object_actor_live/summarize_object_metrics.py \
 
 The summarizer prints global on/off/shuffled metrics, object-interaction margins,
 selection mass/accuracy, object IoU/recall, and per-class/per-group object
-ablations for the object-sensitive actions.
+ablations for the object-sensitive actions. New runs also include
+`objects_sufficient` and `objects_class_swapped` columns. For object-sensitive
+classes, a useful checkpoint should keep `objects_sufficient` competitive with
+`objects_off`, and `objects_on` should beat the class-swapped view.
 
 ## Live Tensor Sensitivity Test
 

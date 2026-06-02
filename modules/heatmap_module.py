@@ -16,7 +16,7 @@ from losses.object_interaction_losses import (
     positive_object_selection_loss,
 )
 import pickle
-from datasets.object_vocab import GROUPS
+from datasets.object_vocab import GROUPS, OBJECT_TO_ID
 from datasets.toyotasm import CS_DICT, CV_DICT
 
 try:
@@ -126,6 +126,7 @@ class HeatmapModule(pl.LightningModule):
         self.object_sensitivity_group_indices = (
             self._build_object_sensitivity_group_indices()
         )
+        self.object_class_swap_map = self._build_object_class_swap_map()
         if self.object_prompt:
             self.val_acc_macro_objects_on = torchmetrics.Accuracy(
                 task="multiclass", num_classes=hparams.num_classes, average="macro"
@@ -333,6 +334,25 @@ class HeatmapModule(pl.LightningModule):
                 groups.append(torch.tensor(indices, dtype=torch.long))
         return groups
 
+    def _build_object_class_swap_map(self):
+        swaps = {
+            "laptop": "book",
+            "keyboard_mouse": "book",
+            "book": "laptop",
+            "phone": "book",
+            "cup": "bottle",
+            "bottle": "cup",
+            "glass": "cup",
+        }
+        pairs = [
+            (OBJECT_TO_ID[src], OBJECT_TO_ID[dst])
+            for src, dst in swaps.items()
+            if src in OBJECT_TO_ID and dst in OBJECT_TO_ID
+        ]
+        if pairs:
+            return torch.tensor(pairs, dtype=torch.long)
+        return torch.empty(0, 2, dtype=torch.long)
+
     def _object_audit_action_indices(self):
         label_dict = self._toyota_label_dict()
         action_names = (
@@ -351,6 +371,47 @@ class HeatmapModule(pl.LightningModule):
             metric_name = action_name.replace(".", "_")
             indices.append((metric_name, int(label_dict[action_name]) - 1))
         return indices
+
+    def _positive_object_erase_valid(self, target, object_valid):
+        if "interaction_positive_mask" not in target:
+            raise ValueError(
+                "positive object modes require interaction_positive_mask"
+            )
+        positive_mask = target["interaction_positive_mask"].to(
+            device=object_valid.device,
+            dtype=torch.bool,
+        )
+        actor_valid = target["valid"].to(
+            device=object_valid.device,
+            dtype=torch.bool,
+        )
+        real_object_count = min(object_valid.shape[-1], positive_mask.shape[-1] - 1)
+        erase_mask = (
+            positive_mask[..., :real_object_count]
+            & actor_valid[..., None]
+        ).any(dim=1) & object_valid[..., :real_object_count]
+        erase_valid = torch.zeros_like(object_valid)
+        erase_valid[..., :real_object_count] = erase_mask
+        return erase_valid, real_object_count
+
+    def _swap_positive_object_classes(self, target, object_cls, object_valid):
+        if self.object_class_swap_map.numel() == 0:
+            return object_cls
+        erase_valid, real_object_count = self._positive_object_erase_valid(
+            target,
+            object_valid,
+        )
+        swapped_cls = object_cls.clone()
+        swap_map = self.object_class_swap_map.to(device=object_cls.device)
+        positive_slots = erase_valid[..., :real_object_count]
+        for src, dst in swap_map:
+            replace = positive_slots & (object_cls[..., :real_object_count] == src)
+            swapped_cls[..., :real_object_count] = torch.where(
+                replace,
+                dst.to(dtype=swapped_cls.dtype),
+                swapped_cls[..., :real_object_count],
+            )
+        return swapped_cls
 
     def _object_kwargs(self, target, mode="on"):
         if not self.object_prompt:
@@ -380,28 +441,11 @@ class HeatmapModule(pl.LightningModule):
             kwargs["object_valid"] = torch.zeros_like(kwargs["object_valid"])
             return kwargs
         if mode == "positive_erased":
-            if "interaction_positive_mask" not in target:
-                raise ValueError(
-                    "positive_erased object mode requires interaction_positive_mask"
-                )
-            positive_mask = target["interaction_positive_mask"].to(
-                device=kwargs["object_valid"].device,
-                dtype=torch.bool,
+            erase_valid, real_object_count = self._positive_object_erase_valid(
+                target,
+                kwargs["object_valid"],
             )
-            actor_valid = target["valid"].to(
-                device=kwargs["object_valid"].device,
-                dtype=torch.bool,
-            )
-            real_object_count = min(
-                kwargs["object_valid"].shape[-1],
-                positive_mask.shape[-1] - 1,
-            )
-            erase_mask = (
-                positive_mask[..., :real_object_count]
-                & actor_valid[..., None]
-            ).any(dim=1) & kwargs["object_valid"][..., :real_object_count]
-            erase_valid = torch.zeros_like(kwargs["object_valid"])
-            erase_valid[..., :real_object_count] = erase_mask
+            erase_mask = erase_valid[..., :real_object_count]
             kwargs["object_valid"] = kwargs["object_valid"].clone()
             kwargs["object_valid"][..., :real_object_count] = (
                 kwargs["object_valid"][..., :real_object_count]
@@ -409,6 +453,21 @@ class HeatmapModule(pl.LightningModule):
             )
             kwargs["object_erase_boxes"] = kwargs["object_boxes"]
             kwargs["object_erase_valid"] = erase_valid
+            return kwargs
+        if mode == "object_sufficient":
+            erase_valid, _ = self._positive_object_erase_valid(
+                target,
+                kwargs["object_valid"],
+            )
+            kwargs["object_erase_boxes"] = kwargs["object_boxes"]
+            kwargs["object_erase_valid"] = erase_valid
+            return kwargs
+        if mode == "object_class_swapped":
+            kwargs["object_cls"] = self._swap_positive_object_classes(
+                target,
+                kwargs["object_cls"],
+                kwargs["object_valid"],
+            )
             return kwargs
         if mode == "shuffled":
             batch_size = kwargs["object_valid"].shape[0]
@@ -479,6 +538,25 @@ class HeatmapModule(pl.LightningModule):
         with torch.no_grad():
             return self._actor_logits_for_object_mode(imgs, target, mode)
 
+    def _object_group_ce_loss(self, logits, labels, object_mask):
+        if not object_mask.any() or not self.object_sensitivity_group_indices:
+            return None
+
+        losses = []
+        for group in self.object_sensitivity_group_indices:
+            group = group.to(device=logits.device)
+            in_group = (labels[:, None] == group[None, :]).any(dim=1)
+            mask = object_mask & in_group
+            if not mask.any():
+                continue
+            group_logits = logits[mask].index_select(1, group)
+            group_labels = labels[mask]
+            target_pos = (group_labels[:, None] == group[None, :]).long().argmax(dim=1)
+            losses.append(F.cross_entropy(group_logits, target_pos))
+        if not losses:
+            return None
+        return torch.stack(losses).mean()
+
     def _object_counterfactual_loss(
         self,
         imgs,
@@ -500,11 +578,23 @@ class HeatmapModule(pl.LightningModule):
         consistency_weight = float(
             self.model.hparams.get("object_objectless_consistency_weight", 0.0)
         )
+        sufficiency_weight = float(
+            self.model.hparams.get("object_sufficiency_weight", 0.0)
+        )
+        class_swap_weight = float(
+            self.model.hparams.get("object_class_swap_weight", 0.0)
+        )
+        group_ce_weight = float(
+            self.model.hparams.get("object_group_ce_weight", 0.0)
+        )
         if (
             margin_weight <= 0.0
             and action_sensitivity_weight <= 0.0
             and group_sensitivity_weight <= 0.0
             and consistency_weight <= 0.0
+            and sufficiency_weight <= 0.0
+            and class_swap_weight <= 0.0
+            and group_ce_weight <= 0.0
         ):
             return normal_logits.new_zeros(())
         if (
@@ -547,6 +637,8 @@ class HeatmapModule(pl.LightningModule):
         off_logits = None
         erased_logits = None
         shuffled_logits = None
+        sufficient_logits = None
+        class_swapped_logits = None
         if consistency_weight > 0.0:
             with torch.no_grad():
                 off_logits = self._actor_logits_for_object_mode(imgs, target, "off")
@@ -565,8 +657,89 @@ class HeatmapModule(pl.LightningModule):
                 target,
                 "shuffled",
             )
+        if sufficiency_weight > 0.0 and object_mask.any():
+            sufficient_logits = self._actor_logits_for_object_mode(
+                imgs,
+                target,
+                "object_sufficient",
+            )
+        if class_swap_weight > 0.0 and object_mask.any():
+            class_swapped_logits = self._actor_logits_for_object_mode(
+                imgs,
+                target,
+                "object_class_swapped",
+            )
 
         weighted_loss = normal_logits.new_zeros(())
+        if group_ce_weight > 0.0 and object_mask.any():
+            loss_group_ce = self._object_group_ce_loss(
+                normal_valid,
+                labels_valid,
+                object_mask,
+            )
+        else:
+            loss_group_ce = None
+
+        if loss_group_ce is not None:
+            weighted_loss = weighted_loss + loss_group_ce * group_ce_weight
+            self.log(
+                "train_loss_object_group_ce",
+                loss_group_ce,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+
+        if sufficient_logits is not None:
+            sufficient_valid = sufficient_logits[valid].float()
+            loss_sufficiency = F.cross_entropy(
+                sufficient_valid[object_mask],
+                labels_valid[object_mask],
+            )
+        else:
+            loss_sufficiency = None
+
+        if loss_sufficiency is not None:
+            weighted_loss = weighted_loss + loss_sufficiency * sufficiency_weight
+            self.log(
+                "train_loss_object_sufficiency",
+                loss_sufficiency,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+
+        if class_swapped_logits is not None:
+            class_swap_margin = float(
+                self.model.hparams.get("object_class_swap_margin", 0.05)
+            )
+            loss_class_swap = positive_erased_margin_loss(
+                normal_valid,
+                labels_valid,
+                object_mask,
+                class_swap_margin,
+                erased_logits=class_swapped_logits[valid].float(),
+                shuffled_logits=None,
+            )
+        else:
+            loss_class_swap = None
+
+        if loss_class_swap is not None:
+            weighted_loss = weighted_loss + loss_class_swap * class_swap_weight
+            self.log(
+                "train_loss_object_class_swap",
+                loss_class_swap,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+
         if margin_weight > 0.0 and object_mask.any():
             margin = float(self.model.hparams.get("object_counterfactual_margin", 0.05))
             loss_margin = positive_erased_margin_loss(
@@ -1624,6 +1797,8 @@ class HeatmapModule(pl.LightningModule):
         positive_erased=None,
         off=None,
         shuffled=None,
+        object_sufficient=None,
+        object_class_swapped=None,
     ):
         if labels.numel() == 0:
             return
@@ -1635,6 +1810,8 @@ class HeatmapModule(pl.LightningModule):
             ("positive_erased", positive_erased),
             ("off", off),
             ("shuffled", shuffled),
+            ("object_sufficient", object_sufficient),
+            ("object_class_swapped", object_class_swapped),
         ):
             if mode_data is None:
                 continue
@@ -1678,6 +1855,8 @@ class HeatmapModule(pl.LightningModule):
         target,
         positive_erased=None,
         shuffled=None,
+        object_sufficient=None,
+        object_class_swapped=None,
     ):
         if labels.numel() == 0 or "interaction_positive_mask" not in target:
             return
@@ -1711,6 +1890,8 @@ class HeatmapModule(pl.LightningModule):
         for mode_name, mode_data in (
             ("positive_erased", positive_erased),
             ("shuffled", shuffled),
+            ("object_sufficient", object_sufficient),
+            ("object_class_swapped", object_class_swapped),
         ):
             if mode_data is None:
                 continue
@@ -1787,6 +1968,48 @@ class HeatmapModule(pl.LightningModule):
         else:
             erased_preds = None
             erased_labels = None
+
+        object_sufficient = self._actor_preds_for_object_mode(
+            imgs,
+            target,
+            "object_sufficient",
+        )
+        if object_sufficient is not None:
+            sufficient_preds, sufficient_labels = object_sufficient
+            self._log_group_metrics(
+                "val_{group}_objects_sufficient",
+                sufficient_preds,
+                sufficient_labels,
+            )
+            self._log_action_metrics(
+                "val_action_{action}_objects_sufficient",
+                sufficient_preds,
+                sufficient_labels,
+            )
+        else:
+            sufficient_preds = None
+            sufficient_labels = None
+
+        object_class_swapped = self._actor_preds_for_object_mode(
+            imgs,
+            target,
+            "object_class_swapped",
+        )
+        if object_class_swapped is not None:
+            swapped_class_preds, swapped_class_labels = object_class_swapped
+            self._log_group_metrics(
+                "val_{group}_objects_class_swapped",
+                swapped_class_preds,
+                swapped_class_labels,
+            )
+            self._log_action_metrics(
+                "val_action_{action}_objects_class_swapped",
+                swapped_class_preds,
+                swapped_class_labels,
+            )
+        else:
+            swapped_class_preds = None
+            swapped_class_labels = None
 
         off = self._actor_preds_for_object_mode(imgs, target, "off")
         if off is not None:
@@ -1865,12 +2088,22 @@ class HeatmapModule(pl.LightningModule):
         shuffled_data = (
             None if shuffled_preds is None else (shuffled_preds, shuffled_labels)
         )
+        sufficient_data = (
+            None if sufficient_preds is None else (sufficient_preds, sufficient_labels)
+        )
+        class_swapped_data = (
+            None
+            if swapped_class_preds is None
+            else (swapped_class_preds, swapped_class_labels)
+        )
         self._log_object_ablation_shift_metrics(
             normal_preds,
             labels,
             positive_erased=erased_data,
             off=off_data,
             shuffled=shuffled_data,
+            object_sufficient=sufficient_data,
+            object_class_swapped=class_swapped_data,
         )
         self._log_object_interaction_causal_metrics(
             normal_preds,
@@ -1878,6 +2111,8 @@ class HeatmapModule(pl.LightningModule):
             target,
             positive_erased=erased_data,
             shuffled=shuffled_data,
+            object_sufficient=sufficient_data,
+            object_class_swapped=class_swapped_data,
         )
     def training_step(self, batch, batch_idx):
         # "batch" is the output of the training data loader.
