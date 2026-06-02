@@ -471,7 +471,7 @@ class HeatmapModule(pl.LightningModule):
     ):
         valid = valid.to(device=normal_logits.device, dtype=torch.bool)
         margin_weight = float(
-            self.model.hparams.get("object_counterfactual_margin_weight", 0.05)
+            self.model.hparams.get("object_counterfactual_margin_weight", 0.01)
         )
         consistency_weight = float(
             self.model.hparams.get("object_objectless_consistency_weight", 0.0)
@@ -773,6 +773,76 @@ class HeatmapModule(pl.LightningModule):
                 int(valid_count.item()),
             )
 
+    def _log_interaction_heatmap_metrics(
+        self,
+        pred_heatmap,
+        target_heatmap,
+        heatmap_valid,
+        stage,
+    ):
+        if pred_heatmap is None:
+            return
+        heatmap_valid = heatmap_valid.to(
+            device=pred_heatmap.device,
+            dtype=torch.bool,
+        )
+        if not heatmap_valid.any():
+            return
+
+        pred = pred_heatmap.float().clamp(0.0, 1.0)[heatmap_valid]
+        target = target_heatmap.to(device=pred_heatmap.device).float()[heatmap_valid]
+        pred_bin = pred > 0.3
+        target_bin = target > 0.3
+        target_visible = target_bin.flatten(1).any(dim=1)
+        if not target_visible.any():
+            return
+
+        pred = pred[target_visible]
+        target = target[target_visible]
+        pred_bin = pred_bin[target_visible]
+        target_bin = target_bin[target_visible]
+        count = int(target_visible.sum().item())
+
+        intersection = (pred_bin & target_bin).float().flatten(1).sum(dim=1)
+        union = (pred_bin | target_bin).float().flatten(1).sum(dim=1)
+        valid_union = union > 0
+        if valid_union.any():
+            self._log_scalar(
+                f"{stage}_interaction_heatmap_iou",
+                (intersection[valid_union] / union[valid_union].clamp_min(1.0)).mean(),
+                count,
+            )
+
+        positive_values = pred.masked_select(target_bin)
+        if positive_values.numel() > 0:
+            self._log_scalar(
+                f"{stage}_interaction_heatmap_positive_mean",
+                positive_values.mean(),
+                count,
+            )
+
+        pred_flat = pred.flatten(1)
+        target_flat = target.flatten(1)
+        pred_idx = pred_flat.argmax(dim=1)
+        target_idx = target_flat.argmax(dim=1)
+        width = pred.shape[-1]
+        pred_xy = torch.stack(
+            [pred_idx % width, torch.div(pred_idx, width, rounding_mode="floor")],
+            dim=-1,
+        ).float()
+        target_xy = torch.stack(
+            [
+                target_idx % width,
+                torch.div(target_idx, width, rounding_mode="floor"),
+            ],
+            dim=-1,
+        ).float()
+        self._log_scalar(
+            f"{stage}_interaction_heatmap_center_l2",
+            torch.linalg.norm(pred_xy - target_xy, dim=-1).mean(),
+            count,
+        )
+
     def _log_group_metrics(self, prefix, preds, labels):
         if not self.group_indices:
             return
@@ -1037,7 +1107,7 @@ class HeatmapModule(pl.LightningModule):
         if self.object_prompt:
             pred_obj = self._object_heatmap_pred(hm_preds)
             object_heatmap_weight = float(
-                self.model.hparams.get("object_heatmap_weight", 25.0)
+                self.model.hparams.get("object_heatmap_weight", 0.0)
             )
             if (
                 object_heatmap_weight > 0.0
@@ -1109,7 +1179,7 @@ class HeatmapModule(pl.LightningModule):
                 if loss_interaction is None:
                     loss_interaction = target_action_selection_logits.new_zeros(())
                 loss = loss + loss_interaction * self.model.hparams.get(
-                    "object_interaction_loss_weight", 0.05
+                    "object_interaction_loss_weight", 0.03
                 )
                 self.log(
                     f"{stage}_loss_interaction",
@@ -1163,6 +1233,13 @@ class HeatmapModule(pl.LightningModule):
                     logger=True,
                     sync_dist=True,
                 )
+                if stage != "train":
+                    self._log_interaction_heatmap_metrics(
+                        interaction_heatmap,
+                        target_heatmap,
+                        heatmap_valid,
+                        stage,
+                    )
 
             if stage == "train":
                 loss = loss + self._object_counterfactual_loss(

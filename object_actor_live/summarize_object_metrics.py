@@ -49,8 +49,9 @@ SUMMARY_COLUMNS = [
     "val_interaction_select_acc_object",
     "val_object_interaction_margin_gain_on_vs_positive_erased",
     "val_object_interaction_margin_gain_on_vs_shuffled",
-    "val_obj_iou",
-    "val_obj_recall_visible",
+    "val_interaction_heatmap_iou",
+    "val_interaction_heatmap_positive_mean",
+    "val_interaction_heatmap_center_l2",
     "pass_gate",
     "association_score",
 ]
@@ -116,6 +117,7 @@ def _epoch_frame(metrics: Path) -> pd.DataFrame:
             "val_f1_objects_on",
             "val_object_interaction_margin_gain_on_vs_positive_erased",
             "val_object_interaction_margin_gain_on_vs_shuffled",
+            "val_interaction_heatmap_iou",
         )
         if col in epoch_df.columns
     ]
@@ -167,7 +169,11 @@ def _epoch_frame(metrics: Path) -> pd.DataFrame:
             + shuf.fillna(0.0).clip(lower=0.0, upper=0.20) * 4.0
             + mass.fillna(0.0).clip(lower=0.0, upper=1.0) * 0.15
             + _series_or_zero(epoch_df, "val_interaction_select_acc_object") * 0.10
-            + _series_or_zero(epoch_df, "val_obj_iou") * 0.10
+            + _series_or_zero(epoch_df, "val_interaction_heatmap_iou") * 0.10
+            + _series_or_zero(
+                epoch_df,
+                "val_interaction_heatmap_positive_mean",
+            ) * 0.05
             + _series_or_floor(epoch_df, "f1_gain_vs_off", -0.05).clip(lower=-0.05, upper=0.05)
             + _series_or_floor(epoch_df, "f1_gain_vs_shuf", -0.05).clip(lower=-0.05, upper=0.05)
         )
@@ -241,8 +247,9 @@ def _print_row(label: str, row: pd.Series):
         "val_interaction_select_acc_object",
         "val_object_interaction_margin_gain_on_vs_positive_erased",
         "val_object_interaction_margin_gain_on_vs_shuffled",
-        "val_obj_iou",
-        "val_obj_recall_visible",
+        "val_interaction_heatmap_iou",
+        "val_interaction_heatmap_positive_mean",
+        "val_interaction_heatmap_center_l2",
     ]:
         if name in row:
             print(f"{name}: {row[name] if name == 'pass_gate' else _format(row[name])}")

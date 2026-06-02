@@ -18,7 +18,7 @@ There is one active object path:
 5. Use the final actor tokens directly for action classification.
 6. Predict actor/object selection and actor-conditioned interaction heatmaps from
    final actor/object tokens plus pooled actor-object union visual features.
-7. Train with visible-object heatmaps, strong-object selection targets, interaction heatmaps, positive-erased counterfactuals, shuffled-object counterfactuals, and objectless consistency.
+7. Train with strong-object selection targets, actor-conditioned interaction heatmaps, light positive-erased/shuffled counterfactuals, and optional objectless consistency.
 
 The model no longer has a post-backbone object adapter, free action-score overrides, specialist rerankers, or relation-only modes. Object evidence must enter through transformer tokens and affect the actor token before `actor_head`.
 
@@ -134,11 +134,10 @@ All other detected objects remain visible as context/distractors. They are not t
 Use the normal action CE as the main task, plus:
 
 - pose heatmap loss
-- visible object heatmap loss
 - actor/object selection loss
 - actor-conditioned interaction heatmap loss
-- positive-erased and shuffled-object margin loss
-- objectless consistency loss
+- light positive-erased and shuffled-object margin loss
+- optional objectless consistency loss
 - actor presence loss
 
 Positive-erased removes only the positive interacted-object candidates and leaves distractors visible. This is the key counterfactual test for whether the model learned the interacted object rather than a general object prior.
@@ -154,10 +153,10 @@ Frozen object-token warmup:
 - `--object_warmup_freeze_actor_path 1`
 - `--object_unfreeze_last_blocks 2`
 - actor classifier, presence head, and global classifier are frozen
-- `--object_heatmap_weight 25`
-- `--object_interaction_loss_weight 0.05`
+- `--object_heatmap_weight 0`
+- `--object_interaction_loss_weight 0.03`
 - `--object_interaction_heatmap_weight 25`
-- `--object_counterfactual_margin_weight 0.05`
+- `--object_counterfactual_margin_weight 0.01`
 - `--object_counterfactual_margin 0.05`
 - `--object_objectless_consistency_weight 0.0`
 - `--kp_loss_weight 1000`
@@ -165,8 +164,7 @@ Frozen object-token warmup:
 - `--lr_head 5e-5`
 - `--lr_head_hm 5e-5`
 - `--class_balanced_sampler 1`
-- `--hard_negative_sampler 1`
-- `--hard_negative_prob 0.15`
+- `--hard_negative_sampler 0`
 - `--max_epochs 2`
 
 `--object_unfreeze_last_blocks 2` is intentional. The actor/object decoder
@@ -191,7 +189,7 @@ Do not judge only raw global macro/F1. A pass requires:
 - positive-erased margin gain is positive for strong object actions
 - shuffled-object margin gain is positive
 - selection mass and selection accuracy are sane
-- object heatmap IoU/recall are nonzero
+- interacted-object heatmap IoU/positive response are nonzero
 - objectless classes remain stable
 - per-class checks for `Uselaptop`, `Readbook`, `WatchTV`, `Usetelephone`, and drink classes do not reveal a hidden regression
 

@@ -25,8 +25,12 @@ class rule. Object evidence must change the actor token that the normal
   refined actor tokens.
 - `models/poguise.py` runs `actor_head` only after the decoder has updated
   `x_actor`.
+- All detected objects are still fed as object tokens.
 - `positive_erased` now removes positive object tokens and erases the positive
   object patch-grid features before the transformer.
+- The all-visible-object heatmap loss is off by default. Object supervision is
+  concentrated on actor-conditioned interacted-object heatmaps for reliable
+  action/object pairs.
 - The only counterfactual training branches are positive-erased and shuffled
   objects. There is no sufficiency, class-swap, group-CE, specialist, or
   logit-residual path.
@@ -91,11 +95,13 @@ Important flags:
 --lr_head_hm 5e-5
 --object_decoder_update_gate_init 0.02
 --object_decoder_ffn_gate_init 0.02
---object_heatmap_weight 25
---object_interaction_loss_weight 0.05
+--object_heatmap_weight 0
+--object_interaction_loss_weight 0.03
 --object_interaction_heatmap_weight 25
---object_counterfactual_margin_weight 0.05
+--object_counterfactual_margin_weight 0.01
 --object_objectless_consistency_weight 0.0
+--class_balanced_sampler 1
+--hard_negative_sampler 0
 --max_epochs 2
 --t_max_scheduler 2
 ```
@@ -137,7 +143,7 @@ val_object_interaction_margin_gain_on_vs_positive_erased > 0
 val_object_interaction_margin_gain_on_vs_shuffled > 0
 val_interaction_select_mass_object is sane, not collapsed
 val_interaction_select_acc_object is improving
-val_obj_iou and val_obj_recall_visible are nonzero
+val_interaction_heatmap_iou and val_interaction_heatmap_positive_mean are nonzero
 val_f1_objects_on is not materially worse than objects_off
 val_f1_objects_on is not materially worse than objects_shuffled
 ```
@@ -166,7 +172,7 @@ python3 object_actor_live/summarize_object_metrics.py \
 ```
 
 The summarizer prints global on/off/shuffled metrics, object-interaction margins,
-selection mass/accuracy, object IoU/recall, and per-class/per-group object
+selection mass/accuracy, interacted-object heatmap metrics, and per-class/per-group object
 ablations for the object-sensitive actions. A useful checkpoint should show
 positive interaction margins and per-class object gains without letting shuffled
 objects beat real objects on the target groups.
