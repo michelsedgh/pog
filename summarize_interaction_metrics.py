@@ -15,6 +15,8 @@ CORE_COLUMNS = [
     "val_loss_heatmap_frobenius",
     "train_nash_weight_action",
     "train_nash_weight_heatmap",
+    "val_interaction_teacher_slot_rate",
+    "val_interaction_teacher_slot_count",
     "val_interaction_heatmap_iou",
     "val_interaction_heatmap_positive_mean",
     "val_interaction_heatmap_center_l2",
@@ -120,6 +122,11 @@ def print_row(title, row):
         f"center_l2 {metric(row, 'val_interaction_heatmap_center_l2'):.2f}"
     )
     print(
+        "trusted teacher slots: "
+        f"rate {metric(row, 'val_interaction_teacher_slot_rate'):.4f}, "
+        f"count {metric(row, 'val_interaction_teacher_slot_count'):.1f}"
+    )
+    print(
         "poguise+ heatmap loss: "
         f"log {metric(row, 'val_loss_heatmap_log'):.4f}, "
         f"fro {metric(row, 'val_loss_heatmap_frobenius'):.4f}"
@@ -141,7 +148,12 @@ def print_row(title, row):
     for action in ACTIONS:
         col = f"val_action_{action}_acc"
         if col in row.index and pd.notna(row[col]):
-            print(f"{action}: {float(row[col]):.4f}")
+            teacher_col = f"val_action_{action}_interaction_teacher_rate"
+            teacher = metric(row, teacher_col)
+            if pd.notna(teacher):
+                print(f"{action}: acc {float(row[col]):.4f}, teacher {teacher:.4f}")
+            else:
+                print(f"{action}: acc {float(row[col]):.4f}")
 
 
 def main():

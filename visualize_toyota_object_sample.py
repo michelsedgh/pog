@@ -47,6 +47,19 @@ def build_parser():
     parser.add_argument("--object_camera_allowlist", default=None)
     parser.add_argument("--object_ignore_regions", default=None)
     parser.add_argument("--object_track_iou_threshold", type=float, default=0.2)
+    parser.add_argument("--interaction_guided_sampling", type=int, default=1)
+    parser.add_argument("--interaction_min_sampled_object_frames", type=int, default=1)
+    parser.add_argument("--interaction_repair_radius_frames", type=int, default=8)
+    parser.add_argument("--interaction_quality_min_actor_score", type=float, default=1.0)
+    parser.add_argument("--interaction_quality_min_track_frames", type=int, default=1)
+    parser.add_argument(
+        "--interaction_quality_min_track_coverage", type=float, default=0.0
+    )
+    parser.add_argument(
+        "--actions",
+        default=None,
+        help="Comma-separated Toyota action names to visualize, e.g. Uselaptop,Readbook.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--synthetic_two_actor", action="store_true")
     parser.add_argument("--contact_sheet", type=int, default=1)
@@ -78,6 +91,14 @@ def dataset_kwargs(args):
         "object_ignore_regions": args.object_ignore_regions,
         "object_conf_threshold": args.object_conf_threshold,
         "object_track_iou_threshold": args.object_track_iou_threshold,
+        "interaction_guided_sampling": args.interaction_guided_sampling,
+        "interaction_min_sampled_object_frames": args.interaction_min_sampled_object_frames,
+        "interaction_repair_radius_frames": args.interaction_repair_radius_frames,
+        "interaction_quality_min_actor_score": args.interaction_quality_min_actor_score,
+        "interaction_quality_min_track_frames": args.interaction_quality_min_track_frames,
+        "interaction_quality_min_track_coverage": (
+            args.interaction_quality_min_track_coverage
+        ),
         "toyota_frame_source": args.toyota_frame_source,
         "toyota_skeleton_zip": args.toyota_skeleton_zip,
         "toyota_frame_count_cache": args.toyota_frame_count_cache,
@@ -189,12 +210,28 @@ def main():
         np.random.seed(args.seed)
         ds = ToyotaSMDataset(**dataset_kwargs(args))
         ds.setup()
+        requested_actions = None
+        if args.actions is not None and str(args.actions).strip():
+            requested_actions = {
+                item.strip()
+                for item in str(args.actions).split(",")
+                if item.strip()
+            }
 
         written = 0
         output_paths = []
         idx = int(args.start_index)
         while idx < len(ds) and written < args.count:
             frames, target = ds[idx]
+            action_names = [
+                action_name(int(label))
+                for label in target["actions"][target["valid"].bool()].tolist()
+            ]
+            if requested_actions is not None and not any(
+                name in requested_actions for name in action_names
+            ):
+                idx += 1
+                continue
             if args.only_with_interactions and not bool(
                 target["interaction_heatmap_valid"].any()
             ):

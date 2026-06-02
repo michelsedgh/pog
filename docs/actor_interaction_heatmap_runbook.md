@@ -40,31 +40,56 @@ no shuffled-object ablation branch, and no logit residual.
 ## Strong Targets
 
 The Toyota action label decides whether an interaction heatmap target is valid.
-Only reliable object-action pairs are supervised:
+Reliable pairs are supervised whenever the expected object is detected:
 
 ```text
 Uselaptop        -> laptop
 Readbook         -> book
-Usetelephone     -> phone
 Drink.Fromcup    -> cup
+```
+
+Sparse pairs are supervised only when the selected object track passes the
+quality gate. The default gate is intentionally light: the selected track must be
+actor-associated, and the sampler tries to include at least one expected-object
+frame when the cache has one.
+
+```text
+Usetelephone     -> phone
 Drink.Frombottle -> bottle
-Drink.Fromglass  -> glass
 Pour.Frombottle  -> bottle
 Cutbread         -> utensil
 Cook.Cut         -> utensil
-Cook.Stir        -> utensil or bowl
+Cook.Stir        -> bowl
 Cook.Cleandishes -> sink
 Cook.Usestove    -> cooking_appliance
 ```
 
-WatchTV, Sitdown, Eat, Takepills, Walk, Enter, Leave, and Laydown do not receive
-forced interacted-object heatmap targets. This prevents context objects from
-becoming false action evidence.
+Drink.Fromglass, WatchTV, Sitdown, Eat, Takepills, Walk, Enter, Leave, and
+Laydown do not receive forced interacted-object heatmap targets. This prevents
+missing detector labels and context objects from becoming false action evidence.
 
 For each valid actor slot, the dataset selects one actor-associated track from
 the matching object class. It does not merge every matching object in the scene.
 The selected track is scored by proximity/overlap with the actor box and detector
 confidence, then converted into a clip-level center-Gaussian motion heatmap.
+
+Training keeps a strict teacher contract:
+
+```text
+every valid actor slot:
+  action CE loss
+
+valid actor slot with a trusted object track:
+  action CE loss
+  + actor-conditioned interaction heatmap loss
+
+valid actor slot with missing/noisy object teacher:
+  action CE loss only
+```
+
+Missing RF-DETR detections are unknown labels, not negative labels. The dataset
+does not train blank interaction heatmaps for missing phones, bottles, utensils,
+or other sparse objects.
 
 ## Preflight
 
@@ -136,6 +161,11 @@ python3 -u train.py \
   --object_ignore_regions c03=0,0,0.26,0.42 \
   --object_conf_threshold 0.25 --interaction_heatmap_size 56 \
   --interaction_heatmap_sigma 1.5 \
+  --interaction_guided_sampling 1 --interaction_min_sampled_object_frames 1 \
+  --interaction_repair_radius_frames 8 \
+  --interaction_quality_min_actor_score 1.0 \
+  --interaction_quality_min_track_frames 1 \
+  --interaction_quality_min_track_coverage 0.0 \
   --freeze_backbone 1 --interaction_warmup_freeze_actor_path 1 \
   --interaction_unfreeze_last_blocks 2 \
   --class_balanced_sampler 1 --hard_negative_sampler 1 \
@@ -177,6 +207,8 @@ Important metrics:
 val_interaction_heatmap_iou
 val_interaction_heatmap_positive_mean
 val_interaction_heatmap_center_l2
+val_interaction_teacher_slot_rate
+val_interaction_teacher_slot_count
 val_loss_heatmap_log
 train_nash_weight_action
 train_nash_weight_heatmap
@@ -230,6 +262,11 @@ python3 -u train.py \
   --object_ignore_regions c03=0,0,0.26,0.42 \
   --object_conf_threshold 0.25 --interaction_heatmap_size 56 \
   --interaction_heatmap_sigma 1.5 \
+  --interaction_guided_sampling 1 --interaction_min_sampled_object_frames 1 \
+  --interaction_repair_radius_frames 8 \
+  --interaction_quality_min_actor_score 1.0 \
+  --interaction_quality_min_track_frames 1 \
+  --interaction_quality_min_track_coverage 0.0 \
   --freeze_backbone 0 --interaction_warmup_freeze_actor_path 0 \
   --interaction_unfreeze_last_blocks 0 \
   --class_balanced_sampler 1 --hard_negative_sampler 1 \

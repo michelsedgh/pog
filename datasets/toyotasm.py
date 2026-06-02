@@ -20,6 +20,8 @@ from datasets.object_vocab import (
     NONE_OBJECT_ID,
     NUM_OBJECT_CLASSES,
     OBJECT_TO_ID,
+    QUALITY_GATED_ACTION_OBJECTS,
+    RELIABLE_ACTION_OBJECTS,
     STRONG_ACTION_OBJECTS,
     object_box_ignored_for_file_id,
     object_allowed_for_file_id,
@@ -157,6 +159,33 @@ class ToyotaSMDataset(Dataset):
         )
         if self.interaction_heatmap_sigma <= 0:
             raise ValueError("interaction_heatmap_sigma must be positive")
+        self.interaction_guided_sampling = bool(
+            kwargs.get("interaction_guided_sampling", 1)
+        )
+        self.interaction_min_sampled_object_frames = int(
+            kwargs.get("interaction_min_sampled_object_frames", 1)
+        )
+        if self.interaction_min_sampled_object_frames < 0:
+            raise ValueError("interaction_min_sampled_object_frames must be >= 0")
+        self.interaction_repair_radius_frames = int(
+            kwargs.get("interaction_repair_radius_frames", 8)
+        )
+        if self.interaction_repair_radius_frames < 0:
+            raise ValueError("interaction_repair_radius_frames must be >= 0")
+        self.interaction_quality_min_actor_score = float(
+            kwargs.get("interaction_quality_min_actor_score", 1.0)
+        )
+        self.interaction_quality_min_track_frames = int(
+            kwargs.get("interaction_quality_min_track_frames", 1)
+        )
+        if self.interaction_quality_min_track_frames < 0:
+            raise ValueError("interaction_quality_min_track_frames must be >= 0")
+        self.interaction_quality_min_track_coverage = float(
+            kwargs.get("interaction_quality_min_track_coverage", 0.0)
+        )
+        if not 0 <= self.interaction_quality_min_track_coverage <= 1:
+            raise ValueError("interaction_quality_min_track_coverage must be in [0, 1]")
+        self._expected_object_frame_cache = {}
         self.toyota_actor_box_expand = float(kwargs.get("toyota_actor_box_expand", 1.15))
         if self.toyota_actor_box_expand <= 0:
             raise ValueError("toyota_actor_box_expand must be positive")
@@ -412,6 +441,14 @@ class ToyotaSMDataset(Dataset):
         parser.add_argument("--interaction_heatmap_size", type=int, default=56)
         parser.add_argument("--object_track_iou_threshold", type=float, default=0.2)
         parser.add_argument("--interaction_heatmap_sigma", type=float, default=1.5)
+        parser.add_argument("--interaction_guided_sampling", type=int, default=1)
+        parser.add_argument("--interaction_min_sampled_object_frames", type=int, default=1)
+        parser.add_argument("--interaction_repair_radius_frames", type=int, default=8)
+        parser.add_argument("--interaction_quality_min_actor_score", type=float, default=1.0)
+        parser.add_argument("--interaction_quality_min_track_frames", type=int, default=1)
+        parser.add_argument(
+            "--interaction_quality_min_track_coverage", type=float, default=0.0
+        )
         parser.add_argument("--toyota_pose_guided_sampling", type=int, default=1)
         parser.add_argument("--toyota_min_pose_frames", type=int, default=1)
         parser.add_argument("--toyota_pose_landmarks", type=int, default=13)
@@ -718,6 +755,75 @@ class ToyotaSMDataset(Dataset):
             frames_idx[slot] = int(pose_frame)
         return np.sort(frames_idx)
 
+    def _expected_interaction_object_ids(self, action_name):
+        return {
+            int(OBJECT_TO_ID[object_name])
+            for object_name in STRONG_ACTION_OBJECTS.get(action_name, ())
+            if object_name in OBJECT_TO_ID
+        }
+
+    def _expected_interaction_frames(self, file_id, action_name):
+        expected_ids = self._expected_interaction_object_ids(action_name)
+        if not expected_ids:
+            return np.asarray([], dtype=int)
+
+        key = (str(file_id), str(action_name))
+        cached = self._expected_object_frame_cache.get(key)
+        if cached is not None:
+            return cached
+
+        frames = []
+        for frame_idx, objects in self._object_cache.get(file_id, {}).items():
+            if any(int(obj["cls_id"]) in expected_ids for obj in objects):
+                frames.append(int(frame_idx))
+        output = np.asarray(sorted(set(frames)), dtype=int)
+        self._expected_object_frame_cache[key] = output
+        return output
+
+    def _ensure_interaction_frame_indices(self, frames_idx, file_id, action_name):
+        if self.interaction_min_sampled_object_frames <= 0:
+            return frames_idx
+        expected_frames = self._expected_interaction_frames(file_id, action_name)
+        if expected_frames.size == 0:
+            return frames_idx
+
+        frames_idx = np.asarray(frames_idx, dtype=int).copy()
+        sampled = set(int(frame_idx) for frame_idx in frames_idx.tolist())
+        sampled_expected = [frame for frame in expected_frames.tolist() if frame in sampled]
+        target_count = min(
+            int(self.interaction_min_sampled_object_frames),
+            int(expected_frames.size),
+        )
+        if len(sampled_expected) >= target_count:
+            return frames_idx
+
+        missing = np.asarray(
+            [frame for frame in expected_frames.tolist() if frame not in sampled],
+            dtype=int,
+        )
+        if missing.size == 0:
+            return frames_idx
+
+        needed = target_count - len(sampled_expected)
+        if self.set_type == "train":
+            replace_frames = np.random.choice(
+                missing,
+                size=min(needed, missing.size),
+                replace=False,
+            )
+        else:
+            center = float((frames_idx[0] + frames_idx[-1]) * 0.5)
+            order = np.argsort(np.abs(missing - center))
+            replace_frames = missing[order[:needed]]
+
+        used_slots = set()
+        for object_frame in replace_frames:
+            slot_order = np.argsort(np.abs(frames_idx - int(object_frame)))
+            slot = next(int(i) for i in slot_order if int(i) not in used_slots)
+            used_slots.add(slot)
+            frames_idx[slot] = int(object_frame)
+        return np.sort(frames_idx)
+
     def _sample_pose_guided_start(self, start_min, start_max, pose_available):
         if pose_available is None or not pose_available.any():
             return None
@@ -843,12 +949,23 @@ class ToyotaSMDataset(Dataset):
                 end_frame,
                 pose_available=pose_available,
             )
+            action_name = (
+                self._action_name_from_label(int(label))
+                if self.interaction_teacher_enabled
+                else None
+            )
+            if self.interaction_teacher_enabled and self.interaction_guided_sampling:
+                frames_idx = self._ensure_interaction_frame_indices(
+                    frames_idx,
+                    file_id,
+                    action_name,
+                )
             if len(frames_idx) < self.n_frames:
                 frames_idx = np.pad(
                     frames_idx, (0, self.n_frames - len(frames_idx)), "edge"
                 )
             object_entries = (
-                self._sample_object_entries(file_id, frames_idx)
+                self._sample_object_entries(file_id, frames_idx, action_name)
                 if self.interaction_teacher_enabled
                 else []
             )
@@ -1457,6 +1574,21 @@ class ToyotaSMDataset(Dataset):
         coverage = len(track["frames"]) / float(max(self.n_frames, 1))
         return best_entry_score + 0.2 * coverage
 
+    def _interaction_track_quality_passes(self, action_name, score, track):
+        if action_name in RELIABLE_ACTION_OBJECTS:
+            return True
+        if action_name not in QUALITY_GATED_ACTION_OBJECTS:
+            return False
+        if float(score) < self.interaction_quality_min_actor_score:
+            return False
+        track_frames = len(track["frames"])
+        track_coverage = track_frames / float(max(self.n_frames, 1))
+        if track_frames < self.interaction_quality_min_track_frames:
+            return False
+        if track_coverage < self.interaction_quality_min_track_coverage:
+            return False
+        return True
+
     def _build_interaction_targets(
         self,
         actor_target,
@@ -1518,8 +1650,14 @@ class ToyotaSMDataset(Dataset):
             ]
             if not scored_tracks:
                 continue
-            _, best_track = max(scored_tracks, key=lambda item: item[0])
+            best_score, best_track = max(scored_tracks, key=lambda item: item[0])
             if not best_track["entries"]:
+                continue
+            if not self._interaction_track_quality_passes(
+                action_name,
+                best_score,
+                best_track,
+            ):
                 continue
             interaction_cls[slot] = int(best_track["cls_id"])
             interaction_valid[slot] = True
@@ -2092,10 +2230,49 @@ class ToyotaSMDataset(Dataset):
     def _get_frame_objects(self, file_id, frame_idx):
         return self._object_cache.get(file_id, {}).get(int(frame_idx), [])
 
-    def _sample_object_entries(self, file_id, frames_idx):
+    def _nearest_expected_objects(self, file_id, frame_idx, expected_ids):
+        if self.interaction_repair_radius_frames <= 0 or not expected_ids:
+            return []
+
+        cache = self._object_cache.get(file_id, {})
+        if not cache:
+            return []
+
+        frame_idx = int(frame_idx)
+        radius = int(self.interaction_repair_radius_frames)
+        best_distance = None
+        best_objects = []
+        for offset in range(-radius, radius + 1):
+            candidate_frame = frame_idx + offset
+            objects = [
+                obj
+                for obj in cache.get(candidate_frame, [])
+                if int(obj["cls_id"]) in expected_ids
+            ]
+            if not objects:
+                continue
+            distance = abs(offset)
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_objects = objects
+                if distance == 0:
+                    break
+        return best_objects
+
+    def _sample_object_entries(self, file_id, frames_idx, action_name=None):
         entries = []
+        expected_ids = self._expected_interaction_object_ids(action_name)
         for sample_pos, frame_idx in enumerate(frames_idx):
-            for obj in self._get_frame_objects(file_id, int(frame_idx)):
+            frame_idx = int(frame_idx)
+            frame_objects = list(self._get_frame_objects(file_id, frame_idx))
+            has_expected = any(
+                int(obj["cls_id"]) in expected_ids for obj in frame_objects
+            )
+            if expected_ids and not has_expected:
+                frame_objects.extend(
+                    self._nearest_expected_objects(file_id, frame_idx, expected_ids)
+                )
+            for obj in frame_objects:
                 entries.append(
                     {
                         "sample_pos": int(sample_pos),

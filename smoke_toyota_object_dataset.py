@@ -67,6 +67,14 @@ def build_parser():
     parser.add_argument("--object_camera_allowlist", default=None)
     parser.add_argument("--object_ignore_regions", default=None)
     parser.add_argument("--object_track_iou_threshold", type=float, default=0.2)
+    parser.add_argument("--interaction_guided_sampling", type=int, default=1)
+    parser.add_argument("--interaction_min_sampled_object_frames", type=int, default=1)
+    parser.add_argument("--interaction_repair_radius_frames", type=int, default=8)
+    parser.add_argument("--interaction_quality_min_actor_score", type=float, default=1.0)
+    parser.add_argument("--interaction_quality_min_track_frames", type=int, default=1)
+    parser.add_argument(
+        "--interaction_quality_min_track_coverage", type=float, default=0.0
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--allow_no_interaction_sample",
@@ -95,6 +103,14 @@ def dataset_kwargs(args, synthetic_two_actor=False):
         "object_ignore_regions": args.object_ignore_regions,
         "object_conf_threshold": args.object_conf_threshold,
         "object_track_iou_threshold": args.object_track_iou_threshold,
+        "interaction_guided_sampling": args.interaction_guided_sampling,
+        "interaction_min_sampled_object_frames": args.interaction_min_sampled_object_frames,
+        "interaction_repair_radius_frames": args.interaction_repair_radius_frames,
+        "interaction_quality_min_actor_score": args.interaction_quality_min_actor_score,
+        "interaction_quality_min_track_frames": args.interaction_quality_min_track_frames,
+        "interaction_quality_min_track_coverage": (
+            args.interaction_quality_min_track_coverage
+        ),
         "toyota_frame_source": args.toyota_frame_source,
         "toyota_skeleton_zip": args.toyota_skeleton_zip,
         "toyota_frame_count_cache": args.toyota_frame_count_cache,
@@ -241,6 +257,11 @@ def validate_interaction_target(name, frames, target, args, report):
             report.check(
                 not bool(interaction_valid[slot]),
                 f"{name}: Drink.Fromcan has no forced COCO object target",
+            )
+        if name_for_slot == "Drink.Fromglass":
+            report.check(
+                not bool(interaction_valid[slot]),
+                f"{name}: Drink.Fromglass has no reliable glass teacher target",
             )
         if name_for_slot in STRONG_ACTION_OBJECTS and bool(interaction_valid[slot]):
             expected_ids = {

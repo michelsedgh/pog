@@ -233,19 +233,26 @@ def object_box_ignored_for_file_id(box_xyxy, file_id, width, height, ignore_regi
             return True
     return False
 
-STRONG_ACTION_OBJECTS = {
+RELIABLE_ACTION_OBJECTS = {
     "Uselaptop": ("laptop",),
     "Readbook": ("book",),
+    "Drink.Fromcup": ("cup",),
+}
+
+QUALITY_GATED_ACTION_OBJECTS = {
     "Usetelephone": ("phone",),
     "Drink.Frombottle": ("bottle",),
-    "Drink.Fromcup": ("cup",),
-    "Drink.Fromglass": ("glass",),
     "Pour.Frombottle": ("bottle",),
     "Cutbread": ("utensil",),
     "Cook.Cut": ("utensil",),
-    "Cook.Stir": ("utensil", "bowl"),
+    "Cook.Stir": ("bowl",),
     "Cook.Cleandishes": ("sink",),
     "Cook.Usestove": ("cooking_appliance",),
+}
+
+STRONG_ACTION_OBJECTS = {
+    **RELIABLE_ACTION_OBJECTS,
+    **QUALITY_GATED_ACTION_OBJECTS,
 }
 
 GROUPS = {

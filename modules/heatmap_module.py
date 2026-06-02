@@ -418,6 +418,40 @@ class HeatmapModule(pl.LightningModule):
                 mask.sum().item(),
             )
 
+    def _log_interaction_teacher_metrics(self, actions, valid, heatmap_valid, stage):
+        valid = valid.to(device=actions.device, dtype=torch.bool)
+        heatmap_valid = heatmap_valid.to(device=actions.device, dtype=torch.bool) & valid
+        valid_count = int(valid.sum().item())
+        if valid_count <= 0:
+            return
+
+        self._log_scalar(
+            f"{stage}_interaction_teacher_slot_rate",
+            heatmap_valid.float().sum() / max(valid_count, 1),
+            valid_count,
+        )
+        self.log(
+            f"{stage}_interaction_teacher_slot_count",
+            heatmap_valid.float().sum(),
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+            reduce_fx="sum",
+            batch_size=1,
+        )
+
+        for metric_name, action_idx in self._interaction_audit_action_indices():
+            mask = valid & (actions == int(action_idx))
+            if not mask.any():
+                continue
+            self._log_scalar(
+                f"{stage}_action_{metric_name}_interaction_teacher_rate",
+                heatmap_valid[mask].float().mean(),
+                int(mask.sum().item()),
+            )
+
     def configure_optimizers(self):
         # We will support Adam or SGD as optimizers.
         if self.model.hparams.freeze_backbone:
@@ -683,6 +717,12 @@ class HeatmapModule(pl.LightningModule):
                 heatmap_valid = target["interaction_heatmap_valid"].to(
                     device=valid.device, dtype=torch.bool
                 ) & valid
+                self._log_interaction_teacher_metrics(
+                    actions,
+                    valid,
+                    heatmap_valid,
+                    stage,
+                )
                 target_heatmap = target["interaction_heatmap"].to(
                     device=interaction_heatmap.device,
                     dtype=interaction_heatmap.dtype,
