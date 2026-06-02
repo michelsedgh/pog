@@ -234,7 +234,7 @@ def object_box_ignored_for_file_id(box_xyxy, file_id, width, height, ignore_regi
     return False
 
 STRONG_ACTION_OBJECTS = {
-    "Uselaptop": ("laptop", "keyboard_mouse"),
+    "Uselaptop": ("laptop",),
     "Readbook": ("book",),
     "Usetelephone": ("phone",),
     "Drink.Frombottle": ("bottle",),

@@ -55,6 +55,11 @@ WatchTV, Sitdown, Eat, Takepills, Cook, Walk, Enter, Leave, and Laydown do not
 receive forced interacted-object heatmap targets. This prevents context objects
 from becoming false action evidence.
 
+For each valid actor slot, the dataset selects one actor-associated track from
+the matching object class. It does not merge every matching object in the scene.
+The selected track is scored by proximity/overlap with the actor box and detector
+confidence, then converted into a clip-level center-Gaussian motion heatmap.
+
 ## Preflight
 
 Run this after Cell 1 setup:
@@ -120,6 +125,7 @@ python3 -u train.py \
   --object_camera_allowlist tv_monitor=c05,c06 \
   --object_ignore_regions c03=0,0,0.26,0.42 \
   --object_conf_threshold 0.25 --interaction_heatmap_size 56 \
+  --interaction_heatmap_sigma 1.5 \
   --freeze_backbone 1 --interaction_warmup_freeze_actor_path 1 \
   --interaction_unfreeze_last_blocks 2 \
   --actor_interaction_heatmap_weight 25 \
@@ -203,6 +209,7 @@ python3 -u train.py \
   --object_camera_allowlist tv_monitor=c05,c06 \
   --object_ignore_regions c03=0,0,0.26,0.42 \
   --object_conf_threshold 0.25 --interaction_heatmap_size 56 \
+  --interaction_heatmap_sigma 1.5 \
   --freeze_backbone 0 --interaction_warmup_freeze_actor_path 0 \
   --interaction_unfreeze_last_blocks 0 \
   --actor_interaction_heatmap_weight 10 \

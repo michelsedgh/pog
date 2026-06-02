@@ -152,6 +152,11 @@ class ToyotaSMDataset(Dataset):
         )
         if not 0 <= self.object_track_iou_threshold <= 1:
             raise ValueError("object_track_iou_threshold must be in [0, 1]")
+        self.interaction_heatmap_sigma = float(
+            kwargs.get("interaction_heatmap_sigma", 1.5)
+        )
+        if self.interaction_heatmap_sigma <= 0:
+            raise ValueError("interaction_heatmap_sigma must be positive")
         self.toyota_actor_box_expand = float(kwargs.get("toyota_actor_box_expand", 1.15))
         if self.toyota_actor_box_expand <= 0:
             raise ValueError("toyota_actor_box_expand must be positive")
@@ -406,6 +411,7 @@ class ToyotaSMDataset(Dataset):
         parser.add_argument("--object_conf_threshold", type=float, default=0.25)
         parser.add_argument("--interaction_heatmap_size", type=int, default=56)
         parser.add_argument("--object_track_iou_threshold", type=float, default=0.2)
+        parser.add_argument("--interaction_heatmap_sigma", type=float, default=1.5)
         parser.add_argument("--toyota_pose_guided_sampling", type=int, default=1)
         parser.add_argument("--toyota_min_pose_frames", type=int, default=1)
         parser.add_argument("--toyota_pose_landmarks", type=int, default=13)
@@ -1298,16 +1304,17 @@ class ToyotaSMDataset(Dataset):
         hm_h, hm_w = self.heatmap_size
         box = box.float().clamp(0.0, 1.0)
         center = (box[:2] + box[2:]) * 0.5
-        size = (box[2:] - box[:2]).clamp_min(1e-4)
-        sigma = (size * 0.5).clamp_min(1.0 / float(max(hm_h, hm_w)))
-        y = (torch.arange(hm_h, dtype=torch.float32) + 0.5) / float(hm_h)
-        x = (torch.arange(hm_w, dtype=torch.float32) + 0.5) / float(hm_w)
+        center_x = center[0] * float(hm_w) - 0.5
+        center_y = center[1] * float(hm_h) - 0.5
+        sigma = float(self.interaction_heatmap_sigma)
+        y = torch.arange(hm_h, dtype=torch.float32)
+        x = torch.arange(hm_w, dtype=torch.float32)
         grid_y, grid_x = torch.meshgrid(y, x, indexing="ij")
         heatmap = torch.exp(
             -0.5
             * (
-                ((grid_x - center[0]) / sigma[0]) ** 2
-                + ((grid_y - center[1]) / sigma[1]) ** 2
+                ((grid_x - center_x) / sigma) ** 2
+                + ((grid_y - center_y) / sigma) ** 2
             )
         )
         return heatmap.clamp_(0.0, 1.0)
@@ -1346,6 +1353,109 @@ class ToyotaSMDataset(Dataset):
                 self._interaction_heatmap_from_box(box),
             )
         return frame_heatmaps.mean(dim=0).clamp_(0.0, 1.0)
+
+    def _normalized_object_box(self, entry, height, width):
+        width = float(width)
+        height = float(height)
+        if width <= 0 or height <= 0:
+            raise ValueError("Toyota object dimensions must be positive")
+        x1, y1, x2, y2 = [float(v) for v in entry["xyxy"].tolist()]
+        box = torch.tensor(
+            [
+                x1 / width,
+                y1 / height,
+                x2 / width,
+                y2 / height,
+            ],
+            dtype=torch.float32,
+        ).clamp_(0.0, 1.0)
+        return box
+
+    @staticmethod
+    def _expand_normalized_box(box, expand):
+        x1, y1, x2, y2 = [float(v) for v in box.tolist()]
+        cx = (x1 + x2) * 0.5
+        cy = (y1 + y2) * 0.5
+        bw = max(x2 - x1, 1e-4) * float(expand)
+        bh = max(y2 - y1, 1e-4) * float(expand)
+        return torch.tensor(
+            [
+                max(0.0, cx - bw * 0.5),
+                max(0.0, cy - bh * 0.5),
+                min(1.0, cx + bw * 0.5),
+                min(1.0, cy + bh * 0.5),
+            ],
+            dtype=torch.float32,
+        )
+
+    @staticmethod
+    def _normalized_box_area(box):
+        return max(0.0, float(box[2] - box[0])) * max(0.0, float(box[3] - box[1]))
+
+    @staticmethod
+    def _normalized_intersection_area(box_a, box_b):
+        ix1 = max(float(box_a[0]), float(box_b[0]))
+        iy1 = max(float(box_a[1]), float(box_b[1]))
+        ix2 = min(float(box_a[2]), float(box_b[2]))
+        iy2 = min(float(box_a[3]), float(box_b[3]))
+        return max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+
+    @staticmethod
+    def _point_box_distance(point, box):
+        px, py = float(point[0]), float(point[1])
+        dx = max(float(box[0]) - px, 0.0, px - float(box[2]))
+        dy = max(float(box[1]) - py, 0.0, py - float(box[3]))
+        return math.sqrt(dx * dx + dy * dy)
+
+    def _interaction_track_actor_score(self, track, actor_box, height, width):
+        actor_box = actor_box.float().clamp(0.0, 1.0)
+        expanded_actor_box = self._expand_normalized_box(actor_box, expand=1.45)
+        actor_center = (actor_box[:2] + actor_box[2:]) * 0.5
+        actor_size = (actor_box[2:] - actor_box[:2]).clamp_min(1e-4)
+        actor_diag = float(torch.linalg.norm(actor_size).clamp_min(1e-4))
+
+        best_entry_score = -float("inf")
+        for entry in track["entries"]:
+            object_box = self._normalized_object_box(entry, height, width)
+            if object_box[2] <= object_box[0] or object_box[3] <= object_box[1]:
+                continue
+            object_center = (object_box[:2] + object_box[2:]) * 0.5
+            object_area = self._normalized_box_area(object_box)
+            containment = 0.0
+            if object_area > 0:
+                containment = self._normalized_intersection_area(
+                    object_box,
+                    expanded_actor_box,
+                ) / object_area
+            center_inside = (
+                float(expanded_actor_box[0])
+                <= float(object_center[0])
+                <= float(expanded_actor_box[2])
+                and float(expanded_actor_box[1])
+                <= float(object_center[1])
+                <= float(expanded_actor_box[3])
+            )
+            outside_distance = self._point_box_distance(
+                object_center,
+                expanded_actor_box,
+            )
+            center_distance = (
+                float(torch.linalg.norm(object_center - actor_center)) / actor_diag
+            )
+            conf = float(entry.get("conf", 0.0))
+            entry_score = (
+                conf
+                + 2.0 * float(center_inside)
+                + 1.5 * containment
+                - 2.0 * outside_distance
+                - 0.25 * center_distance
+            )
+            best_entry_score = max(best_entry_score, entry_score)
+
+        if best_entry_score == -float("inf"):
+            return best_entry_score
+        coverage = len(track["frames"]) / float(max(self.n_frames, 1))
+        return best_entry_score + 0.2 * coverage
 
     def _build_interaction_targets(
         self,
@@ -1388,25 +1498,39 @@ class ToyotaSMDataset(Dataset):
             ]
             if not positive_tracks:
                 continue
-            for positive_id in positive_ids:
-                if any(int(track["cls_id"]) == positive_id for track in positive_tracks):
-                    interaction_cls[slot] = int(positive_id)
-                    break
-            interaction_valid[slot] = True
-            heatmaps = [
-                self._interaction_motion_heatmap_from_entries(
-                    track["entries"],
-                    height,
-                    width,
+            actor_box = actor_target["boxes"][slot]
+            scored_tracks = [
+                (
+                    self._interaction_track_actor_score(
+                        track,
+                        actor_box,
+                        height,
+                        width,
+                    ),
+                    track,
                 )
                 for track in positive_tracks
-                if track["entries"]
             ]
-            if heatmaps:
-                interaction_heatmap[slot] = torch.stack(heatmaps).max(dim=0).values
-                interaction_heatmap_valid[slot] = bool(
-                    interaction_heatmap[slot].max() > 0
-                )
+            scored_tracks = [
+                (score, track)
+                for score, track in scored_tracks
+                if math.isfinite(float(score))
+            ]
+            if not scored_tracks:
+                continue
+            _, best_track = max(scored_tracks, key=lambda item: item[0])
+            if not best_track["entries"]:
+                continue
+            interaction_cls[slot] = int(best_track["cls_id"])
+            interaction_valid[slot] = True
+            interaction_heatmap[slot] = self._interaction_motion_heatmap_from_entries(
+                best_track["entries"],
+                height,
+                width,
+            )
+            interaction_heatmap_valid[slot] = bool(
+                interaction_heatmap[slot].max() > 0
+            )
 
         return (
             interaction_cls,
