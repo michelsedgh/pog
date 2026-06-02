@@ -45,6 +45,14 @@ object_valid: [B, M]
 
 The current Toyota/live configuration uses `K=8`, `M=24`, and 19 COCO-derived object classes.
 
+At inference there are no action labels and no target heatmaps. The live system
+feeds all valid RF-DETR object detections as object tokens, using the same
+`object_boxes`, `object_cls`, `object_conf`, and `object_valid` tensors. The
+model predicts the actor action logits, actor/object selection logits, and
+interaction heatmaps from the video, actor boxes, and object tokens. Do not
+preselect only laptop/book/phone, and do not apply an action-to-object rule at
+runtime.
+
 ## Transformer Token Order
 
 ```text
@@ -130,6 +138,12 @@ Drink.Fromglass  -> glass
 ```
 
 All other detected objects remain visible as context/distractors. They are not treated as positive interacted-object targets.
+
+For training, the interacted-object heatmap is a PO-GUISE+ style clip motion
+heatmap. For a strong action/object sample, each sampled frame with a matching
+positive object detection contributes a Gaussian heatmap at the detected object
+box/center, and those frame heatmaps are averaged across the clip. This is not a
+hand-contact target. It is the action-relevant object location over time.
 
 ## Losses
 

@@ -1353,6 +1353,7 @@ class ToyotaSMDataset(Dataset):
                 best_track["confs"].append(float(entry["conf"]))
                 best_track["frames"].add(int(entry["sample_pos"]))
                 best_track["last_box"] = entry["xyxy"]
+                best_track["entries"].append(entry)
             else:
                 tracks.append(
                     {
@@ -1361,6 +1362,7 @@ class ToyotaSMDataset(Dataset):
                         "confs": [float(entry["conf"])],
                         "frames": {int(entry["sample_pos"])},
                         "last_box": entry["xyxy"],
+                        "entries": [entry],
                     }
                 )
         return tracks
@@ -1372,8 +1374,15 @@ class ToyotaSMDataset(Dataset):
         )
         object_conf = torch.zeros(self.num_object_tokens, dtype=torch.float32)
         object_valid = torch.zeros(self.num_object_tokens, dtype=torch.bool)
+        object_source_entries = [[] for _ in range(self.num_object_tokens)]
         if not object_entries:
-            return object_boxes, object_cls, object_conf, object_valid
+            return (
+                object_boxes,
+                object_cls,
+                object_conf,
+                object_valid,
+                object_source_entries,
+            )
 
         candidates = []
         for track in self._object_tracks(object_entries):
@@ -1389,6 +1398,7 @@ class ToyotaSMDataset(Dataset):
                     "cls_id": int(track["cls_id"]),
                     "conf": float(confs.max()),
                     "box": mean_box,
+                    "entries": list(track["entries"]),
                 }
             )
 
@@ -1410,7 +1420,14 @@ class ToyotaSMDataset(Dataset):
             object_cls[slot] = int(candidate["cls_id"])
             object_conf[slot] = float(candidate["conf"])
             object_valid[slot] = True
-        return object_boxes, object_cls, object_conf, object_valid
+            object_source_entries[slot] = candidate["entries"]
+        return (
+            object_boxes,
+            object_cls,
+            object_conf,
+            object_valid,
+            object_source_entries,
+        )
 
     def _action_name_from_label(self, label):
         target_id = int(label) + 1
@@ -1437,12 +1454,49 @@ class ToyotaSMDataset(Dataset):
         )
         return heatmap.clamp_(0.0, 1.0)
 
+    def _interaction_motion_heatmap_from_entries(self, entries, height, width):
+        frame_heatmaps = torch.zeros(
+            (self.n_frames, *self.heatmap_size),
+            dtype=torch.float32,
+        )
+        if not entries:
+            return frame_heatmaps.max(dim=0).values
+
+        width = float(width)
+        height = float(height)
+        if width <= 0 or height <= 0:
+            raise ValueError("Toyota object heatmap dimensions must be positive")
+
+        for entry in entries:
+            sample_pos = int(entry["sample_pos"])
+            if sample_pos < 0 or sample_pos >= self.n_frames:
+                continue
+            x1, y1, x2, y2 = [float(v) for v in entry["xyxy"].tolist()]
+            box = torch.tensor(
+                [
+                    x1 / width,
+                    y1 / height,
+                    x2 / width,
+                    y2 / height,
+                ],
+                dtype=torch.float32,
+            ).clamp_(0.0, 1.0)
+            if box[2] <= box[0] or box[3] <= box[1]:
+                continue
+            frame_heatmaps[sample_pos] = torch.maximum(
+                frame_heatmaps[sample_pos],
+                self._interaction_heatmap_from_box(box),
+            )
+        return frame_heatmaps.mean(dim=0).clamp_(0.0, 1.0)
+
     def _build_interaction_targets(
         self,
         actor_target,
-        object_boxes,
         object_cls,
         object_valid,
+        object_source_entries,
+        height,
+        width,
     ):
         interaction_cls = torch.full(
             (self.num_actor_tokens,), NONE_OBJECT_ID, dtype=torch.long
@@ -1466,31 +1520,43 @@ class ToyotaSMDataset(Dataset):
             action_name = self._action_name_from_label(action_label)
             if action_name is None:
                 continue
-            positive_ids = {
+            positive_ids = [
                 int(OBJECT_TO_ID[object_name])
                 for object_name in STRONG_ACTION_OBJECTS.get(action_name, ())
                 if object_name in OBJECT_TO_ID
-            }
+            ]
             if not positive_ids:
                 continue
+            positive_id_set = set(positive_ids)
             positive_slots = [
                 idx
                 for idx in torch.nonzero(object_valid, as_tuple=False)
                 .flatten()
                 .tolist()
-                if int(object_cls[idx]) in positive_ids
+                if int(object_cls[idx]) in positive_id_set
             ]
             if not positive_slots:
                 continue
             interaction_positive_mask[slot, positive_slots] = True
-            interaction_cls[slot] = int(object_cls[positive_slots[0]])
+            for positive_id in positive_ids:
+                if any(int(object_cls[idx]) == positive_id for idx in positive_slots):
+                    interaction_cls[slot] = int(positive_id)
+                    break
             interaction_valid[slot] = True
             heatmaps = [
-                self._interaction_heatmap_from_box(object_boxes[idx])
+                self._interaction_motion_heatmap_from_entries(
+                    object_source_entries[idx],
+                    height,
+                    width,
+                )
                 for idx in positive_slots
+                if object_source_entries[idx]
             ]
-            interaction_heatmap[slot] = torch.stack(heatmaps).max(dim=0).values
-            interaction_heatmap_valid[slot] = True
+            if heatmaps:
+                interaction_heatmap[slot] = torch.stack(heatmaps).max(dim=0).values
+                interaction_heatmap_valid[slot] = bool(
+                    interaction_heatmap[slot].max() > 0
+                )
 
         return (
             interaction_cls,
@@ -1507,11 +1573,13 @@ class ToyotaSMDataset(Dataset):
         height,
         width,
     ):
-        object_boxes, object_cls, object_conf, object_valid = self._pack_object_tokens(
-            object_entries,
-            height,
-            width,
-        )
+        (
+            object_boxes,
+            object_cls,
+            object_conf,
+            object_valid,
+            object_source_entries,
+        ) = self._pack_object_tokens(object_entries, height, width)
         (
             interaction_cls,
             interaction_valid,
@@ -1520,9 +1588,11 @@ class ToyotaSMDataset(Dataset):
             interaction_heatmap_valid,
         ) = self._build_interaction_targets(
             actor_target,
-            object_boxes,
             object_cls,
             object_valid,
+            object_source_entries,
+            height,
+            width,
         )
         return {
             "object_boxes": object_boxes,

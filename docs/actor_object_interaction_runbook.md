@@ -31,6 +31,9 @@ class rule. Object evidence must change the actor token that the normal
 - There is no all-visible-object heatmap loss. Object supervision is
   concentrated on actor-conditioned interacted-object heatmaps for reliable
   action/object pairs.
+- The interacted-object target heatmap is a clip motion heatmap: per-frame
+  positive object detections are converted to Gaussian object-location heatmaps
+  and averaged across the sampled clip, matching the PO-GUISE+ training style.
 - Positive-erased and shuffled object modes are validation diagnostics only.
   There is no sufficiency, class-swap, group-CE, counterfactual training loss,
   objectless consistency loss, specialist, or logit-residual path.
@@ -48,6 +51,12 @@ Use the Colab setup cell unchanged. Later cells read:
 That file must export `REPO_DIR`, `DATA_DIR`, `SKELETON_ZIP`,
 `RESUME_CKPT_PATH`, `OBJECT_DETECTOR_CACHE`, `HARD_NEGATIVE_MANIFEST`,
 `FRAME_COUNT_CACHE`, and `TOYOTA_FRAMES_DIR`.
+
+At inference, feed the same video/actor/object tensors as training: all valid
+RF-DETR object detections become object tokens. Do not feed target heatmaps, do
+not preselect only the object classes we supervise, and do not use action labels
+or action-to-object rules at runtime. The model predicts action logits,
+actor/object selection, and interaction heatmaps itself.
 
 ## Preflight Checks
 
