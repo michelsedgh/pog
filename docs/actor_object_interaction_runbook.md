@@ -27,8 +27,9 @@ class rule. Object evidence must change the actor token that the normal
   `x_actor`.
 - `positive_erased` now removes positive object tokens and erases the positive
   object patch-grid features before the transformer.
-- The training loss can include true-logit sensitivity and group-margin
-  sensitivity for object-sensitive action groups.
+- The only counterfactual training branches are positive-erased and shuffled
+  objects. There is no sufficiency, class-swap, group-CE, specialist, or
+  logit-residual path.
 - Invalid object tokens remain masked in transformer attention and neutral in
   token construction.
 
@@ -90,18 +91,11 @@ Important flags:
 --lr_head_hm 5e-5
 --object_decoder_update_gate_init 0.02
 --object_decoder_ffn_gate_init 0.02
---object_interaction_loss_weight 0.10
---object_interaction_heatmap_weight 50
+--object_heatmap_weight 25
+--object_interaction_loss_weight 0.05
+--object_interaction_heatmap_weight 25
 --object_counterfactual_margin_weight 0.05
---object_action_sensitivity_weight 0.10
---object_action_sensitivity_margin 0.05
---object_action_group_sensitivity_weight 0.10
---object_action_group_sensitivity_margin 0.05
---object_sufficiency_weight 0.10
---object_class_swap_weight 0.10
---object_class_swap_margin 0.05
---object_group_ce_weight 0.10
---object_objectless_consistency_weight 0.02
+--object_objectless_consistency_weight 0.0
 --max_epochs 2
 --t_max_scheduler 2
 ```
@@ -125,12 +119,12 @@ obviously broken. Use a short run:
 --t_max_scheduler 2
 ```
 
-Keep the sensitivity losses on. Stop early if objects-on falls below both
+Keep the same simple object losses on. Stop early if objects-on falls below both
 objects-off and shuffled.
 
 If CUDA memory is tight, prefer `--batch_size 32 --accum_grad_batches 2`.
-The object-sufficient and class-swapped branches are real training branches, so
-they need activation memory.
+Do not add extra object branches to recover memory or metrics; reduce batch size
+first.
 
 ## Metrics That Matter
 
@@ -173,10 +167,9 @@ python3 object_actor_live/summarize_object_metrics.py \
 
 The summarizer prints global on/off/shuffled metrics, object-interaction margins,
 selection mass/accuracy, object IoU/recall, and per-class/per-group object
-ablations for the object-sensitive actions. New runs also include
-`objects_sufficient` and `objects_class_swapped` columns. For object-sensitive
-classes, a useful checkpoint should keep `objects_sufficient` competitive with
-`objects_off`, and `objects_on` should beat the class-swapped view.
+ablations for the object-sensitive actions. A useful checkpoint should show
+positive interaction margins and per-class object gains without letting shuffled
+objects beat real objects on the target groups.
 
 ## Live Tensor Sensitivity Test
 
@@ -199,7 +192,6 @@ objects_off
 laptop_only
 positive_erased_laptop
 positive_erased_laptop_visual
-laptop_class_changed_to_book
 laptop_box_moved_away
 ```
 

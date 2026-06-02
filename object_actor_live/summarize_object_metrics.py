@@ -109,6 +109,24 @@ def _epoch_frame(metrics: Path) -> pd.DataFrame:
     epoch_df = df.groupby("epoch", as_index=False).agg(
         {col: _last_nonnull for col in df.columns if col != "epoch"}
     )
+    complete_cols = [
+        col
+        for col in (
+            "val_acc_macro_objects_on",
+            "val_f1_objects_on",
+            "val_object_interaction_margin_gain_on_vs_positive_erased",
+            "val_object_interaction_margin_gain_on_vs_shuffled",
+        )
+        if col in epoch_df.columns
+    ]
+    if complete_cols:
+        complete = epoch_df[complete_cols].notna().any(axis=1)
+        epoch_df = epoch_df[complete].reset_index(drop=True)
+    if len(epoch_df) == 0:
+        raise SystemExit(
+            f"No complete validation epochs found in {metrics}. "
+            "Wait for validation to finish before summarizing."
+        )
     for base, off, shuffled, gain_off, gain_shuf in [
         (
             "val_acc_macro_objects_on",
@@ -172,9 +190,7 @@ def _row_table(row: pd.Series, names: Iterable[str], prefix: str):
         off = _value(row, f"{prefix}_{name}_objects_off")
         erased = _value(row, f"{prefix}_{name}_objects_positive_erased")
         shuffled = _value(row, f"{prefix}_{name}_objects_shuffled")
-        sufficient = _value(row, f"{prefix}_{name}_objects_sufficient")
-        class_swapped = _value(row, f"{prefix}_{name}_objects_class_swapped")
-        if all(pd.isna(v) for v in (on, off, erased, shuffled, sufficient, class_swapped)):
+        if all(pd.isna(v) for v in (on, off, erased, shuffled)):
             continue
         rows.append(
             {
@@ -183,13 +199,9 @@ def _row_table(row: pd.Series, names: Iterable[str], prefix: str):
                 "off": off,
                 "erased": erased,
                 "shuf": shuffled,
-                "suff": sufficient,
-                "swap": class_swapped,
                 "on-off": on - off,
                 "on-erased": on - erased,
                 "on-shuf": on - shuffled,
-                "suff-off": sufficient - off,
-                "on-swap": on - class_swapped,
             }
         )
     if not rows:
@@ -200,13 +212,9 @@ def _row_table(row: pd.Series, names: Iterable[str], prefix: str):
                 "off",
                 "erased",
                 "shuf",
-                "suff",
-                "swap",
                 "on-off",
                 "on-erased",
                 "on-shuf",
-                "suff-off",
-                "on-swap",
             ]
         )
     return pd.DataFrame(rows)
@@ -260,14 +268,6 @@ def _print_warnings(class_df: pd.DataFrame, group_df: pd.DataFrame):
             warnings.append(f"{name}: shuffled beats objects_on by {-item['on-shuf']:.4f}")
         if not pd.isna(item["on-erased"]) and item["on-erased"] < -0.01:
             warnings.append(f"{name}: positive-erased beats objects_on by {-item['on-erased']:.4f}")
-        if "suff-off" in item and not pd.isna(item["suff-off"]) and item["suff-off"] < -0.02:
-            warnings.append(
-                f"{name}: object-sufficient view is below objects_off by {-item['suff-off']:.4f}"
-            )
-        if "on-swap" in item and not pd.isna(item["on-swap"]) and item["on-swap"] < -0.01:
-            warnings.append(
-                f"{name}: class-swapped view beats objects_on by {-item['on-swap']:.4f}"
-            )
     if warnings:
         print("\nRED FLAGS:")
         for warning in warnings:

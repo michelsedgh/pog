@@ -154,16 +154,12 @@ Frozen object-token warmup:
 - `--object_warmup_freeze_actor_path 1`
 - `--object_unfreeze_last_blocks 2`
 - actor classifier, presence head, and global classifier are frozen
-- `--object_heatmap_weight 50`
-- `--object_interaction_loss_weight 0.10`
-- `--object_interaction_heatmap_weight 50`
+- `--object_heatmap_weight 25`
+- `--object_interaction_loss_weight 0.05`
+- `--object_interaction_heatmap_weight 25`
 - `--object_counterfactual_margin_weight 0.05`
 - `--object_counterfactual_margin 0.05`
-- `--object_action_sensitivity_weight 0.10`
-- `--object_action_sensitivity_margin 0.05`
-- `--object_action_group_sensitivity_weight 0.10`
-- `--object_action_group_sensitivity_margin 0.05`
-- `--object_objectless_consistency_weight 0.02`
+- `--object_objectless_consistency_weight 0.0`
 - `--kp_loss_weight 1000`
 - `--lr 5e-7`
 - `--lr_head 5e-5`

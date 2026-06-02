@@ -640,7 +640,7 @@ class POGUISE(pl.LightningModule):
         parser.add_argument(
             "--object_interaction_heatmap_weight",
             type=float,
-            default=50.0,
+            default=25.0,
         )
         parser.add_argument("--ret_feat", type=int, default=0)
         parser.add_argument("--linear_probe", type=int, default=0)
