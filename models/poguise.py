@@ -313,7 +313,7 @@ class POGUISE(pl.LightningModule):
                 state_dict = torch.load("vit_b_k710_dl_from_giant.pth")
             else:
                 state_dict = torch.hub.load_state_dict_from_url(
-                    "https://pjlab-gvm-data.oss-cn-shanghai.aliyuncs.com/internvideo/distill/vit_b_k710_dl_from_giant.pth",
+                    "https://huggingface.co/OpenGVLab/VideoMAE2/resolve/main/distill/vit_b_k710_dl_from_giant.pth",
                 )
             load_state_dict(self.net, state_dict["module"])
         elif self.hparams.pretrained == "small":
