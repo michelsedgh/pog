@@ -452,6 +452,31 @@ class HeatmapModule(pl.LightningModule):
                 int(mask.sum().item()),
             )
 
+    def _append_nash_mtl_params(self, params):
+        if not (
+            self.model.hparams.grad_weights
+            and (self.model.hparams.n_landmarks > 0 or self.actor_interaction_heatmaps)
+        ):
+            return
+        if NashMTL is None:
+            raise ImportError("cvxpy is required when grad_weights is enabled")
+        self.grad_weight = NashMTL(
+            n_tasks=2,
+            update_weights_every=int(
+                self.model.hparams.get("nash_update_weights_every", 20)
+            ),
+            max_norm=float(self.model.hparams.get("nash_max_norm", 1.0)),
+            device=self.model.device,
+        )
+        nash_params = list(self.grad_weight.parameters())
+        if nash_params:
+            params.append(
+                {
+                    "params": nash_params,
+                    "lr": 0.025,
+                },
+            )
+
     def configure_optimizers(self):
         # We will support Adam or SGD as optimizers.
         if self.model.hparams.freeze_backbone:
@@ -491,6 +516,7 @@ class HeatmapModule(pl.LightningModule):
                     "No trainable parameters selected. For interaction warmup, set "
                     "--lr_head_hm > 0 or --interaction_unfreeze_last_blocks > 0."
                 )
+            self._append_nash_mtl_params(params)
             optimizer = optim.AdamW(params)
         else:
             if (
@@ -542,27 +568,7 @@ class HeatmapModule(pl.LightningModule):
                     },
                 )
 
-            if self.model.hparams.grad_weights and (
-                self.model.hparams.n_landmarks > 0 or self.actor_interaction_heatmaps
-            ):
-                if NashMTL is None:
-                    raise ImportError("cvxpy is required when grad_weights is enabled")
-                self.grad_weight = NashMTL(
-                    n_tasks=2,
-                    update_weights_every=int(
-                        self.model.hparams.get("nash_update_weights_every", 20)
-                    ),
-                    max_norm=float(self.model.hparams.get("nash_max_norm", 1.0)),
-                    device=self.model.device,
-                )
-                nash_params = list(self.grad_weight.parameters())
-                if nash_params:
-                    params.append(
-                        {
-                            "params": nash_params,
-                            "lr": 0.025,
-                        },
-                    )
+            self._append_nash_mtl_params(params)
             if self.model.hparams.deepspeed_optim:
                 if DeepSpeedCPUAdam is None:
                     raise ImportError(
