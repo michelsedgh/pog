@@ -47,6 +47,12 @@ class HeatmapModule(pl.LightningModule):
         self.poguiseplus_heatmap_loss_weight = float(
             hparams.get("poguiseplus_heatmap_loss_weight", 1.0)
         )
+        self.poguiseplus_pose_heatmap_weight = float(
+            hparams.get("poguiseplus_pose_heatmap_weight", 1.0)
+        )
+        self.poguiseplus_interaction_heatmap_weight = float(
+            hparams.get("poguiseplus_interaction_heatmap_weight", 1.0)
+        )
         self.poguiseplus_heatmap_log_eps = float(
             hparams.get("poguiseplus_heatmap_log_eps", 1e-6)
         )
@@ -801,12 +807,17 @@ class HeatmapModule(pl.LightningModule):
             if loss_pose_frobenius is None and loss_interaction_frobenius is None:
                 raise RuntimeError(
                     "Actor PO-GUISE+ loss requires pose or interaction heatmaps"
-                )
+            )
             heatmap_terms = []
             if loss_pose_frobenius is not None:
-                heatmap_terms.append(loss_pose_frobenius)
+                heatmap_terms.append(
+                    loss_pose_frobenius * self.poguiseplus_pose_heatmap_weight
+                )
             if loss_interaction_frobenius is not None:
-                heatmap_terms.append(loss_interaction_frobenius)
+                heatmap_terms.append(
+                    loss_interaction_frobenius
+                    * self.poguiseplus_interaction_heatmap_weight
+                )
             loss_heatmap_raw = torch.stack(heatmap_terms).sum()
             loss_heatmap_task = torch.log(
                 loss_heatmap_raw + self.poguiseplus_heatmap_log_eps

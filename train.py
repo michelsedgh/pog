@@ -373,6 +373,10 @@ def build_parser():
     parser.add_argument("--nash_update_weights_every", type=int, default=20)
     parser.add_argument("--nash_max_norm", type=float, default=1.0)
     parser.add_argument("--poguiseplus_heatmap_loss_weight", type=float, default=1.0)
+    parser.add_argument("--poguiseplus_pose_heatmap_weight", type=float, default=1.0)
+    parser.add_argument(
+        "--poguiseplus_interaction_heatmap_weight", type=float, default=1.0
+    )
     parser.add_argument("--poguiseplus_heatmap_log_eps", type=float, default=1e-6)
     parser.add_argument("--deepspeed_optim", type=int, default=0)
     parser.add_argument("--kp_only", type=int, default=0)

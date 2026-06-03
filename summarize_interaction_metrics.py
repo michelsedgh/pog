@@ -13,6 +13,8 @@ CORE_COLUMNS = [
     "val_loss_interaction_heatmap",
     "val_loss_heatmap_log",
     "val_loss_heatmap_frobenius",
+    "val_loss_pose_heatmap_frobenius",
+    "val_loss_interaction_heatmap_frobenius",
     "train_nash_weight_action",
     "train_nash_weight_heatmap",
     "val_interaction_teacher_slot_rate",
@@ -146,7 +148,9 @@ def print_row(title, row):
     print(
         "poguise+ heatmap loss: "
         f"log {metric(row, 'val_loss_heatmap_log'):.4f}, "
-        f"fro {metric(row, 'val_loss_heatmap_frobenius'):.4f}"
+        f"fro {metric(row, 'val_loss_heatmap_frobenius'):.4f}, "
+        f"pose_fro {metric(row, 'val_loss_pose_heatmap_frobenius'):.4f}, "
+        f"interaction_fro {metric(row, 'val_loss_interaction_heatmap_frobenius'):.4f}"
     )
     print(
         "nash weights: "
