@@ -18,7 +18,10 @@ CORE_COLUMNS = [
     "val_interaction_teacher_slot_rate",
     "val_interaction_teacher_slot_count",
     "val_interaction_heatmap_iou",
+    "val_interaction_heatmap_soft_iou",
     "val_interaction_heatmap_positive_mean",
+    "val_interaction_heatmap_pred_max",
+    "val_interaction_heatmap_target_max",
     "val_interaction_heatmap_center_l2",
     "interaction_score",
 ]
@@ -96,15 +99,26 @@ def last_nonnull(series):
 
 
 def metric(row, name):
-    return row[name] if name in row.index else float("nan")
+    for candidate in (name, f"{name}_epoch", f"{name}_step"):
+        if candidate in row.index:
+            return row[candidate]
+    return float("nan")
+
+
+def df_metric(df, name, default):
+    for candidate in (name, f"{name}_epoch", f"{name}_step"):
+        if candidate in df.columns:
+            return df[candidate].fillna(default)
+    return default
 
 
 def compute_interaction_score(df):
-    iou = df.get("val_interaction_heatmap_iou", 0.0).fillna(0.0)
-    pos = df.get("val_interaction_heatmap_positive_mean", 0.0).fillna(0.0)
-    center = df.get("val_interaction_heatmap_center_l2", 56.0).fillna(56.0)
-    action = df.get("val_f1", 0.0).fillna(0.0)
-    return iou + pos - 0.02 * center + 0.25 * action
+    iou = df_metric(df, "val_interaction_heatmap_iou", 0.0)
+    soft_iou = df_metric(df, "val_interaction_heatmap_soft_iou", 0.0)
+    pos = df_metric(df, "val_interaction_heatmap_positive_mean", 0.0)
+    center = df_metric(df, "val_interaction_heatmap_center_l2", 56.0)
+    action = df_metric(df, "val_f1", 0.0)
+    return iou + soft_iou + pos - 0.02 * center + 0.25 * action
 
 
 def print_row(title, row):
@@ -118,7 +132,10 @@ def print_row(title, row):
         "interaction heatmap: "
         f"loss {metric(row, 'val_loss_interaction_heatmap'):.6f}, "
         f"iou {metric(row, 'val_interaction_heatmap_iou'):.4f}, "
+        f"soft_iou {metric(row, 'val_interaction_heatmap_soft_iou'):.4f}, "
         f"positive {metric(row, 'val_interaction_heatmap_positive_mean'):.4f}, "
+        f"pred_max {metric(row, 'val_interaction_heatmap_pred_max'):.4f}, "
+        f"target_max {metric(row, 'val_interaction_heatmap_target_max'):.4f}, "
         f"center_l2 {metric(row, 'val_interaction_heatmap_center_l2'):.2f}"
     )
     print(

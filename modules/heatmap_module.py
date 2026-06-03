@@ -346,6 +346,32 @@ class HeatmapModule(pl.LightningModule):
         target_bin = target_bin[target_visible]
         count = int(target_visible.sum().item())
 
+        pred_max = pred.flatten(1).max(dim=1).values
+        target_max = target.flatten(1).max(dim=1).values
+        self._log_scalar(
+            f"{stage}_interaction_heatmap_pred_max",
+            pred_max.mean(),
+            count,
+        )
+        self._log_scalar(
+            f"{stage}_interaction_heatmap_target_max",
+            target_max.mean(),
+            count,
+        )
+
+        soft_intersection = torch.minimum(pred, target).flatten(1).sum(dim=1)
+        soft_union = torch.maximum(pred, target).flatten(1).sum(dim=1)
+        valid_soft_union = soft_union > 0
+        if valid_soft_union.any():
+            self._log_scalar(
+                f"{stage}_interaction_heatmap_soft_iou",
+                (
+                    soft_intersection[valid_soft_union]
+                    / soft_union[valid_soft_union].clamp_min(1e-6)
+                ).mean(),
+                count,
+            )
+
         intersection = (pred_bin & target_bin).float().flatten(1).sum(dim=1)
         union = (pred_bin | target_bin).float().flatten(1).sum(dim=1)
         valid_union = union > 0
