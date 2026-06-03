@@ -129,6 +129,30 @@ class ToyotaSMDataset(Dataset):
         )
         if self.actor_interaction_heatmaps and not self.actor_prompt:
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
+        self.scene_object_tokens = bool(kwargs.get("scene_object_tokens", 0))
+        if self.scene_object_tokens and not self.actor_prompt:
+            raise ValueError("scene_object_tokens requires actor_prompt")
+        self.num_scene_object_tokens = int(kwargs.get("num_scene_object_tokens", 32))
+        if self.num_scene_object_tokens <= 0:
+            raise ValueError("num_scene_object_tokens must be positive")
+        self.object_token_dropout_prob = float(
+            kwargs.get("object_token_dropout_prob", 0.0)
+        )
+        if not 0 <= self.object_token_dropout_prob <= 1:
+            raise ValueError("object_token_dropout_prob must be in [0, 1]")
+        self.object_token_class_dropout_prob = float(
+            kwargs.get("object_token_class_dropout_prob", 0.0)
+        )
+        if not 0 <= self.object_token_class_dropout_prob <= 1:
+            raise ValueError("object_token_class_dropout_prob must be in [0, 1]")
+        self.object_token_box_jitter = float(kwargs.get("object_token_box_jitter", 0.0))
+        if self.object_token_box_jitter < 0:
+            raise ValueError("object_token_box_jitter must be >= 0")
+        self.object_token_confidence_noise = float(
+            kwargs.get("object_token_confidence_noise", 0.0)
+        )
+        if self.object_token_confidence_noise < 0:
+            raise ValueError("object_token_confidence_noise must be >= 0")
         self.interaction_teacher_enabled = (
             self.actor_interaction_heatmaps and self.set_type != "test"
         )
@@ -307,7 +331,7 @@ class ToyotaSMDataset(Dataset):
         self.data_df["label"] -= 1
         self.y = torch.tensor(self.data_df.label.values, dtype=torch.long)
         self._object_cache = {}
-        if self.interaction_teacher_enabled:
+        if self.interaction_teacher_enabled or self.scene_object_tokens:
             self._object_cache = self._load_object_cache(set(self.data_df.file_id))
         self.class_to_indices = {
             int(label): np.flatnonzero(self.y.numpy() == int(label))
@@ -447,6 +471,10 @@ class ToyotaSMDataset(Dataset):
         parser.add_argument("--object_camera_allowlist", type=str, default=None)
         parser.add_argument("--object_ignore_regions", type=str, default=None)
         parser.add_argument("--object_conf_threshold", type=float, default=0.25)
+        parser.add_argument("--object_token_dropout_prob", type=float, default=0.0)
+        parser.add_argument("--object_token_class_dropout_prob", type=float, default=0.0)
+        parser.add_argument("--object_token_box_jitter", type=float, default=0.0)
+        parser.add_argument("--object_token_confidence_noise", type=float, default=0.0)
         parser.add_argument("--interaction_heatmap_size", type=int, default=56)
         parser.add_argument("--object_track_iou_threshold", type=float, default=0.2)
         parser.add_argument("--interaction_heatmap_sigma", type=float, default=1.5)
@@ -960,7 +988,7 @@ class ToyotaSMDataset(Dataset):
             )
             action_name = (
                 self._action_name_from_label(int(label))
-                if self.interaction_teacher_enabled
+                if (self.interaction_teacher_enabled or self.scene_object_tokens)
                 else None
             )
             if self.interaction_teacher_enabled and self.interaction_guided_sampling:
@@ -975,12 +1003,12 @@ class ToyotaSMDataset(Dataset):
                 )
             object_entries = (
                 self._sample_object_entries(file_id, frames_idx, action_name)
-                if self.interaction_teacher_enabled
+                if (self.interaction_teacher_enabled or self.scene_object_tokens)
                 else []
             )
             object_keypoints = (
                 self._object_entries_to_keypoints(object_entries, len(frames_idx))
-                if self.interaction_teacher_enabled
+                if object_entries
                 else None
             )
             frames = self._read_sampled_frames(file_id, frames_idx)
@@ -1020,7 +1048,7 @@ class ToyotaSMDataset(Dataset):
                     height=frames.shape[2],
                     width=frames.shape[3],
                 )
-                if self.interaction_teacher_enabled
+                if object_entries
                 else []
             )
             actor_target = None
@@ -1036,7 +1064,7 @@ class ToyotaSMDataset(Dataset):
                     if i_try < self._num_retries - 1:
                         continue
                     raise ValueError(f"No valid actor box found for {file_id}")
-                if self.interaction_teacher_enabled:
+                if self.interaction_teacher_enabled or self.scene_object_tokens:
                     actor_target.update(
                         self._build_interaction_target(
                             object_entries,
@@ -1300,6 +1328,15 @@ class ToyotaSMDataset(Dataset):
                     canvas_width,
                 )
             )
+        if self.scene_object_tokens:
+            output.update(
+                self._compose_synthetic_scene_object_target(
+                    targets,
+                    slots,
+                    bounds,
+                    canvas_width,
+                )
+            )
         return output
 
     def _compose_synthetic_heatmaps(self, heatmaps, bounds, nearest=False, combine="sum"):
@@ -1395,6 +1432,64 @@ class ToyotaSMDataset(Dataset):
             "interaction_heatmap_valid": interaction_heatmap_valid,
             "interaction_heatmap_positive_valid": interaction_heatmap_positive_valid,
         }
+
+    def _compose_synthetic_scene_object_target(self, targets, slots, bounds, canvas_width):
+        output = self._empty_scene_object_target()
+        interaction_object_index = torch.zeros(
+            self.num_actor_tokens,
+            dtype=torch.long,
+        )
+        interaction_object_index_valid = torch.zeros(
+            self.num_actor_tokens,
+            dtype=torch.bool,
+        )
+
+        dst_slot = 0
+        selection_remap = {}
+        for target_idx, (target, (x0, x1)) in enumerate(zip(targets, bounds)):
+            if "object_valid" not in target:
+                continue
+            src_valid = target["object_valid"].bool()
+            panel_x0 = x0 / float(canvas_width)
+            panel_w = (x1 - x0) / float(canvas_width)
+            for src_slot in torch.nonzero(src_valid, as_tuple=False).flatten():
+                if dst_slot >= self.num_scene_object_tokens:
+                    break
+                src_slot = int(src_slot)
+                src_box = target["object_boxes"][src_slot]
+                output["object_boxes"][dst_slot] = torch.tensor(
+                    [
+                        panel_x0 + src_box[0] * panel_w,
+                        src_box[1],
+                        panel_x0 + src_box[2] * panel_w,
+                        src_box[3],
+                    ],
+                    dtype=torch.float32,
+                ).clamp_(0.0, 1.0)
+                output["object_classes"][dst_slot] = target["object_classes"][src_slot]
+                output["object_confs"][dst_slot] = target["object_confs"][src_slot]
+                output["object_valid"][dst_slot] = True
+                selection_remap[(target_idx, src_slot + 1)] = dst_slot + 1
+                dst_slot += 1
+
+        for target_idx, (target, slot) in enumerate(zip(targets, slots)):
+            if (
+                "interaction_object_index" not in target
+                or "interaction_object_index_valid" not in target
+            ):
+                continue
+            slot = int(slot)
+            src_index = int(target["interaction_object_index"][slot])
+            if not bool(target["interaction_object_index_valid"][slot]):
+                continue
+            remapped = selection_remap.get((target_idx, src_index), 0)
+            if remapped > 0:
+                interaction_object_index[slot] = int(remapped)
+                interaction_object_index_valid[slot] = True
+
+        output["interaction_object_index"] = interaction_object_index
+        output["interaction_object_index_valid"] = interaction_object_index_valid
+        return output
 
     def _box_iou(self, box_a, box_b):
         ax1, ay1, ax2, ay2 = [float(v) for v in box_a]
@@ -1629,10 +1724,151 @@ class ToyotaSMDataset(Dataset):
             return False
         return True
 
+    def _empty_scene_object_target(self):
+        return {
+            "object_boxes": torch.zeros(
+                (self.num_scene_object_tokens, 4),
+                dtype=torch.float32,
+            ),
+            "object_classes": torch.full(
+                (self.num_scene_object_tokens,),
+                NONE_OBJECT_ID,
+                dtype=torch.long,
+            ),
+            "object_confs": torch.zeros(
+                self.num_scene_object_tokens,
+                dtype=torch.float32,
+            ),
+            "object_valid": torch.zeros(
+                self.num_scene_object_tokens,
+                dtype=torch.bool,
+            ),
+        }
+
+    def _scene_object_track_sort_key(self, track):
+        max_conf = max(float(conf) for conf in track["confs"]) if track["confs"] else 0.0
+        mean_conf = (
+            float(np.mean([float(conf) for conf in track["confs"]]))
+            if track["confs"]
+            else 0.0
+        )
+        coverage = len(track["frames"]) / float(max(self.n_frames, 1))
+        return (-max_conf, -mean_conf, -coverage, int(track["cls_id"]))
+
+    def _track_normalized_box(self, track, height, width):
+        boxes = []
+        weights = []
+        for entry in track["entries"]:
+            box = self._normalized_object_box(entry, height, width)
+            if box[2] <= box[0] or box[3] <= box[1]:
+                continue
+            boxes.append(box)
+            weights.append(max(float(entry.get("conf", 0.0)), 1e-4))
+        if not boxes:
+            return None
+        box_tensor = torch.stack(boxes, dim=0)
+        weight = torch.tensor(weights, dtype=torch.float32)
+        weight = weight / weight.sum().clamp_min(1e-6)
+        return (box_tensor * weight[:, None]).sum(dim=0).clamp_(0.0, 1.0)
+
+    def _jitter_object_box(self, box):
+        if self.object_token_box_jitter <= 0:
+            return box
+        x1, y1, x2, y2 = [float(v) for v in box.tolist()]
+        width = max(x2 - x1, 1e-4)
+        height = max(y2 - y1, 1e-4)
+        cx = (x1 + x2) * 0.5
+        cy = (y1 + y2) * 0.5
+        jitter = float(self.object_token_box_jitter)
+        cx += np.random.uniform(-jitter, jitter) * width
+        cy += np.random.uniform(-jitter, jitter) * height
+        scale = np.random.uniform(max(0.2, 1.0 - jitter), 1.0 + jitter)
+        width *= scale
+        height *= scale
+        return torch.tensor(
+            [
+                max(0.0, cx - width * 0.5),
+                max(0.0, cy - height * 0.5),
+                min(1.0, cx + width * 0.5),
+                min(1.0, cy + height * 0.5),
+            ],
+            dtype=torch.float32,
+        )
+
+    def _build_scene_object_target(self, object_tracks, height, width):
+        target = self._empty_scene_object_target()
+        track_to_slot = {}
+        sorted_tracks = sorted(object_tracks, key=self._scene_object_track_sort_key)
+        for slot, track in enumerate(sorted_tracks[: self.num_scene_object_tokens]):
+            box = self._track_normalized_box(track, height, width)
+            if box is None or box[2] <= box[0] or box[3] <= box[1]:
+                continue
+            target["object_boxes"][slot] = box
+            target["object_classes"][slot] = int(track["cls_id"])
+            target["object_confs"][slot] = float(
+                np.mean([float(conf) for conf in track["confs"]])
+            )
+            target["object_valid"][slot] = True
+            track_to_slot[id(track)] = int(slot)
+        return target, track_to_slot
+
+    def _corrupt_scene_object_target(self, target, selected_indices):
+        if self.set_type != "train":
+            return target, selected_indices
+        if not target["object_valid"].any():
+            return target, selected_indices
+
+        selected_indices = selected_indices.clone()
+        valid = target["object_valid"].clone()
+        if self.object_token_dropout_prob > 0:
+            drop = (
+                torch.rand(valid.shape, dtype=torch.float32)
+                < float(self.object_token_dropout_prob)
+            ) & valid
+            valid = valid & ~drop
+            target["object_valid"] = valid
+            dropped_selection = (
+                (selected_indices > 0)
+                & drop[selected_indices.clamp_min(1) - 1]
+            )
+            selected_indices[dropped_selection] = 0
+
+        if self.object_token_class_dropout_prob > 0:
+            class_drop = (
+                torch.rand(valid.shape, dtype=torch.float32)
+                < float(self.object_token_class_dropout_prob)
+            ) & valid
+            target["object_classes"][class_drop] = NONE_OBJECT_ID
+
+        if self.object_token_box_jitter > 0:
+            for slot in torch.nonzero(valid, as_tuple=False).flatten():
+                slot = int(slot)
+                jittered = self._jitter_object_box(target["object_boxes"][slot])
+                if jittered[2] > jittered[0] and jittered[3] > jittered[1]:
+                    target["object_boxes"][slot] = jittered
+
+        if self.object_token_confidence_noise > 0:
+            noise = (
+                torch.rand(target["object_confs"].shape, dtype=torch.float32) * 2.0
+                - 1.0
+            ) * float(self.object_token_confidence_noise)
+            target["object_confs"] = (target["object_confs"] + noise).clamp_(0.0, 1.0)
+            target["object_confs"] = target["object_confs"] * valid.float()
+
+        target["object_classes"] = torch.where(
+            valid,
+            target["object_classes"],
+            torch.full_like(target["object_classes"], NONE_OBJECT_ID),
+        )
+        target["object_boxes"] = target["object_boxes"] * valid.float().unsqueeze(-1)
+        target["object_confs"] = target["object_confs"] * valid.float()
+        return target, selected_indices
+
     def _build_interaction_targets(
         self,
         actor_target,
-        object_entries,
+        object_tracks,
+        track_to_object_slot,
         height,
         width,
     ):
@@ -1652,7 +1888,14 @@ class ToyotaSMDataset(Dataset):
             (self.num_actor_tokens, self.num_object_classes),
             dtype=torch.bool,
         )
-        object_tracks = self._object_tracks(object_entries)
+        interaction_object_index = torch.zeros(
+            self.num_actor_tokens,
+            dtype=torch.long,
+        )
+        interaction_object_index_valid = torch.zeros(
+            self.num_actor_tokens,
+            dtype=torch.bool,
+        )
 
         for slot in torch.nonzero(actor_target["valid"], as_tuple=False).flatten():
             slot = int(slot)
@@ -1708,6 +1951,9 @@ class ToyotaSMDataset(Dataset):
                 continue
             interaction_cls[slot] = int(best_track["cls_id"])
             interaction_valid[slot] = True
+            if id(best_track) in track_to_object_slot:
+                interaction_object_index[slot] = int(track_to_object_slot[id(best_track)]) + 1
+                interaction_object_index_valid[slot] = True
             object_cls = int(best_track["cls_id"])
             interaction_heatmap[
                 slot, object_cls
@@ -1736,6 +1982,8 @@ class ToyotaSMDataset(Dataset):
             interaction_heatmap,
             interaction_heatmap_valid,
             interaction_heatmap_positive_valid,
+            interaction_object_index,
+            interaction_object_index_valid,
         )
 
     def _build_interaction_target(
@@ -1745,25 +1993,52 @@ class ToyotaSMDataset(Dataset):
         height,
         width,
     ):
+        object_tracks = self._object_tracks(object_entries)
+        scene_object_target = {}
+        track_to_object_slot = {}
+        if self.scene_object_tokens:
+            scene_object_target, track_to_object_slot = self._build_scene_object_target(
+                object_tracks,
+                height,
+                width,
+            )
         (
             interaction_cls,
             interaction_valid,
             interaction_heatmap,
             interaction_heatmap_valid,
             interaction_heatmap_positive_valid,
+            interaction_object_index,
+            interaction_object_index_valid,
         ) = self._build_interaction_targets(
             actor_target,
-            object_entries,
+            object_tracks,
+            track_to_object_slot,
             height,
             width,
         )
-        return {
+        if self.scene_object_tokens:
+            scene_object_target, interaction_object_index = (
+                self._corrupt_scene_object_target(
+                    scene_object_target,
+                    interaction_object_index,
+                )
+            )
+            interaction_object_index_valid = (
+                interaction_object_index_valid & (interaction_object_index > 0)
+            )
+
+        output = {
             "interaction_cls": interaction_cls,
             "interaction_valid": interaction_valid,
             "interaction_heatmap": interaction_heatmap,
             "interaction_heatmap_valid": interaction_heatmap_valid,
             "interaction_heatmap_positive_valid": interaction_heatmap_positive_valid,
+            "interaction_object_index": interaction_object_index,
+            "interaction_object_index_valid": interaction_object_index_valid,
         }
+        output.update(scene_object_target)
+        return output
 
     def _build_actor_target(self, keypoints, label, height, width, slot=None):
         if keypoints is None:
@@ -2168,7 +2443,7 @@ class ToyotaSMDataset(Dataset):
     def _load_object_cache(self, file_ids):
         if not self.object_detector_cache:
             raise ValueError(
-                "actor_interaction_heatmaps requires --object_detector_cache"
+                "actor interaction/object-token training requires --object_detector_cache"
             )
         if not os.path.exists(self.object_detector_cache):
             raise FileNotFoundError(self.object_detector_cache)

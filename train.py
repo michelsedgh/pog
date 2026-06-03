@@ -201,6 +201,46 @@ def _initialize_actor_prompt_from_checkpoint(module, checkpoint):
                 torch.nn.init.zeros_(last.bias)
                 initialized.append("bbox_mlp_final")
 
+        if hasattr(net, "object_slot_embed") and not _checkpoint_has_key(
+            checkpoint, "model.net.object_slot_embed"
+        ):
+            net.object_slot_embed.zero_()
+            initialized.append("object_slot_embed")
+
+        if hasattr(net, "object_valid_embed") and not _checkpoint_has_key(
+            checkpoint, "model.net.object_valid_embed.weight"
+        ):
+            net.object_valid_embed.weight.zero_()
+            initialized.append("object_valid_embed")
+
+        if hasattr(net, "object_cls_embed"):
+            none_id = getattr(
+                net,
+                "none_object_id",
+                net.object_cls_embed.num_embeddings - 1,
+            )
+            if 0 <= int(none_id) < net.object_cls_embed.weight.shape[0]:
+                net.object_cls_embed.weight[int(none_id)].zero_()
+                initialized.append("object_cls_embed_none_zero")
+
+        if hasattr(net, "object_bbox_mlp") and not _checkpoint_has_key(
+            checkpoint, "model.net.object_bbox_mlp.2.weight"
+        ):
+            last = net.object_bbox_mlp[-1]
+            if isinstance(last, torch.nn.Linear):
+                torch.nn.init.zeros_(last.weight)
+                torch.nn.init.zeros_(last.bias)
+                initialized.append("object_bbox_mlp_final")
+
+        if hasattr(net, "object_conf_mlp") and not _checkpoint_has_key(
+            checkpoint, "model.net.object_conf_mlp.2.weight"
+        ):
+            last = net.object_conf_mlp[-1]
+            if isinstance(last, torch.nn.Linear):
+                torch.nn.init.zeros_(last.weight)
+                torch.nn.init.zeros_(last.bias)
+                initialized.append("object_conf_mlp_final")
+
     if initialized:
         print(
             "Initialized actor-prompt modules from current class path: "
@@ -276,20 +316,18 @@ def _validate_no_deprecated_object_path(checkpoint):
             needle in key
             for needle in (
                 "object_interaction",
-                "object_cls_embed",
-                "object_slot_embed",
-                "object_bbox_mlp",
-                "object_conf_mlp",
-                "object_visual_proj",
+                "object_relation",
+                "object_action",
+                "specialist",
             )
         )
     ]
     if deprecated:
         preview = ", ".join(deprecated[:12])
         raise ValueError(
-            "Deprecated object-token checkpoint detected. The active model uses "
-            "RF-DETR only as an interaction-heatmap teacher and has no runtime "
-            f"object-token path. First deprecated keys: {preview}"
+            "Deprecated object specialist/residual checkpoint detected. The active "
+            "hybrid path uses semantic interaction heatmaps plus clean scene object "
+            f"tokens. First deprecated keys: {preview}"
         )
 
 
@@ -393,6 +431,10 @@ def build_parser():
         "--poguiseplus_interaction_heatmap_weight", type=float, default=1.0
     )
     parser.add_argument("--poguiseplus_heatmap_log_eps", type=float, default=1e-6)
+    parser.add_argument("--object_selection_loss_weight", type=float, default=0.5)
+    parser.add_argument("--object_counterfactual_loss_weight", type=float, default=0.0)
+    parser.add_argument("--object_counterfactual_margin", type=float, default=0.05)
+    parser.add_argument("--object_counterfactual_eval", type=int, default=1)
     parser.add_argument("--deepspeed_optim", type=int, default=0)
     parser.add_argument("--kp_only", type=int, default=0)
 
@@ -416,6 +458,10 @@ def main():
         )
     if hparams.actor_interaction_heatmaps and not hparams.actor_prompt:
         raise ValueError("actor_interaction_heatmaps requires actor_prompt")
+    if hparams.scene_object_tokens and not hparams.actor_prompt:
+        raise ValueError("scene_object_tokens requires actor_prompt")
+    if hparams.scene_object_tokens and not hparams.object_detector_cache:
+        raise ValueError("scene_object_tokens requires --object_detector_cache")
 
     seed_everything(hparams.seed)
     dataset = _dataset_class(hparams.dataset)

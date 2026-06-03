@@ -902,6 +902,9 @@ class VisionTransformer(nn.Module):
         actor_bbox_prior_expand=1.75,
         actor_interaction_heatmaps=0,
         interaction_object_classes=19,
+        scene_object_tokens=0,
+        num_scene_object_tokens=32,
+        num_object_classes=19,
         return_heatmap_features=False,
         **kwargs,
     ):
@@ -937,6 +940,16 @@ class VisionTransformer(nn.Module):
         self.interaction_object_classes = int(interaction_object_classes)
         if self.interaction_object_classes <= 0:
             raise ValueError("interaction_object_classes must be positive")
+        self.scene_object_tokens = bool(scene_object_tokens)
+        self.n_object_tokens = (
+            int(num_scene_object_tokens) if self.scene_object_tokens else 0
+        )
+        if self.n_object_tokens < 0:
+            raise ValueError("num_scene_object_tokens must be non-negative")
+        self.num_object_classes = int(num_object_classes)
+        if self.scene_object_tokens and self.num_object_classes <= 0:
+            raise ValueError("num_object_classes must be positive")
+        self.none_object_id = self.num_object_classes
         self.return_heatmap_features = bool(return_heatmap_features)
         self.HW_OUT_CONV = (hw_out_conv, hw_out_conv)
         self.n_heatmap_tokens = self.HW_OUT_CONV[0] * self.HW_OUT_CONV[1]
@@ -953,8 +966,10 @@ class VisionTransformer(nn.Module):
             self.n_heatmap_tokens = 0
         self.mode = mode
 
-        # Class, actor, and register tokens are protected from pruning.
-        self.N_KEY_TOKENS = 1 + self.n_actor_tokens + self.n_registers
+        # Class, actor, object, and register tokens are protected from pruning.
+        self.N_KEY_TOKENS = (
+            1 + self.n_actor_tokens + self.n_object_tokens + self.n_registers
+        )
 
         if use_learnable_pos_emb:
             self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
@@ -1052,6 +1067,40 @@ class VisionTransformer(nn.Module):
             nn.init.zeros_(self.valid_embed.weight)
             nn.init.zeros_(self.bbox_mlp[-1].weight)
             nn.init.zeros_(self.bbox_mlp[-1].bias)
+        if self.n_object_tokens > 0:
+            self.object_slot_embed = nn.Parameter(
+                torch.zeros(1, self.n_object_tokens, self.num_features)
+            )
+            self.object_cls_embed = nn.Embedding(
+                self.num_object_classes + 1,
+                self.num_features,
+                padding_idx=self.none_object_id,
+            )
+            self.object_valid_embed = nn.Embedding(2, self.num_features)
+            self.object_bbox_mlp = nn.Sequential(
+                nn.Linear(4, self.num_features),
+                nn.GELU(),
+                nn.Linear(self.num_features, self.num_features),
+            )
+            self.object_conf_mlp = nn.Sequential(
+                nn.Linear(1, self.num_features),
+                nn.GELU(),
+                nn.Linear(self.num_features, self.num_features),
+            )
+            self.object_visual_proj = nn.Sequential(
+                nn.LayerNorm(self.num_features),
+                nn.Linear(self.num_features, self.num_features),
+                nn.GELU(),
+                nn.Linear(self.num_features, self.num_features),
+            )
+            nn.init.zeros_(self.object_slot_embed)
+            nn.init.zeros_(self.object_valid_embed.weight)
+            nn.init.zeros_(self.object_bbox_mlp[-1].weight)
+            nn.init.zeros_(self.object_bbox_mlp[-1].bias)
+            nn.init.zeros_(self.object_conf_mlp[-1].weight)
+            nn.init.zeros_(self.object_conf_mlp[-1].bias)
+            with torch.no_grad():
+                self.object_cls_embed.weight[self.none_object_id].zero_()
         if self.n_heatmap_out_channels > 0:
             self.heatmap_tokens = nn.Parameter(
                 torch.randn(1, self.HW_OUT_CONV[0] * self.HW_OUT_CONV[1], embed_dim)
@@ -1160,11 +1209,53 @@ class VisionTransformer(nn.Module):
             return None
         return torch.stack(priors, dim=0).sum(dim=0).clamp(0.0, 1.0)
 
+    def _pool_box_features(self, patch_tokens, boxes, valid, window_size):
+        batch_size, _, channels = patch_tokens.shape
+        frames, height, width = [int(v) for v in window_size]
+        if patch_tokens.shape[1] != frames * height * width:
+            raise RuntimeError(
+                "Patch-token count does not match transformer window size: "
+                f"{patch_tokens.shape[1]} vs {frames}*{height}*{width}"
+            )
+
+        y_centers = (
+            torch.arange(height, device=patch_tokens.device, dtype=patch_tokens.dtype)
+            + 0.5
+        ) / float(height)
+        x_centers = (
+            torch.arange(width, device=patch_tokens.device, dtype=patch_tokens.dtype)
+            + 0.5
+        ) / float(width)
+        grid_y, grid_x = torch.meshgrid(y_centers, x_centers, indexing="ij")
+        centers = torch.stack([grid_x, grid_y], dim=-1).reshape(1, height * width, 2)
+        centers = centers.repeat(1, frames, 1).unsqueeze(0)
+
+        box_min = boxes[..., :2].to(dtype=patch_tokens.dtype).unsqueeze(2)
+        box_max = boxes[..., 2:].to(dtype=patch_tokens.dtype).unsqueeze(2)
+        inside = ((centers >= box_min) & (centers <= box_max)).all(dim=-1)
+        inside = inside & valid.unsqueeze(-1)
+
+        weights = inside.to(dtype=patch_tokens.dtype)
+        denom = weights.sum(dim=-1, keepdim=True).clamp_min(1.0)
+        pooled = torch.bmm(weights, patch_tokens) / denom
+        pooled = pooled.masked_fill(~valid.unsqueeze(-1), 0.0)
+        expected = (batch_size, boxes.shape[1], channels)
+        if pooled.shape != expected:
+            raise RuntimeError(
+                "Object visual pooling shape mismatch: "
+                f"{tuple(pooled.shape)} vs {expected}"
+            )
+        return pooled
+
     def forward(
         self,
         x,
         boxes=None,
         valid=None,
+        object_boxes=None,
+        object_classes=None,
+        object_confs=None,
+        object_valid=None,
     ):
         # x_list, images_whwh = self.preprocess_image(x_list)
 
@@ -1193,6 +1284,7 @@ class VisionTransformer(nn.Module):
         token_key_padding_mask = None
 
         prefix_tokens = []
+        prefix_key_masks = []
         if self.n_actor_tokens > 0:
             if boxes is None:
                 raise ValueError("boxes are required when actor_prompt is enabled")
@@ -1226,16 +1318,96 @@ class VisionTransformer(nn.Module):
                 ws,
             )
             prefix_tokens.append(actor_tokens)
+            prefix_key_masks.append(
+                torch.zeros(B, self.n_actor_tokens, dtype=torch.bool, device=x.device)
+            )
+
+        if self.n_object_tokens > 0:
+            if object_boxes is None:
+                raise ValueError(
+                    "object_boxes are required when scene_object_tokens is enabled"
+                )
+            if object_boxes.ndim != 3 or object_boxes.shape[1:] != (
+                self.n_object_tokens,
+                4,
+            ):
+                raise ValueError(
+                    "object_boxes must have shape "
+                    f"[B,{self.n_object_tokens},4], got {tuple(object_boxes.shape)}"
+                )
+            if object_boxes.shape[0] != B:
+                raise ValueError(
+                    "object_boxes batch size "
+                    f"{object_boxes.shape[0]} does not match video batch {B}"
+                )
+            if object_classes is None or object_classes.shape != object_boxes.shape[:2]:
+                raise ValueError(
+                    "object_classes must have shape "
+                    f"[B,{self.n_object_tokens}]"
+                )
+            if object_confs is None or object_confs.shape != object_boxes.shape[:2]:
+                raise ValueError(
+                    "object_confs must have shape "
+                    f"[B,{self.n_object_tokens}]"
+                )
+            if object_valid is None or object_valid.shape != object_boxes.shape[:2]:
+                raise ValueError(
+                    "object_valid must have shape "
+                    f"[B,{self.n_object_tokens}]"
+                )
+
+            object_boxes = object_boxes.to(device=x.device, dtype=x.dtype).clamp(0.0, 1.0)
+            object_classes = object_classes.to(device=x.device, dtype=torch.long)
+            object_confs = object_confs.to(device=x.device, dtype=x.dtype).clamp(0.0, 1.0)
+            object_valid = object_valid.to(device=x.device, dtype=torch.bool)
+            safe_object_classes = object_classes.clamp(0, self.none_object_id)
+            safe_object_classes = torch.where(
+                object_valid,
+                safe_object_classes,
+                torch.full_like(safe_object_classes, self.none_object_id),
+            )
+            object_visual_feat = self._pool_box_features(
+                x,
+                object_boxes,
+                object_valid,
+                ws,
+            )
+            object_tokens = (
+                self.object_slot_embed.expand(B, -1, -1)
+                + self.object_cls_embed(safe_object_classes).to(dtype=x.dtype)
+                + self.object_bbox_mlp(object_boxes)
+                + self.object_conf_mlp(object_confs.unsqueeze(-1))
+                + self.object_visual_proj(object_visual_feat)
+                + self.object_valid_embed(object_valid.long()).to(dtype=x.dtype)
+            )
+            object_tokens = object_tokens * object_valid.to(dtype=x.dtype).unsqueeze(-1)
+            prefix_tokens.append(object_tokens)
+            prefix_key_masks.append(~object_valid)
 
         if self.n_registers > 0:
             prefix_tokens.append(self.register_tokens.expand(B, -1, -1))
+            prefix_key_masks.append(
+                torch.zeros(B, self.n_registers, dtype=torch.bool, device=x.device)
+            )
         if self.n_heatmap_out_channels > 0:
             prefix_tokens.append(self.heatmap_tokens.expand(B, -1, -1))
+            prefix_key_masks.append(
+                torch.zeros(B, self.n_heatmap_tokens, dtype=torch.bool, device=x.device)
+            )
         if prefix_tokens:
             x = torch.cat([*prefix_tokens, x], dim=1)
+            prefix_mask = torch.cat(prefix_key_masks, dim=1)
+            video_mask = torch.zeros(B, N, dtype=torch.bool, device=x.device)
+            token_key_padding_mask = torch.cat([prefix_mask, video_mask], dim=1)
 
         # append class token to the beginning of the sequence
         x = torch.cat([self.class_token.expand(B, -1, -1), x], dim=1)
+        if token_key_padding_mask is not None:
+            class_mask = torch.zeros(B, 1, dtype=torch.bool, device=x.device)
+            token_key_padding_mask = torch.cat(
+                [class_mask, token_key_padding_mask],
+                dim=1,
+            )
         # keep the global indexes of non-keyframe tokens during pruning
         idx = torch.arange(0, N, device=x.device).unsqueeze(0).repeat(B, 1)
         for i in range(self.depth):
@@ -1252,6 +1424,10 @@ class VisionTransformer(nn.Module):
             actor_start = 1
             actor_end = actor_start + self.n_actor_tokens
             x_actor = x[:, actor_start:actor_end, :]
+        if self.n_object_tokens > 0:
+            object_start = 1 + self.n_actor_tokens
+            object_end = object_start + self.n_object_tokens
+            x_object = x[:, object_start:object_end, :]
         if self.n_heatmap_out_channels > 0:
             heatmap_start = self.N_KEY_TOKENS
             x_heatmap = x[
@@ -1264,17 +1440,25 @@ class VisionTransformer(nn.Module):
             x_class = self.fc_norm(x_class)
             if self.n_actor_tokens > 0:
                 x_actor = self.fc_norm(x_actor)
+                if self.n_object_tokens > 0:
+                    x_object = self.fc_norm(x_object)
         else:
             x_class = self.norm(x_class)
             if self.n_actor_tokens > 0:
                 x_actor = self.norm(x_actor)
+                if self.n_object_tokens > 0:
+                    x_object = self.norm(x_object)
         x_class = self.head_dropout(x_class)
         x_class = self.head(x_class)
         if self.n_actor_tokens > 0:
             x_actor = self.head_dropout(x_actor)
+            if self.n_object_tokens > 0:
+                x_object = self.head_dropout(x_object)
 
         if self.n_heatmap_out_channels == 0:
             if self.n_actor_tokens > 0:
+                if self.n_object_tokens > 0:
+                    return x_class, x_actor, x_object
                 return x_class, x_actor
             return x_class
         x_heatmap_feat = x_heatmap.reshape(B, *self.HW_OUT_CONV, -1).permute(
@@ -1287,7 +1471,11 @@ class VisionTransformer(nn.Module):
         x_heatmap = self.heatmap_head(x_heatmap)
         if self.n_actor_tokens > 0:
             if self.return_heatmap_features:
+                if self.n_object_tokens > 0:
+                    return x_class, x_actor, x_object, x_heatmap, x_heatmap_feat
                 return x_class, x_actor, x_heatmap, x_heatmap_feat
+            if self.n_object_tokens > 0:
+                return x_class, x_actor, x_object, x_heatmap
             return x_class, x_actor, x_heatmap
         return x_class, x_heatmap
 

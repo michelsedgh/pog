@@ -25,6 +25,12 @@ CORE_COLUMNS = [
     "val_interaction_heatmap_pred_max",
     "val_interaction_heatmap_target_max",
     "val_interaction_heatmap_center_l2",
+    "val_object_selection_loss",
+    "val_object_selection_acc",
+    "val_object_selection_true_prob",
+    "val_object_selection_teacher_count",
+    "val_object_counterfactual_selected_logit_drop",
+    "val_object_counterfactual_selected_prob_drop",
     "interaction_score",
 ]
 
@@ -132,7 +138,17 @@ def compute_interaction_score(df):
     pos = df_metric(df, "val_interaction_heatmap_positive_mean", 0.0)
     center = df_metric(df, "val_interaction_heatmap_center_l2", 56.0)
     action = df_metric(df, "val_f1", 0.0)
-    return iou + soft_iou + pos - 0.02 * center + 0.25 * action
+    selection_acc = df_metric(df, "val_object_selection_acc", 0.0)
+    logit_drop = df_metric(df, "val_object_counterfactual_selected_logit_drop", 0.0)
+    return (
+        iou
+        + soft_iou
+        + pos
+        + 0.25 * selection_acc
+        + 0.1 * logit_drop
+        - 0.02 * center
+        + 0.25 * action
+    )
 
 
 def print_row(title, row):
@@ -157,6 +173,20 @@ def print_row(title, row):
         f"rate {metric(row, 'val_interaction_teacher_slot_rate'):.4f}, "
         f"count {metric(row, 'val_interaction_teacher_slot_count'):.1f}"
     )
+    if pd.notna(metric(row, "val_object_selection_acc")):
+        print(
+            "object selection: "
+            f"loss {metric(row, 'val_object_selection_loss'):.4f}, "
+            f"acc {metric(row, 'val_object_selection_acc'):.4f}, "
+            f"true_prob {metric(row, 'val_object_selection_true_prob'):.4f}, "
+            f"teachers {metric(row, 'val_object_selection_teacher_count'):.1f}"
+        )
+    if pd.notna(metric(row, "val_object_counterfactual_selected_logit_drop")):
+        print(
+            "selected-object counterfactual: "
+            f"logit_drop {metric(row, 'val_object_counterfactual_selected_logit_drop'):.4f}, "
+            f"prob_drop {metric(row, 'val_object_counterfactual_selected_prob_drop'):.4f}"
+        )
     print(
         "poguise+ heatmap loss: "
         f"log {metric(row, 'val_loss_heatmap_log'):.4f}, "
@@ -255,7 +285,8 @@ def main():
     print("- Interaction heatmap IoU/positive response/center error show whether the model is learning object-region supervision.")
     print("- Target group/action accuracy shows whether the actor classifier still handles object-confusable classes.")
     print("- Object heatmap channels are class-specific actor-object teacher labels.")
-    print("- RF-DETR boxes are teacher labels here; they are not runtime model inputs.")
+    print("- Object selection/counterfactual metrics show whether runtime object tokens are used.")
+    print("- With --scene_object_tokens 1, RF-DETR boxes are runtime model inputs as well as teacher labels.")
 
 
 if __name__ == "__main__":

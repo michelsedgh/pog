@@ -167,6 +167,40 @@ class Classifier(nn.Module):
         return self.classifier(x)
 
 
+class ActorObjectSelectionHead(nn.Module):
+    def __init__(self, dim, hidden_dim=512):
+        super().__init__()
+        self.actor_norm = nn.LayerNorm(dim)
+        self.object_norm = nn.LayerNorm(dim)
+        self.query = nn.Linear(dim, dim)
+        self.key = nn.Linear(dim, dim)
+        self.none_mlp = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, actor_tokens, object_tokens, object_valid):
+        if actor_tokens.ndim != 3 or object_tokens.ndim != 3:
+            raise ValueError("actor_tokens and object_tokens must be rank-3 tensors")
+        if object_valid.shape != object_tokens.shape[:2]:
+            raise ValueError(
+                "object_valid must have shape "
+                f"{tuple(object_tokens.shape[:2])}, got {tuple(object_valid.shape)}"
+            )
+        query = self.query(self.actor_norm(actor_tokens))
+        key = self.key(self.object_norm(object_tokens))
+        scale = query.shape[-1] ** -0.5
+        object_logits = torch.einsum("bkd,bmd->bkm", query, key) * scale
+        object_logits = object_logits.masked_fill(
+            ~object_valid[:, None, :].bool(),
+            torch.finfo(object_logits.dtype).min,
+        )
+        none_logits = self.none_mlp(actor_tokens).squeeze(-1).unsqueeze(-1)
+        return torch.cat([none_logits, object_logits], dim=-1)
+
+
 class POGUISE(pl.LightningModule):
     def __init__(self, net_size="t", pretrained=None, **kwargs):
         super().__init__()
@@ -176,6 +210,9 @@ class POGUISE(pl.LightningModule):
         self.actor_interaction_heatmaps = bool(
             self.hparams.get("actor_interaction_heatmaps", 0)
         )
+        self.scene_object_tokens = bool(self.hparams.get("scene_object_tokens", 0))
+        if self.scene_object_tokens and not self.actor_prompt:
+            raise ValueError("scene_object_tokens requires actor_prompt")
         if self.actor_interaction_heatmaps and not self.actor_prompt:
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
         if self.hparams.get("interaction_warmup_freeze_actor_path", 0):
@@ -230,6 +267,9 @@ class POGUISE(pl.LightningModule):
                 interaction_object_classes=self.hparams.get(
                     "interaction_object_classes", 19
                 ),
+                scene_object_tokens=self.scene_object_tokens,
+                num_scene_object_tokens=self.hparams.get("num_scene_object_tokens", 32),
+                num_object_classes=self.hparams.get("num_object_classes", 19),
                 return_heatmap_features=False,
             )
         else:
@@ -262,6 +302,9 @@ class POGUISE(pl.LightningModule):
                 interaction_object_classes=self.hparams.get(
                     "interaction_object_classes", 19
                 ),
+                scene_object_tokens=self.scene_object_tokens,
+                num_scene_object_tokens=self.hparams.get("num_scene_object_tokens", 32),
+                num_object_classes=self.hparams.get("num_object_classes", 19),
                 return_heatmap_features=False,
             )
         if self.hparams.pretrained == "DEFAULT":
@@ -291,6 +334,11 @@ class POGUISE(pl.LightningModule):
             self.presence_head = (
                 nn.Linear(self.net.num_features, 1)
                 if self.hparams.get("actor_presence_head", 0)
+                else None
+            )
+            self.object_selection_head = (
+                ActorObjectSelectionHead(self.net.num_features)
+                if self.scene_object_tokens
                 else None
             )
         if self.hparams.get("linear_probe", 0):
@@ -324,7 +372,7 @@ class POGUISE(pl.LightningModule):
         if interaction_warmup_freeze_actor_path:
             print(
                 "Interaction warmup: freezing base actor path; training interaction "
-                "heatmap head and optional late transformer blocks only."
+                "heatmap/object-token path and optional late transformer blocks only."
             )
             for param in self.head.parameters():
                 param.requires_grad = False
@@ -334,6 +382,21 @@ class POGUISE(pl.LightningModule):
                 if self.presence_head is not None:
                     for param in self.presence_head.parameters():
                         param.requires_grad = False
+        if self.scene_object_tokens:
+            object_param_names = (
+                "object_slot_embed",
+                "object_cls_embed",
+                "object_valid_embed",
+                "object_bbox_mlp",
+                "object_conf_mlp",
+                "object_visual_proj",
+            )
+            for name, param in self.net.named_parameters():
+                if name.startswith(object_param_names):
+                    param.requires_grad = True
+            if self.object_selection_head is not None:
+                for param in self.object_selection_head.parameters():
+                    param.requires_grad = True
         interaction_unfreeze_last_blocks = int(
             self.hparams.get("interaction_unfreeze_last_blocks", 0) or 0
         )
@@ -380,6 +443,9 @@ class POGUISE(pl.LightningModule):
                 if self.presence_head is not None:
                     for param in self.presence_head.parameters():
                         param.requires_grad = True
+                if self.object_selection_head is not None:
+                    for param in self.object_selection_head.parameters():
+                        param.requires_grad = True
 
     def _freeze_stages(self):
         if self.frozen_stages >= 0:
@@ -401,34 +467,77 @@ class POGUISE(pl.LightningModule):
         boxes=None,
         valid=None,
         action_labels=None,
+        object_boxes=None,
+        object_classes=None,
+        object_confs=None,
+        object_valid=None,
     ):
         # convert to b c t h w
         x = x.permute(0, 2, 1, 3, 4)
         if self.actor_prompt:
+            object_kwargs = {}
+            if self.scene_object_tokens:
+                object_kwargs = {
+                    "object_boxes": object_boxes,
+                    "object_classes": object_classes,
+                    "object_confs": object_confs,
+                    "object_valid": object_valid,
+                }
             if self.hparams.n_landmarks > 0 or self.actor_interaction_heatmaps:
                 net_data = self.net(
                     x,
                     boxes=boxes,
                     valid=valid,
+                    **object_kwargs,
                 )
-                if len(net_data) == 4:
-                    _, x_actor, x_heatmap, _ = net_data
+                if self.scene_object_tokens:
+                    if len(net_data) == 5:
+                        _, x_actor, x_object, x_heatmap, _ = net_data
+                    else:
+                        _, x_actor, x_object, x_heatmap = net_data
                 else:
-                    _, x_actor, x_heatmap = net_data
+                    if len(net_data) == 4:
+                        _, x_actor, x_heatmap, _ = net_data
+                    else:
+                        _, x_actor, x_heatmap = net_data
             else:
                 data = self.net(
                     x,
                     boxes=boxes,
                     valid=valid,
+                    **object_kwargs,
                 )
-                _, x_actor = data[:2]
+                if self.scene_object_tokens:
+                    _, x_actor, x_object = data[:3]
+                else:
+                    _, x_actor = data[:2]
                 x_heatmap = 0
             if self.hparams.ret_feat:
                 return x_actor
             action_logits = self.actor_head(x_actor)
+            object_selection_logits = None
+            if self.object_selection_head is not None:
+                if object_valid is None:
+                    raise ValueError(
+                        "object_valid is required when scene_object_tokens is enabled"
+                    )
+                object_selection_logits = self.object_selection_head(
+                    x_actor,
+                    x_object,
+                    object_valid.to(device=x_actor.device, dtype=torch.bool),
+                )
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
+                if object_selection_logits is not None:
+                    return (
+                        action_logits,
+                        x_heatmap,
+                        presence_logits,
+                        object_selection_logits,
+                    )
                 return action_logits, x_heatmap, presence_logits
+            if object_selection_logits is not None:
+                return action_logits, x_heatmap, None, object_selection_logits
             return action_logits, x_heatmap
         if self.hparams.n_landmarks > 0:
             x_class, x_heatmap = self.net(x)
@@ -490,6 +599,9 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--actor_val_diagnostic_max_pairs", type=int, default=8)
         parser.add_argument("--actor_interaction_heatmaps", type=int, default=0)
         parser.add_argument("--interaction_object_classes", type=int, default=19)
+        parser.add_argument("--scene_object_tokens", type=int, default=0)
+        parser.add_argument("--num_scene_object_tokens", type=int, default=32)
+        parser.add_argument("--num_object_classes", type=int, default=19)
         parser.add_argument("--interaction_unfreeze_last_blocks", type=int, default=0)
         parser.add_argument("--ret_feat", type=int, default=0)
         parser.add_argument("--linear_probe", type=int, default=0)
