@@ -901,6 +901,7 @@ class VisionTransformer(nn.Module):
         actor_bbox_prior_weight=0.1,
         actor_bbox_prior_expand=1.75,
         actor_interaction_heatmaps=0,
+        interaction_object_classes=19,
         return_heatmap_features=False,
         **kwargs,
     ):
@@ -933,12 +934,17 @@ class VisionTransformer(nn.Module):
         self.actor_interaction_heatmaps = bool(actor_interaction_heatmaps)
         if self.actor_interaction_heatmaps and not self.actor_prompt:
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
+        self.interaction_object_classes = int(interaction_object_classes)
+        if self.interaction_object_classes <= 0:
+            raise ValueError("interaction_object_classes must be positive")
         self.return_heatmap_features = bool(return_heatmap_features)
         self.HW_OUT_CONV = (hw_out_conv, hw_out_conv)
         self.n_heatmap_tokens = self.HW_OUT_CONV[0] * self.HW_OUT_CONV[1]
         self.n_landmarks = int(n_landmarks)
         self.n_interaction_heatmap_channels = (
-            self.n_actor_tokens if self.actor_interaction_heatmaps else 0
+            self.n_actor_tokens * self.interaction_object_classes
+            if self.actor_interaction_heatmaps
+            else 0
         )
         self.n_heatmap_out_channels = (
             self.n_landmarks + self.n_interaction_heatmap_channels

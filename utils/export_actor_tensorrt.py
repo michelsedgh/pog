@@ -222,6 +222,7 @@ def checkpoint_payload(checkpoint_path):
         "actor_interaction_heatmaps": int(
             hparams.get("actor_interaction_heatmaps", 0)
         ),
+        "interaction_object_classes": int(hparams.get("interaction_object_classes", 19)),
         "n_frames": int(hparams.get("n_frames", 16)),
         "num_actor_tokens": int(hparams.get("num_actor_tokens", 0)),
         "num_classes": int(hparams.get("num_classes", 31)),

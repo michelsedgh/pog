@@ -9,6 +9,7 @@ def heatmap_frobenius_loss(pred_heatmap, target_heatmap, valid=None, mask=None):
         )
 
     sq_error = (pred_heatmap - target_heatmap).float().pow(2)
+    leading_shape = pred_heatmap.shape[:-2]
     active = torch.ones(
         pred_heatmap.shape[0],
         dtype=torch.bool,
@@ -27,13 +28,13 @@ def heatmap_frobenius_loss(pred_heatmap, target_heatmap, valid=None, mask=None):
 
     if valid is not None:
         valid = valid.to(device=pred_heatmap.device, dtype=torch.bool)
-        if valid.shape != pred_heatmap.shape[:2]:
+        if valid.shape != leading_shape:
             raise RuntimeError(
                 "heatmap valid mask shape mismatch: "
-                f"{tuple(valid.shape)} vs {tuple(pred_heatmap.shape[:2])}"
+                f"{tuple(valid.shape)} vs {tuple(leading_shape)}"
             )
-        sq_error = sq_error * valid[:, :, None, None].to(dtype=sq_error.dtype)
-        active = active & valid.any(dim=1)
+        sq_error = sq_error * valid[(...,) + (None, None)].to(dtype=sq_error.dtype)
+        active = active & valid.flatten(1).any(dim=1)
 
     if not active.any():
         return pred_heatmap.sum() * 0.0

@@ -136,11 +136,15 @@ def draw_normalized_box(draw, box, color, width=3):
 
 
 def heatmap_overlay(image, heatmap, valid=None):
+    if heatmap.ndim == 2:
+        heatmap = heatmap.unsqueeze(0)
     if valid is None:
-        valid = heatmap.flatten(1).amax(dim=1) > 0
+        valid = heatmap.flatten(-2).amax(dim=-1) > 0
     if not valid.any():
         return image
-    hm = heatmap[valid].max(dim=0).values
+    hm = heatmap[valid].reshape(-1, heatmap.shape[-2], heatmap.shape[-1]).max(
+        dim=0
+    ).values
     hm = hm.detach().cpu().numpy()
     if float(hm.max()) <= 0:
         return image
@@ -154,10 +158,14 @@ def heatmap_overlay(image, heatmap, valid=None):
 def draw_overlay(frames, target, output_path, sample_idx):
     middle = frames.shape[0] // 2
     image = denormalize_frame(frames, middle)
+    positive_valid = target.get(
+        "interaction_heatmap_positive_valid",
+        target["interaction_heatmap_valid"],
+    ).bool()
     image = heatmap_overlay(
         image,
         target["interaction_heatmap"],
-        target["interaction_heatmap_valid"].bool(),
+        positive_valid,
     )
     draw = ImageDraw.Draw(image)
 
@@ -232,9 +240,11 @@ def main():
             ):
                 idx += 1
                 continue
-            if args.only_with_interactions and not bool(
-                target["interaction_heatmap_valid"].any()
-            ):
+            positive_valid = target.get(
+                "interaction_heatmap_positive_valid",
+                target["interaction_heatmap_valid"],
+            ).bool()
+            if args.only_with_interactions and not bool(positive_valid.any()):
                 idx += 1
                 continue
             output_path = os.path.join(args.output_dir, f"sample_{idx:05d}.jpg")

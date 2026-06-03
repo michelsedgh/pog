@@ -51,6 +51,18 @@ ACTIONS = [
     "Cook_Usestove",
 ]
 
+OBJECTS = [
+    "laptop",
+    "book",
+    "phone",
+    "cup",
+    "bottle",
+    "utensil",
+    "bowl",
+    "sink",
+    "cooking_appliance",
+]
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -176,6 +188,24 @@ def print_row(title, row):
             else:
                 print(f"{action}: acc {float(row[col]):.4f}")
 
+    object_rows = []
+    for object_name in OBJECTS:
+        pos = metric(row, f"val_interaction_heatmap_{object_name}_positive_mean")
+        iou = metric(row, f"val_interaction_heatmap_{object_name}_iou")
+        count = metric(row, f"val_interaction_teacher_{object_name}_slot_count")
+        if pd.notna(pos) or pd.notna(iou) or pd.notna(count):
+            object_rows.append((object_name, count, pos, iou))
+    if object_rows:
+        print("\nOBJECT HEATMAP CHANNELS:")
+        for object_name, count, pos, iou in object_rows:
+            count_text = "nan" if pd.isna(count) else f"{float(count):.0f}"
+            pos_text = "nan" if pd.isna(pos) else f"{float(pos):.4f}"
+            iou_text = "nan" if pd.isna(iou) else f"{float(iou):.4f}"
+            print(
+                f"{object_name}: teacher_count {count_text}, "
+                f"positive {pos_text}, iou {iou_text}"
+            )
+
 
 def main():
     args = parse_args()
@@ -224,6 +254,7 @@ def main():
     print("\nREAD THIS:")
     print("- Interaction heatmap IoU/positive response/center error show whether the model is learning object-region supervision.")
     print("- Target group/action accuracy shows whether the actor classifier still handles object-confusable classes.")
+    print("- Object heatmap channels are class-specific actor-object teacher labels.")
     print("- RF-DETR boxes are teacher labels here; they are not runtime model inputs.")
 
 

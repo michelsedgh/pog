@@ -238,7 +238,22 @@ def _adapt_heatmap_final_layer_checkpoint(module, checkpoint):
     new_b = target_b.detach().clone()
     new_w.zero_()
     new_b.zero_()
-    copy_channels = min(old_w.shape[0], target_w.shape[0])
+    actor_interaction_heatmaps = bool(
+        module.model.hparams.get("actor_interaction_heatmaps", 0)
+    )
+    if actor_interaction_heatmaps:
+        copy_channels = min(
+            old_w.shape[0],
+            target_w.shape[0],
+            int(module.model.hparams.get("n_landmarks", 0)),
+        )
+        copy_note = (
+            "copied pose channels only and zero-initialized semantic "
+            "actor-object channels"
+        )
+    else:
+        copy_channels = min(old_w.shape[0], target_w.shape[0])
+        copy_note = "copied existing channels and zero-initialized new channels"
     new_w[:copy_channels].copy_(old_w[:copy_channels])
     new_b[:copy_channels].copy_(old_b[:copy_channels])
     state_dict[key_w] = new_w
@@ -246,7 +261,7 @@ def _adapt_heatmap_final_layer_checkpoint(module, checkpoint):
     print(
         "Adapted heatmap final layer from "
         f"{old_w.shape[0]} to {target_w.shape[0]} channels; "
-        "copied existing channels and zero-initialized new channels."
+        f"{copy_note}."
     )
 
 

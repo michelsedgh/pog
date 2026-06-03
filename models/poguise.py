@@ -227,6 +227,9 @@ class POGUISE(pl.LightningModule):
                     "actor_bbox_prior_expand", 1.75
                 ),
                 actor_interaction_heatmaps=self.actor_interaction_heatmaps,
+                interaction_object_classes=self.hparams.get(
+                    "interaction_object_classes", 19
+                ),
                 return_heatmap_features=False,
             )
         else:
@@ -256,6 +259,9 @@ class POGUISE(pl.LightningModule):
                     "actor_bbox_prior_expand", 1.75
                 ),
                 actor_interaction_heatmaps=self.actor_interaction_heatmaps,
+                interaction_object_classes=self.hparams.get(
+                    "interaction_object_classes", 19
+                ),
                 return_heatmap_features=False,
             )
         if self.hparams.pretrained == "DEFAULT":
@@ -483,6 +489,7 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--actor_val_diagnostics", type=int, default=1)
         parser.add_argument("--actor_val_diagnostic_max_pairs", type=int, default=8)
         parser.add_argument("--actor_interaction_heatmaps", type=int, default=0)
+        parser.add_argument("--interaction_object_classes", type=int, default=19)
         parser.add_argument("--interaction_unfreeze_last_blocks", type=int, default=0)
         parser.add_argument("--ret_feat", type=int, default=0)
         parser.add_argument("--linear_probe", type=int, default=0)

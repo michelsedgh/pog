@@ -133,6 +133,15 @@ class ToyotaSMDataset(Dataset):
             self.actor_interaction_heatmaps and self.set_type != "test"
         )
         self.num_object_classes = NUM_OBJECT_CLASSES
+        self.interaction_object_classes = int(
+            kwargs.get("interaction_object_classes", NUM_OBJECT_CLASSES)
+        )
+        if self.interaction_object_classes != NUM_OBJECT_CLASSES:
+            raise ValueError(
+                "Toyota actor interaction heatmaps use the full object vocabulary; "
+                f"interaction_object_classes must be {NUM_OBJECT_CLASSES}, got "
+                f"{self.interaction_object_classes}"
+            )
         self.object_detector_cache = kwargs.get("object_detector_cache")
         self.object_cache_dir = kwargs.get("toyota_object_cache_dir")
         self.object_camera_allowlist = parse_object_camera_allowlist(
@@ -1325,10 +1334,17 @@ class ToyotaSMDataset(Dataset):
         )
         interaction_valid = torch.zeros(self.num_actor_tokens, dtype=torch.bool)
         interaction_heatmap = torch.zeros(
-            (self.num_actor_tokens, *self.heatmap_size),
+            (self.num_actor_tokens, self.num_object_classes, *self.heatmap_size),
             dtype=torch.float32,
         )
-        interaction_heatmap_valid = torch.zeros(self.num_actor_tokens, dtype=torch.bool)
+        interaction_heatmap_valid = torch.zeros(
+            (self.num_actor_tokens, self.num_object_classes),
+            dtype=torch.bool,
+        )
+        interaction_heatmap_positive_valid = torch.zeros(
+            (self.num_actor_tokens, self.num_object_classes),
+            dtype=torch.bool,
+        )
         for target_idx, (target, slot) in enumerate(zip(targets, slots)):
             slot = int(slot)
             interaction_cls[slot] = target["interaction_cls"][slot]
@@ -1336,24 +1352,48 @@ class ToyotaSMDataset(Dataset):
             if (
                 "interaction_heatmap" in target
                 and "interaction_heatmap_valid" in target
-                and bool(target["interaction_heatmap_valid"][slot])
+                and target["interaction_heatmap_valid"][slot].bool().any()
             ):
-                heatmap_panel = target["interaction_heatmap"][slot].unsqueeze(0)
-                heatmap_panel = self._compose_synthetic_heatmaps(
-                    [heatmap_panel],
-                    [heatmap_bounds[target_idx]],
-                    combine="max",
-                ).squeeze(0)
-                interaction_heatmap[slot] = heatmap_panel.clamp_(0.0, 1.0)
-                interaction_heatmap_valid[slot] = True
+                source_positive_valid = target.get(
+                    "interaction_heatmap_positive_valid",
+                    target["interaction_heatmap_valid"],
+                )[slot].bool()
+                valid_classes = torch.nonzero(
+                    target["interaction_heatmap_valid"][slot].bool(),
+                    as_tuple=False,
+                ).flatten()
+                for cls_id in valid_classes:
+                    cls_id = int(cls_id)
+                    if not bool(source_positive_valid[cls_id]):
+                        interaction_heatmap_valid[slot, cls_id] = True
+                        continue
+                    heatmap_panel = target["interaction_heatmap"][
+                        slot, cls_id
+                    ].unsqueeze(0)
+                    heatmap_panel = self._compose_synthetic_heatmaps(
+                        [heatmap_panel],
+                        [heatmap_bounds[target_idx]],
+                        combine="max",
+                    ).squeeze(0)
+                    interaction_heatmap[slot, cls_id] = heatmap_panel.clamp_(0.0, 1.0)
+                    interaction_heatmap_valid[slot, cls_id] = bool(
+                        interaction_heatmap[slot, cls_id].max() > 0
+                    )
+                    interaction_heatmap_positive_valid[slot, cls_id] = bool(
+                        interaction_heatmap_valid[slot, cls_id]
+                    )
 
-        interaction_heatmap_valid = interaction_heatmap_valid & interaction_valid
+        interaction_heatmap_valid = interaction_heatmap_valid & interaction_valid[:, None]
+        interaction_heatmap_positive_valid = (
+            interaction_heatmap_positive_valid & interaction_valid[:, None]
+        )
 
         return {
             "interaction_cls": interaction_cls,
             "interaction_valid": interaction_valid,
             "interaction_heatmap": interaction_heatmap,
             "interaction_heatmap_valid": interaction_heatmap_valid,
+            "interaction_heatmap_positive_valid": interaction_heatmap_positive_valid,
         }
 
     def _box_iou(self, box_a, box_b):
@@ -1601,10 +1641,17 @@ class ToyotaSMDataset(Dataset):
         )
         interaction_valid = torch.zeros(self.num_actor_tokens, dtype=torch.bool)
         interaction_heatmap = torch.zeros(
-            (self.num_actor_tokens, *self.heatmap_size),
+            (self.num_actor_tokens, self.num_object_classes, *self.heatmap_size),
             dtype=torch.float32,
         )
-        interaction_heatmap_valid = torch.zeros(self.num_actor_tokens, dtype=torch.bool)
+        interaction_heatmap_valid = torch.zeros(
+            (self.num_actor_tokens, self.num_object_classes),
+            dtype=torch.bool,
+        )
+        interaction_heatmap_positive_valid = torch.zeros(
+            (self.num_actor_tokens, self.num_object_classes),
+            dtype=torch.bool,
+        )
         object_tracks = self._object_tracks(object_entries)
 
         for slot in torch.nonzero(actor_target["valid"], as_tuple=False).flatten():
@@ -1661,20 +1708,34 @@ class ToyotaSMDataset(Dataset):
                 continue
             interaction_cls[slot] = int(best_track["cls_id"])
             interaction_valid[slot] = True
-            interaction_heatmap[slot] = self._interaction_motion_heatmap_from_entries(
+            object_cls = int(best_track["cls_id"])
+            interaction_heatmap[
+                slot, object_cls
+            ] = self._interaction_motion_heatmap_from_entries(
                 best_track["entries"],
                 height,
                 width,
             )
-            interaction_heatmap_valid[slot] = bool(
-                interaction_heatmap[slot].max() > 0
+            interaction_heatmap_valid[slot, object_cls] = bool(
+                interaction_heatmap[slot, object_cls].max() > 0
             )
+            interaction_heatmap_positive_valid[slot, object_cls] = bool(
+                interaction_heatmap_valid[slot, object_cls]
+            )
+            safe_negative_ids = [
+                cls_id
+                for cls_id in range(self.num_object_classes)
+                if cls_id not in positive_id_set
+            ]
+            if safe_negative_ids:
+                interaction_heatmap_valid[slot, safe_negative_ids] = True
 
         return (
             interaction_cls,
             interaction_valid,
             interaction_heatmap,
             interaction_heatmap_valid,
+            interaction_heatmap_positive_valid,
         )
 
     def _build_interaction_target(
@@ -1689,6 +1750,7 @@ class ToyotaSMDataset(Dataset):
             interaction_valid,
             interaction_heatmap,
             interaction_heatmap_valid,
+            interaction_heatmap_positive_valid,
         ) = self._build_interaction_targets(
             actor_target,
             object_entries,
@@ -1700,6 +1762,7 @@ class ToyotaSMDataset(Dataset):
             "interaction_valid": interaction_valid,
             "interaction_heatmap": interaction_heatmap,
             "interaction_heatmap_valid": interaction_heatmap_valid,
+            "interaction_heatmap_positive_valid": interaction_heatmap_positive_valid,
         }
 
     def _build_actor_target(self, keypoints, label, height, width, slot=None):
@@ -2084,6 +2147,7 @@ class ToyotaSMDataset(Dataset):
             ),
             "object_ignore_regions": self._jsonable_mapping(self.object_ignore_regions),
             "num_object_classes": self.num_object_classes,
+            "interaction_object_classes": self.interaction_object_classes,
         }
         return self._cache_path(self.object_cache_dir, "objects", payload)
 

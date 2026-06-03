@@ -11,7 +11,7 @@ from losses.heatmap_loss import KeypointMSELoss
 from losses.interaction_heatmap_losses import interaction_heatmap_loss
 from losses.poguiseplus_losses import heatmap_frobenius_loss
 import pickle
-from datasets.object_vocab import GROUPS
+from datasets.object_vocab import GROUPS, NUM_OBJECT_CLASSES, OBJECT_CLASSES
 from datasets.toyotasm import CS_DICT, CV_DICT
 
 try:
@@ -43,6 +43,15 @@ class HeatmapModule(pl.LightningModule):
         self.actor_interaction_heatmaps = bool(
             hparams.get("actor_interaction_heatmaps", 0)
         )
+        self.interaction_object_classes = int(
+            hparams.get("interaction_object_classes", NUM_OBJECT_CLASSES)
+        )
+        if self.interaction_object_classes != NUM_OBJECT_CLASSES:
+            raise ValueError(
+                "Actor PO-GUISE+ interaction heatmaps use the full Toyota object "
+                f"vocabulary ({NUM_OBJECT_CLASSES} classes), got "
+                f"{self.interaction_object_classes}"
+            )
         self.actor_poguiseplus_loss = self.actor_prompt and self.actor_interaction_heatmaps
         self.poguiseplus_heatmap_loss_weight = float(
             hparams.get("poguiseplus_heatmap_loss_weight", 1.0)
@@ -314,13 +323,23 @@ class HeatmapModule(pl.LightningModule):
             return None
         n_pose = int(self.model.hparams.n_landmarks)
         n_actor = int(self.model.hparams.get("num_actor_tokens", 8))
-        end = n_pose + n_actor
+        n_object = self.interaction_object_classes
+        n_interaction = n_actor * n_object
+        end = n_pose + n_interaction
         if hm_preds.shape[1] < end:
             raise RuntimeError(
                 "Interaction heatmaps require heatmap channels "
-                f"[pose={n_pose} + actors={n_actor}], got {hm_preds.shape[1]}"
+                f"[pose={n_pose} + actors={n_actor} * objects={n_object}], "
+                f"got {hm_preds.shape[1]}"
             )
-        return hm_preds[:, n_pose:end]
+        heatmaps = hm_preds[:, n_pose:end]
+        return heatmaps.reshape(
+            heatmaps.shape[0],
+            n_actor,
+            n_object,
+            heatmaps.shape[-2],
+            heatmaps.shape[-1],
+        )
 
     def _log_interaction_heatmap_metrics(
         self,
@@ -335,6 +354,16 @@ class HeatmapModule(pl.LightningModule):
             device=pred_heatmap.device,
             dtype=torch.bool,
         )
+        if pred_heatmap.shape != target_heatmap.shape:
+            raise RuntimeError(
+                "interaction heatmap metric shape mismatch: "
+                f"{tuple(pred_heatmap.shape)} vs {tuple(target_heatmap.shape)}"
+            )
+        if heatmap_valid.shape != pred_heatmap.shape[:-2]:
+            raise RuntimeError(
+                "interaction heatmap metric valid shape mismatch: "
+                f"{tuple(heatmap_valid.shape)} vs {tuple(pred_heatmap.shape[:-2])}"
+            )
         if not heatmap_valid.any():
             return
 
@@ -418,6 +447,47 @@ class HeatmapModule(pl.LightningModule):
             count,
         )
 
+        if pred_heatmap.ndim == 5:
+            for cls_id, object_name in OBJECT_CLASSES.items():
+                class_valid = heatmap_valid[:, :, int(cls_id)]
+                if not class_valid.any():
+                    continue
+                class_pred = pred_heatmap[:, :, int(cls_id)].float().clamp(0.0, 1.0)[
+                    class_valid
+                ]
+                class_target = target_heatmap.to(
+                    device=pred_heatmap.device
+                ).float()[:, :, int(cls_id)][class_valid]
+                class_target_bin = class_target > 0.3
+                if not class_target_bin.flatten(1).any(dim=1).any():
+                    continue
+                class_positive = class_pred.masked_select(class_target_bin)
+                class_count = int(class_valid.sum().item())
+                safe_name = object_name
+                if class_positive.numel() > 0:
+                    self._log_scalar(
+                        f"{stage}_interaction_heatmap_{safe_name}_positive_mean",
+                        class_positive.mean(),
+                        class_count,
+                    )
+                class_pred_bin = class_pred > 0.3
+                class_intersection = (
+                    class_pred_bin & class_target_bin
+                ).float().flatten(1).sum(dim=1)
+                class_union = (
+                    class_pred_bin | class_target_bin
+                ).float().flatten(1).sum(dim=1)
+                class_valid_union = class_union > 0
+                if class_valid_union.any():
+                    self._log_scalar(
+                        f"{stage}_interaction_heatmap_{safe_name}_iou",
+                        (
+                            class_intersection[class_valid_union]
+                            / class_union[class_valid_union].clamp_min(1.0)
+                        ).mean(),
+                        class_count,
+                    )
+
     def _log_group_metrics(self, prefix, preds, labels):
         if not self.group_indices:
             return
@@ -452,19 +522,26 @@ class HeatmapModule(pl.LightningModule):
 
     def _log_interaction_teacher_metrics(self, actions, valid, heatmap_valid, stage):
         valid = valid.to(device=actions.device, dtype=torch.bool)
-        heatmap_valid = heatmap_valid.to(device=actions.device, dtype=torch.bool) & valid
+        heatmap_valid = heatmap_valid.to(device=actions.device, dtype=torch.bool)
+        if heatmap_valid.ndim != 3:
+            raise RuntimeError(
+                "Class-specific interaction teacher mask must have shape "
+                f"[batch, actors, object_classes], got {tuple(heatmap_valid.shape)}"
+            )
+        heatmap_valid = heatmap_valid & valid.unsqueeze(-1)
+        slot_has_teacher = heatmap_valid.any(dim=-1)
         valid_count = int(valid.sum().item())
         if valid_count <= 0:
             return
 
         self._log_scalar(
             f"{stage}_interaction_teacher_slot_rate",
-            heatmap_valid.float().sum() / max(valid_count, 1),
+            slot_has_teacher.float().sum() / max(valid_count, 1),
             valid_count,
         )
         self.log(
             f"{stage}_interaction_teacher_slot_count",
-            heatmap_valid.float().sum(),
+            slot_has_teacher.float().sum(),
             on_step=False,
             on_epoch=True,
             prog_bar=False,
@@ -480,8 +557,25 @@ class HeatmapModule(pl.LightningModule):
                 continue
             self._log_scalar(
                 f"{stage}_action_{metric_name}_interaction_teacher_rate",
-                heatmap_valid[mask].float().mean(),
+                slot_has_teacher[mask].float().mean(),
                 int(mask.sum().item()),
+            )
+
+        for cls_id, object_name in OBJECT_CLASSES.items():
+            cls_id = int(cls_id)
+            class_teacher = heatmap_valid[:, :, cls_id]
+            if not class_teacher.any():
+                continue
+            self.log(
+                f"{stage}_interaction_teacher_{object_name}_slot_count",
+                class_teacher.float().sum(),
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+                reduce_fx="sum",
+                batch_size=1,
             )
 
     def _append_nash_mtl_params(self, params):
@@ -754,17 +848,41 @@ class HeatmapModule(pl.LightningModule):
             ):
                 heatmap_valid = target["interaction_heatmap_valid"].to(
                     device=valid.device, dtype=torch.bool
-                ) & valid
+                )
+                if heatmap_valid.ndim != 3:
+                    raise RuntimeError(
+                        "interaction_heatmap_valid must have shape "
+                        "[batch, actors, object_classes], got "
+                        f"{tuple(heatmap_valid.shape)}"
+                    )
+                heatmap_valid = heatmap_valid & valid.unsqueeze(-1)
+                positive_heatmap_valid = target.get(
+                    "interaction_heatmap_positive_valid",
+                    target["interaction_heatmap_valid"],
+                ).to(device=valid.device, dtype=torch.bool)
+                if positive_heatmap_valid.shape != heatmap_valid.shape:
+                    raise RuntimeError(
+                        "interaction_heatmap_positive_valid must have shape "
+                        f"{tuple(heatmap_valid.shape)}, got "
+                        f"{tuple(positive_heatmap_valid.shape)}"
+                    )
+                positive_heatmap_valid = positive_heatmap_valid & heatmap_valid
                 self._log_interaction_teacher_metrics(
                     actions,
                     valid,
-                    heatmap_valid,
+                    positive_heatmap_valid,
                     stage,
                 )
                 target_heatmap = target["interaction_heatmap"].to(
                     device=interaction_heatmap.device,
                     dtype=interaction_heatmap.dtype,
                 )
+                if target_heatmap.shape != interaction_heatmap.shape:
+                    raise RuntimeError(
+                        "Class-specific interaction heatmap target/prediction "
+                        f"shape mismatch: {tuple(target_heatmap.shape)} vs "
+                        f"{tuple(interaction_heatmap.shape)}"
+                    )
                 loss_interaction_heatmap = interaction_heatmap_loss(
                     interaction_heatmap,
                     target_heatmap,
@@ -799,7 +917,7 @@ class HeatmapModule(pl.LightningModule):
                     self._log_interaction_heatmap_metrics(
                         interaction_heatmap,
                         target_heatmap,
-                        heatmap_valid,
+                        positive_heatmap_valid,
                         stage,
                     )
 
