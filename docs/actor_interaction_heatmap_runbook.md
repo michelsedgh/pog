@@ -150,6 +150,123 @@ run([
 
 Expected: no traceback.
 
+## Colab Training Helper
+
+Run this once before any training cell. It streams training output and prints a
+complete metrics summary after each saved epoch checkpoint. The summary output is
+captured and printed as one block so Colab progress bars cannot overwrite it.
+
+```python
+import os, shlex, subprocess, sys, threading, time
+from pathlib import Path
+
+os.chdir(REPO_DIR)
+os.environ["PYTHONPATH"] = f"{REPO_DIR}:{os.environ.get('PYTHONPATH', '')}"
+os.environ["PYTHONUNBUFFERED"] = "1"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+_PRINT_LOCK = threading.Lock()
+
+def print_block(text):
+    with _PRINT_LOCK:
+        print(text, end="" if text.endswith("\n") else "\n", flush=True)
+
+def run_print(cmd, cwd=REPO_DIR):
+    text = "\n" + "=" * 100 + "\n"
+    text += "$ " + " ".join(shlex.quote(str(x)) for x in cmd) + "\n"
+    text += "=" * 100 + "\n"
+    print_block(text)
+    subprocess.run(cmd, cwd=cwd, check=True)
+
+def summarize_run_text(run_dir, attempts=6, sleep_secs=5):
+    cmd = [sys.executable, "summarize_interaction_metrics.py", "--run", str(run_dir)]
+    last = None
+    for attempt in range(attempts):
+        proc = subprocess.run(
+            cmd,
+            cwd=REPO_DIR,
+            text=True,
+            capture_output=True,
+        )
+        output = proc.stdout
+        if proc.stderr:
+            output += "\nSTDERR:\n" + proc.stderr
+        last = output
+        if proc.returncode == 0:
+            return output
+        time.sleep(sleep_secs)
+    return last or ""
+
+def emit_summary(run_name, run_dir, epoch_dir, title):
+    ckpts = sorted(Path(epoch_dir).glob("*.ckpt")) if Path(epoch_dir).exists() else []
+    lines = [
+        "\n" + "#" * 100,
+        f"{title}: {run_name}",
+        "#" * 100,
+        f"RUN_DIR: {run_dir}",
+        f"EPOCH_CHECKPOINTS: {len(ckpts)}",
+    ]
+    if ckpts:
+        lines.extend(f"  {p.name}" for p in ckpts[-8:])
+    lines.append("")
+    lines.append(summarize_run_text(run_dir))
+    print_block("\n".join(lines).rstrip() + "\n")
+
+def run_training_with_epoch_summaries(cmd, run_name, epoch_dir, poll_secs=20):
+    run_dir = Path(DATA_DIR) / "checkpoints" / run_name
+    epoch_dir = Path(epoch_dir)
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+    print_block(
+        "RUN_NAME: " + run_name + "\n"
+        "RUN_DIR: " + str(run_dir) + "\n"
+        "EPOCH_DIR: " + str(epoch_dir) + "\n"
+        "$ " + " ".join(shlex.quote(str(x)) for x in cmd) + "\n"
+    )
+
+    proc = subprocess.Popen(
+        cmd,
+        cwd=REPO_DIR,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    def stream_training_output():
+        for line in proc.stdout:
+            print_block(line)
+
+    thread = threading.Thread(target=stream_training_output, daemon=True)
+    thread.start()
+
+    last_count = -1
+    while proc.poll() is None:
+        ckpts = sorted(epoch_dir.glob("*.ckpt")) if epoch_dir.exists() else []
+        count = len(ckpts)
+        if count > 0 and count != last_count:
+            last_count = count
+            emit_summary(
+                run_name,
+                run_dir,
+                epoch_dir,
+                f"SUMMARY AFTER {count} EPOCH CHECKPOINT(S)",
+            )
+        time.sleep(poll_secs)
+
+    ret = proc.wait()
+    thread.join(timeout=2)
+    if ret:
+        emit_summary(run_name, run_dir, epoch_dir, "SUMMARY AFTER FAILURE")
+        raise subprocess.CalledProcessError(ret, cmd)
+
+    emit_summary(run_name, run_dir, epoch_dir, "FINAL SUMMARY")
+    return str(run_dir)
+```
+
 ## Warmup Cell
 
 Start from the actor-slot checkpoint from Cell 1. This trains semantic heatmaps,
@@ -219,9 +336,12 @@ warmup_cmd = [
     "--poguiseplus_heatmap_loss_weight", "1.0",
     "--poguiseplus_pose_heatmap_weight", "0.5",
     "--poguiseplus_interaction_heatmap_weight", "8.0",
+    "--poguiseplus_interaction_target_weight", "24.0",
+    "--poguiseplus_interaction_background_weight", "0.05",
     "--poguiseplus_heatmap_log_eps", "1e-6",
-    "--object_selection_loss_weight", "0.5",
-    "--object_counterfactual_loss_weight", "0.0",
+    "--object_selection_loss_weight", "1.0",
+    "--object_counterfactual_loss_weight", "0.05",
+    "--object_counterfactual_margin", "0.10",
     "--object_counterfactual_eval", "1",
     "--kp_only", "0",
     "--toyota_pose_guided_sampling", "1",
@@ -263,6 +383,7 @@ warmup_cmd = [
 warmup_run_dir = run_training_with_epoch_summaries(
     warmup_cmd,
     RUN_NAME,
+    EPOCH_DIR,
     poll_secs=20,
 )
 print("Warmup run:", warmup_run_dir)
@@ -356,10 +477,12 @@ fullft_cmd = [
     "--poguiseplus_heatmap_loss_weight", "1.0",
     "--poguiseplus_pose_heatmap_weight", "0.5",
     "--poguiseplus_interaction_heatmap_weight", "6.0",
+    "--poguiseplus_interaction_target_weight", "24.0",
+    "--poguiseplus_interaction_background_weight", "0.05",
     "--poguiseplus_heatmap_log_eps", "1e-6",
-    "--object_selection_loss_weight", "0.5",
-    "--object_counterfactual_loss_weight", "0.03",
-    "--object_counterfactual_margin", "0.05",
+    "--object_selection_loss_weight", "1.0",
+    "--object_counterfactual_loss_weight", "0.05",
+    "--object_counterfactual_margin", "0.10",
     "--object_counterfactual_eval", "1",
     "--kp_only", "0",
     "--toyota_pose_guided_sampling", "1",
@@ -401,6 +524,7 @@ fullft_cmd = [
 fullft_run_dir = run_training_with_epoch_summaries(
     fullft_cmd,
     RUN_NAME,
+    EPOCH_DIR,
     poll_secs=20,
 )
 print("Full fine-tune run:", fullft_run_dir)
