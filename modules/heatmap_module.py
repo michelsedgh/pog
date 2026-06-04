@@ -9,7 +9,10 @@ import os
 from losses.softtarget import SoftTargetCrossEntropy
 from losses.heatmap_loss import KeypointMSELoss
 from losses.interaction_heatmap_losses import interaction_heatmap_loss
-from losses.poguiseplus_losses import heatmap_frobenius_loss
+from losses.poguiseplus_losses import (
+    heatmap_frobenius_loss,
+    target_weighted_heatmap_frobenius_loss,
+)
 import pickle
 from datasets.object_vocab import GROUPS, NUM_OBJECT_CLASSES, OBJECT_CLASSES
 from datasets.toyotasm import CS_DICT, CV_DICT
@@ -64,6 +67,12 @@ class HeatmapModule(pl.LightningModule):
         )
         self.poguiseplus_interaction_heatmap_weight = float(
             hparams.get("poguiseplus_interaction_heatmap_weight", 1.0)
+        )
+        self.poguiseplus_interaction_target_weight = float(
+            hparams.get("poguiseplus_interaction_target_weight", 0.0)
+        )
+        self.poguiseplus_interaction_background_weight = float(
+            hparams.get("poguiseplus_interaction_background_weight", 1.0)
         )
         self.poguiseplus_heatmap_log_eps = float(
             hparams.get("poguiseplus_heatmap_log_eps", 1e-6)
@@ -861,11 +870,11 @@ class HeatmapModule(pl.LightningModule):
             1,
             true_labels.unsqueeze(1),
         ).squeeze(1)
-        logit_drop = base_true_logits.detach() - counterfactual_true_logits
+        logit_drop = base_true_logits - counterfactual_true_logits
         count = int(true_labels.numel())
         self._log_scalar(
             f"{stage}_object_counterfactual_selected_logit_drop",
-            logit_drop.mean(),
+            logit_drop.detach().mean(),
             count,
         )
 
@@ -1192,6 +1201,7 @@ class HeatmapModule(pl.LightningModule):
                 loss_kp = torch.log(loss_kp + 1e-6)
 
         loss_interaction_frobenius = None
+        loss_interaction_raw_frobenius = None
         if self.actor_interaction_heatmaps:
             interaction_heatmap = self._interaction_heatmap_pred(hm_preds)
             if (
@@ -1243,14 +1253,40 @@ class HeatmapModule(pl.LightningModule):
                 )
                 if loss_interaction_heatmap is None:
                     loss_interaction_heatmap = interaction_heatmap.new_zeros(())
-                loss_interaction_frobenius = heatmap_frobenius_loss(
+                loss_interaction_raw_frobenius = heatmap_frobenius_loss(
                     interaction_heatmap,
                     target_heatmap,
                     valid=heatmap_valid,
                 )
+                if (
+                    self.poguiseplus_interaction_target_weight > 0
+                    or self.poguiseplus_interaction_background_weight != 1.0
+                ):
+                    loss_interaction_frobenius = (
+                        target_weighted_heatmap_frobenius_loss(
+                            interaction_heatmap,
+                            target_heatmap,
+                            valid=heatmap_valid,
+                            target_weight=self.poguiseplus_interaction_target_weight,
+                            background_weight=(
+                                self.poguiseplus_interaction_background_weight
+                            ),
+                        )
+                    )
+                else:
+                    loss_interaction_frobenius = loss_interaction_raw_frobenius
                 self.log(
                     f"{stage}_loss_interaction_heatmap",
                     loss_interaction_heatmap,
+                    on_step=stage == "train",
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                    sync_dist=True,
+                )
+                self.log(
+                    f"{stage}_loss_interaction_heatmap_raw_frobenius",
+                    loss_interaction_raw_frobenius,
                     on_step=stage == "train",
                     on_epoch=True,
                     prog_bar=False,

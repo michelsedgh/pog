@@ -14,6 +14,7 @@ CORE_COLUMNS = [
     "val_loss_heatmap_log",
     "val_loss_heatmap_frobenius",
     "val_loss_pose_heatmap_frobenius",
+    "val_loss_interaction_heatmap_raw_frobenius",
     "val_loss_interaction_heatmap_frobenius",
     "train_nash_weight_action",
     "train_nash_weight_heatmap",
