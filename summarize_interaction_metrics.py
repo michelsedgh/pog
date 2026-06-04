@@ -93,6 +93,11 @@ def parse_args():
     )
     parser.add_argument("--run", default=None, help="Specific run directory.")
     parser.add_argument("--metrics", default=None, help="Specific metrics.csv path.")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print full heatmap/channel/group diagnostics instead of the compact object-use summary.",
+    )
     return parser.parse_args()
 
 
@@ -186,6 +191,96 @@ def print_table(title, rows, columns=None):
         80,
     ):
         print(table.to_string(index=False))
+
+
+def print_compact_object_use_summary(epoch_df):
+    cols = [
+        "epoch",
+        "val_acc_macro",
+        "val_f1",
+        "val_object_selection_acc",
+        "val_object_selection_true_prob",
+        "val_object_counterfactual_selected_logit_drop",
+        "val_object_counterfactual_selected_prob_drop",
+        "val_action_Uselaptop_acc",
+        "val_action_Readbook_acc",
+        "val_action_Usetelephone_acc",
+        "val_action_Drink_Fromcup_acc",
+        "val_action_Drink_Frombottle_acc",
+        "val_interaction_heatmap_laptop_positive_mean",
+        "val_interaction_heatmap_laptop_iou",
+        "val_interaction_heatmap_book_positive_mean",
+        "val_interaction_heatmap_phone_positive_mean",
+        "val_interaction_heatmap_cup_positive_mean",
+        "val_interaction_heatmap_bottle_positive_mean",
+    ]
+    display_cols = [col for col in cols if col in epoch_df.columns]
+    if len(display_cols) > 1:
+        print("\nOBJECT-ACTION USE SUMMARY:\n")
+        with pd.option_context("display.max_columns", None, "display.width", 220):
+            print(epoch_df[display_cols].to_string(index=False))
+
+
+def print_compact_target_actions(epoch_df):
+    rows = action_progress_rows(epoch_df)
+    if not rows:
+        return
+    keep = {
+        "Uselaptop",
+        "Readbook",
+        "Usetelephone",
+        "Drink_Fromcup",
+        "Drink_Frombottle",
+        "Pour_Frombottle",
+        "Cutbread",
+        "Cook_Cut",
+    }
+    rows = [row for row in rows if row["action"] in keep]
+    print_table(
+        "KEY TARGET ACTIONS",
+        rows,
+        [
+            "action",
+            "teacher",
+            "e0_acc",
+            "latest_acc",
+            "delta",
+            "best_epoch",
+            "best_acc",
+            "verdict",
+        ],
+    )
+
+
+def print_compact_best(epoch_df):
+    metrics = [
+        "val_f1",
+        "val_object_selection_acc",
+        "val_object_selection_true_prob",
+        "val_object_counterfactual_selected_logit_drop",
+        "val_object_counterfactual_selected_prob_drop",
+        "val_action_Uselaptop_acc",
+        "val_action_Readbook_acc",
+        "val_action_Usetelephone_acc",
+        "interaction_score",
+    ]
+    rows = []
+    for name in metrics:
+        if not df_has_metric(epoch_df, name) and name != "interaction_score":
+            continue
+        series = df_metric(epoch_df, name, float("nan"))
+        valid = series.dropna()
+        if not len(valid):
+            continue
+        best_idx = valid.idxmax()
+        rows.append(
+            {
+                "metric": name,
+                "best_epoch": epoch_df.loc[best_idx, "epoch"],
+                "best_value": series.loc[best_idx],
+            }
+        )
+    print_table("BEST COMPACT SIGNALS", rows, ["metric", "best_epoch", "best_value"])
 
 
 def print_object_use_epoch_table(epoch_df):
@@ -632,14 +727,6 @@ def main():
     display_cols = [col for col in CORE_COLUMNS if col in epoch_df.columns]
     print("run:", run)
     print("metrics:", metrics)
-    print("\nEPOCH SUMMARY:\n")
-    print(epoch_df[display_cols].to_string(index=False))
-
-    print_object_use_epoch_table(epoch_df)
-    print_object_channel_progress(epoch_df)
-    print_action_progress(epoch_df)
-    print_group_progress(epoch_df)
-    print_best_epochs(epoch_df)
 
     latest = epoch_df.iloc[-1]
     valid_score = epoch_df["interaction_score"].notna()
@@ -648,15 +735,27 @@ def main():
     else:
         best = latest
 
-    print_row("LATEST", latest)
-    print_row("BEST_BY_INTERACTION_SCORE", best)
+    if args.verbose:
+        print("\nEPOCH SUMMARY:\n")
+        print(epoch_df[display_cols].to_string(index=False))
+        print_object_use_epoch_table(epoch_df)
+        print_object_channel_progress(epoch_df)
+        print_action_progress(epoch_df)
+        print_group_progress(epoch_df)
+        print_best_epochs(epoch_df)
+        print_row("LATEST", latest)
+        print_row("BEST_BY_INTERACTION_SCORE", best)
+    else:
+        print_compact_object_use_summary(epoch_df)
+        print_compact_target_actions(epoch_df)
+        print_compact_best(epoch_df)
+
     print_decision(epoch_df)
 
     print("\nREAD THIS:")
-    print("- Interaction heatmap IoU/positive response/center error show whether the model is learning object-region supervision.")
-    print("- Target group/action accuracy shows whether the actor classifier still handles object-confusable classes.")
-    print("- Object heatmap channels are class-specific actor-object teacher labels.")
-    print("- Object selection/counterfactual metrics show whether runtime object tokens are used.")
+    print("- Main proof: object selection is high AND selected-object removal drops the true action logit/prob.")
+    print("- Guardrail: val_f1/per-action target accuracy should not collapse while object-use metrics rise.")
+    print("- Heatmap/object-channel metrics are secondary; use --verbose when debugging teacher quality.")
     print("- With --scene_object_tokens 1, RF-DETR boxes are runtime model inputs as well as teacher labels.")
 
 

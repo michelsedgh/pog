@@ -201,6 +201,50 @@ class ActorObjectSelectionHead(nn.Module):
         return torch.cat([none_logits, object_logits], dim=-1)
 
 
+class ActorObjectActionFusion(nn.Module):
+    def __init__(self, dim, hidden_dim=512, gate_init=1.0):
+        super().__init__()
+        self.actor_norm = nn.LayerNorm(dim)
+        self.object_norm = nn.LayerNorm(dim)
+        self.fusion = nn.Sequential(
+            nn.LayerNorm(dim * 3),
+            nn.Linear(dim * 3, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, dim),
+        )
+        self.gate = nn.Parameter(torch.tensor(float(gate_init)))
+
+    def forward(self, actor_tokens, object_tokens, object_selection_logits):
+        if actor_tokens.ndim != 3 or object_tokens.ndim != 3:
+            raise ValueError("actor_tokens and object_tokens must be rank-3 tensors")
+        if object_selection_logits.ndim != 3:
+            raise ValueError("object_selection_logits must be rank-3")
+        expected = (actor_tokens.shape[0], actor_tokens.shape[1], object_tokens.shape[1] + 1)
+        if object_selection_logits.shape != expected:
+            raise ValueError(
+                "object_selection_logits must have shape "
+                f"{expected}, got {tuple(object_selection_logits.shape)}"
+            )
+
+        # Index 0 is NONE. Excluding it makes the selected object context shrink
+        # naturally when the actor should not use any detected object.
+        object_probs = object_selection_logits.softmax(dim=-1)[..., 1:]
+        object_context = torch.einsum("bkm,bmd->bkd", object_probs, object_tokens)
+        actor_norm = self.actor_norm(actor_tokens)
+        object_norm = self.object_norm(object_context)
+        fused_delta = self.fusion(
+            torch.cat(
+                (
+                    actor_norm,
+                    object_norm,
+                    actor_norm * object_norm,
+                ),
+                dim=-1,
+            )
+        )
+        return actor_tokens + self.gate.to(dtype=actor_tokens.dtype) * fused_delta
+
+
 class POGUISE(pl.LightningModule):
     def __init__(self, net_size="t", pretrained=None, **kwargs):
         super().__init__()
@@ -211,8 +255,13 @@ class POGUISE(pl.LightningModule):
             self.hparams.get("actor_interaction_heatmaps", 0)
         )
         self.scene_object_tokens = bool(self.hparams.get("scene_object_tokens", 0))
+        self.actor_object_action_fusion = bool(
+            self.hparams.get("actor_object_action_fusion", 0)
+        ) and self.scene_object_tokens
         if self.scene_object_tokens and not self.actor_prompt:
             raise ValueError("scene_object_tokens requires actor_prompt")
+        if self.actor_object_action_fusion and not self.scene_object_tokens:
+            raise ValueError("actor_object_action_fusion requires scene_object_tokens")
         if self.actor_interaction_heatmaps and not self.actor_prompt:
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
         if self.hparams.get("interaction_warmup_freeze_actor_path", 0):
@@ -341,6 +390,21 @@ class POGUISE(pl.LightningModule):
                 if self.scene_object_tokens
                 else None
             )
+            self.object_action_fusion = (
+                ActorObjectActionFusion(
+                    self.net.num_features,
+                    hidden_dim=self.hparams.get(
+                        "actor_object_action_fusion_hidden_dim",
+                        512,
+                    ),
+                    gate_init=self.hparams.get(
+                        "actor_object_action_fusion_gate_init",
+                        1.0,
+                    ),
+                )
+                if self.actor_object_action_fusion
+                else None
+            )
         if self.hparams.get("linear_probe", 0):
             self._freeze_backbone()
             self.head = Classifier(
@@ -397,6 +461,9 @@ class POGUISE(pl.LightningModule):
             if self.object_selection_head is not None:
                 for param in self.object_selection_head.parameters():
                     param.requires_grad = True
+            if getattr(self, "object_action_fusion", None) is not None:
+                for param in self.object_action_fusion.parameters():
+                    param.requires_grad = True
         interaction_unfreeze_last_blocks = int(
             self.hparams.get("interaction_unfreeze_last_blocks", 0) or 0
         )
@@ -445,6 +512,9 @@ class POGUISE(pl.LightningModule):
                         param.requires_grad = True
                 if self.object_selection_head is not None:
                     for param in self.object_selection_head.parameters():
+                        param.requires_grad = True
+                if getattr(self, "object_action_fusion", None) is not None:
+                    for param in self.object_action_fusion.parameters():
                         param.requires_grad = True
 
     def _freeze_stages(self):
@@ -512,9 +582,6 @@ class POGUISE(pl.LightningModule):
                 else:
                     _, x_actor = data[:2]
                 x_heatmap = 0
-            if self.hparams.ret_feat:
-                return x_actor
-            action_logits = self.actor_head(x_actor)
             object_selection_logits = None
             if self.object_selection_head is not None:
                 if object_valid is None:
@@ -526,6 +593,20 @@ class POGUISE(pl.LightningModule):
                     x_object,
                     object_valid.to(device=x_actor.device, dtype=torch.bool),
                 )
+            action_tokens = x_actor
+            if getattr(self, "object_action_fusion", None) is not None:
+                if object_selection_logits is None:
+                    raise RuntimeError(
+                        "actor_object_action_fusion requires object_selection_logits"
+                    )
+                action_tokens = self.object_action_fusion(
+                    x_actor,
+                    x_object,
+                    object_selection_logits,
+                )
+            if self.hparams.ret_feat:
+                return action_tokens
+            action_logits = self.actor_head(action_tokens)
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
                 if object_selection_logits is not None:
@@ -602,6 +683,17 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--scene_object_tokens", type=int, default=0)
         parser.add_argument("--num_scene_object_tokens", type=int, default=32)
         parser.add_argument("--num_object_classes", type=int, default=19)
+        parser.add_argument("--actor_object_action_fusion", type=int, default=1)
+        parser.add_argument(
+            "--actor_object_action_fusion_hidden_dim",
+            type=int,
+            default=512,
+        )
+        parser.add_argument(
+            "--actor_object_action_fusion_gate_init",
+            type=float,
+            default=1.0,
+        )
         parser.add_argument("--interaction_unfreeze_last_blocks", type=int, default=0)
         parser.add_argument("--ret_feat", type=int, default=0)
         parser.add_argument("--linear_probe", type=int, default=0)

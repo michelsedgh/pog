@@ -15,6 +15,7 @@ import numpy as np
 import torch
 from PIL import Image
 
+from datasets.object_vocab import DETECTOR_TO_OBJECT, NONE_OBJECT_ID, OBJECT_CLASSES, OBJECT_TO_ID
 from utils.actor_tensorrt import TensorRTActorEngine
 
 
@@ -66,8 +67,10 @@ def parse_args():
     parser.add_argument("--detector-fp16", type=int, default=0, choices=[0, 1])
     parser.add_argument("--engine", type=str, default=None)
     parser.add_argument("--det-threshold", type=float, default=0.35)
+    parser.add_argument("--object-threshold", type=float, default=0.25)
     parser.add_argument("--person-class-id", type=int, default=None)
     parser.add_argument("--max-actors", type=int, default=8)
+    parser.add_argument("--max-objects", type=int, default=None)
     parser.add_argument("--buffer-frames", type=int, default=32)
     parser.add_argument("--clip-frames", type=int, default=16)
     parser.add_argument("--clip-stride", type=int, default=1)
@@ -101,6 +104,12 @@ def parse_args():
         raise ValueError("--track-hold-frames must be >= 0")
     if not 0.0 <= args.track_iou_threshold <= 1.0:
         raise ValueError("--track-iou-threshold must be in [0, 1]")
+    if not 0.0 <= args.det_threshold <= 1.0:
+        raise ValueError("--det-threshold must be in [0, 1]")
+    if not 0.0 <= args.object_threshold <= 1.0:
+        raise ValueError("--object-threshold must be in [0, 1]")
+    if args.max_objects is not None and args.max_objects < 0:
+        raise ValueError("--max-objects must be >= 0")
     return args
 
 
@@ -301,7 +310,40 @@ def sample_clip(buffer, clip_frames, clip_stride):
     return [buffer[int(index)] for index in indices]
 
 
-def detections_to_people(detector, person_ids, frame_rgb, threshold, max_actors):
+def detector_class_name(detector, class_id):
+    class_names = getattr(detector, "class_names", None)
+    if isinstance(class_names, dict):
+        name = class_names.get(int(class_id))
+        if name is None:
+            name = class_names.get(str(int(class_id)))
+        return None if name is None else str(name)
+    if isinstance(class_names, (list, tuple)):
+        class_id = int(class_id)
+        if 0 <= class_id < len(class_names):
+            return str(class_names[class_id])
+    return None
+
+
+def detector_class_to_object_id(detector, class_id):
+    class_name = detector_class_name(detector, class_id)
+    if class_name is None:
+        return None
+    object_name = DETECTOR_TO_OBJECT.get(class_name.strip().lower())
+    if object_name is None:
+        return None
+    return OBJECT_TO_ID.get(object_name)
+
+
+def detections_to_people_and_objects(
+    detector,
+    person_ids,
+    frame_rgb,
+    person_threshold,
+    object_threshold,
+    max_actors,
+    max_objects,
+):
+    threshold = min(float(person_threshold), float(object_threshold))
     detections = detector.predict(Image.fromarray(frame_rgb), threshold=threshold)
     xyxy = np.asarray(getattr(detections, "xyxy", []), dtype=np.float32)
     class_id = getattr(detections, "class_id", None)
@@ -310,13 +352,60 @@ def detections_to_people(detector, person_ids, frame_rgb, threshold, max_actors)
         raise RuntimeError("RF-DETR detections must expose class_id and confidence.")
     class_id = np.asarray(class_id)
     confidence = np.asarray(confidence, dtype=np.float32)
-    keep = np.asarray([int(class_value) in person_ids for class_value in class_id], dtype=bool)
-    xyxy = xyxy[keep]
-    confidence = confidence[keep]
-    if len(xyxy) == 0:
-        return xyxy, confidence
-    order = np.argsort(-confidence)[:max_actors]
-    return xyxy[order], confidence[order]
+
+    person_keep = np.asarray(
+        [
+            int(class_value) in person_ids and float(conf) >= float(person_threshold)
+            for class_value, conf in zip(class_id, confidence)
+        ],
+        dtype=bool,
+    )
+    people_xyxy = xyxy[person_keep]
+    people_conf = confidence[person_keep]
+    if len(people_xyxy) > 0:
+        order = np.argsort(-people_conf)[:max_actors]
+        people_xyxy = people_xyxy[order]
+        people_conf = people_conf[order]
+
+    object_records = []
+    if max_objects > 0:
+        for box, class_value, conf in zip(xyxy, class_id, confidence):
+            if int(class_value) in person_ids or float(conf) < float(object_threshold):
+                continue
+            object_id = detector_class_to_object_id(detector, int(class_value))
+            if object_id is None:
+                continue
+            object_records.append(
+                (
+                    float(conf),
+                    np.asarray(box, dtype=np.float32),
+                    int(object_id),
+                    OBJECT_CLASSES[int(object_id)],
+                )
+            )
+    object_records.sort(key=lambda item: item[0], reverse=True)
+    object_records = object_records[:max_objects]
+    if object_records:
+        object_conf = np.asarray([item[0] for item in object_records], dtype=np.float32)
+        object_xyxy = np.stack([item[1] for item in object_records], axis=0).astype(
+            np.float32
+        )
+        object_class_ids = np.asarray([item[2] for item in object_records], dtype=np.int64)
+        object_labels = [item[3] for item in object_records]
+    else:
+        object_xyxy = np.zeros((0, 4), dtype=np.float32)
+        object_class_ids = np.zeros((0,), dtype=np.int64)
+        object_conf = np.zeros((0,), dtype=np.float32)
+        object_labels = []
+
+    return (
+        people_xyxy,
+        people_conf,
+        object_xyxy,
+        object_class_ids,
+        object_conf,
+        object_labels,
+    )
 
 
 def pack_actor_boxes(boxes_norm, valid_box_mask, max_actors, device):
@@ -327,6 +416,55 @@ def pack_actor_boxes(boxes_norm, valid_box_mask, max_actors, device):
         boxes[0, : len(kept)] = torch.from_numpy(kept).to(device=device, dtype=torch.float32)
         valid[0, : len(kept)] = True
     return boxes, valid
+
+
+def pack_object_tokens(
+    boxes_norm,
+    valid_box_mask,
+    object_class_ids,
+    object_confs,
+    object_labels,
+    max_objects,
+    device,
+):
+    boxes = torch.zeros((1, max_objects, 4), dtype=torch.float32, device=device)
+    classes = torch.full(
+        (1, max_objects),
+        int(NONE_OBJECT_ID),
+        dtype=torch.long,
+        device=device,
+    )
+    confs = torch.zeros((1, max_objects), dtype=torch.float32, device=device)
+    valid = torch.zeros((1, max_objects), dtype=torch.bool, device=device)
+    packed = []
+
+    kept_indices = np.flatnonzero(np.asarray(valid_box_mask, dtype=bool))[:max_objects]
+    for slot, source_index in enumerate(kept_indices):
+        boxes[0, slot] = torch.from_numpy(
+            np.asarray(boxes_norm[source_index], dtype=np.float32)
+        ).to(device=device)
+        classes[0, slot] = int(object_class_ids[source_index])
+        confs[0, slot] = float(object_confs[source_index])
+        valid[0, slot] = True
+        packed.append(
+            {
+                "slot": int(slot),
+                "label": str(object_labels[source_index]),
+                "object_class_id": int(object_class_ids[source_index]),
+                "conf": float(object_confs[source_index]),
+                "box_norm": boxes_norm[source_index].astype(float).tolist(),
+            }
+        )
+
+    return (
+        {
+            "object_boxes": boxes,
+            "object_classes": classes,
+            "object_confs": confs,
+            "object_valid": valid,
+        },
+        packed,
+    )
 
 
 def bbox_iou_xyxy(box_a, box_b):
@@ -354,14 +492,17 @@ class ActionTrack:
         self.last_seen = int(frame_index)
         self.action_probs = deque(maxlen=int(smoothing_window))
         self.presence_probs = deque(maxlen=int(smoothing_window))
+        self.latest_extra_payload = {}
 
     def update_detection(self, bbox_xyxy, frame_index):
         self.bbox_xyxy = np.asarray(bbox_xyxy, dtype=np.float32)
         self.last_seen = int(frame_index)
 
-    def update_action(self, probs, presence):
+    def update_action(self, probs, presence, extra_payload=None):
         self.action_probs.append(np.asarray(probs, dtype=np.float32).copy())
         self.presence_probs.append(float(presence))
+        if extra_payload is not None:
+            self.latest_extra_payload = dict(extra_payload)
 
     def action_payload(self):
         if not self.action_probs:
@@ -376,6 +517,7 @@ class ActionTrack:
         }
         if self.presence_probs:
             payload["presence"] = float(np.mean(self.presence_probs))
+        payload.update(self.latest_extra_payload)
         return payload
 
 
@@ -389,12 +531,46 @@ class TorchActorBackend:
         self.clip_frames = int(self.hparams.get("n_frames", 16))
         self.input_size = 224
         self.backend_name = "pytorch"
+        self.scene_object_tokens = bool(self.hparams.get("scene_object_tokens", 0))
+        self.num_scene_object_tokens = (
+            int(self.hparams.get("num_scene_object_tokens", 0))
+            if self.scene_object_tokens
+            else 0
+        )
 
-    def __call__(self, clip, boxes, valid):
+    def __call__(self, clip, boxes, valid, object_inputs=None):
+        model_kwargs = {"boxes": boxes, "valid": valid}
+        if self.scene_object_tokens:
+            if object_inputs is None:
+                raise RuntimeError(
+                    "This checkpoint has scene_object_tokens=1, so live inference "
+                    "must pass object_boxes, object_classes, object_confs, and object_valid."
+                )
+            expected_keys = {
+                "object_boxes",
+                "object_classes",
+                "object_confs",
+                "object_valid",
+            }
+            missing = sorted(expected_keys - set(object_inputs))
+            if missing:
+                raise RuntimeError(f"Missing object input keys: {missing}")
+            model_kwargs.update(object_inputs)
+        elif object_inputs is not None:
+            raise RuntimeError("Object inputs were passed to a checkpoint without object tokens.")
+
         with torch.inference_mode():
-            output = self.model(clip, boxes=boxes, valid=valid)
-            logits, _heatmap, presence = output
-        return logits, presence
+            output = self.model(clip, **model_kwargs)
+            if not isinstance(output, (tuple, list)):
+                raise RuntimeError(f"Unexpected model output type: {type(output)}")
+            if len(output) == 4:
+                logits, _heatmap, presence, object_selection = output
+            elif len(output) == 3:
+                logits, _heatmap, presence = output
+                object_selection = None
+            else:
+                raise RuntimeError(f"Unexpected model output length: {len(output)}")
+        return logits, presence, object_selection
 
 
 class TensorRTActorBackend:
@@ -405,9 +581,14 @@ class TensorRTActorBackend:
         self.clip_frames = self.engine.clip_frames
         self.input_size = self.engine.input_size
         self.backend_name = "tensorrt"
+        self.scene_object_tokens = False
+        self.num_scene_object_tokens = 0
 
-    def __call__(self, clip, boxes, valid):
-        return self.engine(clip, boxes, valid)
+    def __call__(self, clip, boxes, valid, object_inputs=None):
+        if object_inputs is not None:
+            raise RuntimeError("The TensorRT backend does not support live object tokens.")
+        logits, presence = self.engine(clip, boxes, valid)
+        return logits, presence, None
 
 
 def load_actor_backend(args):
@@ -430,7 +611,18 @@ def run_actor_smoke(args, actor):
     )
     boxes_norm, keep = transform_boxes_to_crop(boxes_xyxy, transform, args.input_size)
     boxes, valid = pack_actor_boxes(boxes_norm, keep, args.max_actors, actor.device)
-    logits, presence = actor(clip, boxes, valid)
+    object_inputs = None
+    if actor.scene_object_tokens:
+        object_inputs, _packed_objects = pack_object_tokens(
+            np.zeros((0, 4), dtype=np.float32),
+            np.zeros((0,), dtype=bool),
+            np.zeros((0,), dtype=np.int64),
+            np.zeros((0,), dtype=np.float32),
+            [],
+            actor.num_scene_object_tokens,
+            actor.device,
+        )
+    logits, presence, object_selection = actor(clip, boxes, valid, object_inputs)
     probs = torch.softmax(logits[0, 0], dim=-1)
     print(
         "smoke ok:",
@@ -439,7 +631,12 @@ def run_actor_smoke(args, actor):
             "engine": args.engine,
             "backend": actor.backend_name,
             "device": str(actor.device),
+            "scene_object_tokens": bool(actor.scene_object_tokens),
+            "num_scene_object_tokens": int(actor.num_scene_object_tokens),
             "valid_slots": int(valid.sum().item()),
+            "object_selection_shape": None
+            if object_selection is None
+            else tuple(object_selection.shape),
             "top_action": ACTION_CLASSES[int(probs.argmax().item())],
             "top_prob": float(probs.max().item()),
             "presence": float(torch.sigmoid(presence[0, 0]).item()),
@@ -457,8 +654,11 @@ class DashboardState:
             "message": "initializing",
             "frame": 0,
             "actors": [],
+            "objects": [],
             "actor_backend": None,
             "actor_device": None,
+            "scene_object_tokens": None,
+            "num_scene_object_tokens": None,
             "detector_device": None,
             "detector_optimized": None,
             "last_detector_ms": None,
@@ -480,19 +680,39 @@ class DashboardState:
             return self.jpeg, dict(self.status)
 
 
-def draw_overlay(frame_bgr, actors, message):
+def draw_overlay(frame_bgr, actors, objects, message):
     out = frame_bgr.copy()
+    for obj in objects:
+        x1, y1, x2, y2 = [int(v) for v in obj["xyxy"]]
+        text = f"{obj.get('label', 'object')} {obj.get('conf', 0.0):.2f}"
+        cv2.rectangle(out, (x1, y1), (x2, y2), (0, 180, 255), 2)
+        cv2.putText(
+            out,
+            text,
+            (x1, max(20, y1 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (0, 180, 255),
+            2,
+            cv2.LINE_AA,
+        )
     for actor in actors:
         x1, y1, x2, y2 = [int(v) for v in actor["xyxy"]]
         label = actor.get("label", "person")
         action_conf = actor.get("action_conf")
         det_conf = actor.get("det_conf")
         presence = actor.get("presence")
+        selected_object = actor.get("selected_object")
+        selected_object_conf = actor.get("selected_object_conf")
         text = label
         if action_conf is not None:
             text += f" {action_conf:.2f}"
         if presence is not None:
             text += f" pres={presence:.2f}"
+        if selected_object is not None:
+            text += f" obj={selected_object}"
+            if selected_object_conf is not None:
+                text += f":{selected_object_conf:.2f}"
         if det_conf is not None:
             text += f" det={det_conf:.2f}"
         cv2.rectangle(out, (x1, y1), (x2, y2), (0, 220, 0), 2)
@@ -537,6 +757,17 @@ class LiveRunner:
             raise RuntimeError(
                 f"--input-size must match actor input size={self.actor.input_size}"
             )
+        self.max_objects = (
+            self.actor.num_scene_object_tokens
+            if self.actor.scene_object_tokens
+            else int(args.max_objects or 0)
+        )
+        if self.actor.scene_object_tokens and args.max_objects is not None:
+            if int(args.max_objects) != self.actor.num_scene_object_tokens:
+                raise RuntimeError(
+                    "--max-objects must match checkpoint scene object slots="
+                    f"{self.actor.num_scene_object_tokens}"
+                )
         self.detector, self.person_ids = load_rfdetr(
             args.person_class_id,
             args.detector_device,
@@ -547,6 +778,8 @@ class LiveRunner:
         self.state.update(
             actor_backend=self.actor.backend_name,
             actor_device=str(self.actor.device),
+            scene_object_tokens=bool(self.actor.scene_object_tokens),
+            num_scene_object_tokens=int(self.actor.num_scene_object_tokens),
             detector_device=args.detector_device,
             detector_optimized=bool(args.detector_optimize),
         )
@@ -554,6 +787,10 @@ class LiveRunner:
         self.frame_count = 0
         self.last_boxes_xyxy = np.zeros((0, 4), dtype=np.float32)
         self.last_det_conf = np.zeros((0,), dtype=np.float32)
+        self.last_object_boxes_xyxy = np.zeros((0, 4), dtype=np.float32)
+        self.last_object_class_ids = np.zeros((0,), dtype=np.int64)
+        self.last_object_conf = np.zeros((0,), dtype=np.float32)
+        self.last_object_labels = []
         self.last_detection_frame = None
         self.last_detector_ms = None
         self.last_actor_ms = None
@@ -648,12 +885,21 @@ class LiveRunner:
 
                 if run_detection:
                     started = time.perf_counter()
-                    self.last_boxes_xyxy, self.last_det_conf = detections_to_people(
+                    (
+                        self.last_boxes_xyxy,
+                        self.last_det_conf,
+                        self.last_object_boxes_xyxy,
+                        self.last_object_class_ids,
+                        self.last_object_conf,
+                        self.last_object_labels,
+                    ) = detections_to_people_and_objects(
                         self.detector,
                         self.person_ids,
                         frame_rgb,
                         self.args.det_threshold,
+                        self.args.object_threshold,
                         self.args.max_actors,
+                        self.max_objects,
                     )
                     self.last_detector_ms = (time.perf_counter() - started) * 1000.0
                     self.last_detection_frame = self.frame_count
@@ -686,6 +932,21 @@ class LiveRunner:
                     if track is not None:
                         actor.update(track.action_payload())
 
+                objects = [
+                    {
+                        "xyxy": box.tolist(),
+                        "label": label,
+                        "object_class_id": int(object_id),
+                        "conf": float(conf),
+                    }
+                    for box, label, object_id, conf in zip(
+                        self.last_object_boxes_xyxy,
+                        self.last_object_labels,
+                        self.last_object_class_ids,
+                        self.last_object_conf,
+                    )
+                ]
+
                 should_run_action = action_due and len(self.last_boxes_xyxy) > 0
                 if should_run_action:
                     clip_frames = sample_clip(
@@ -716,14 +977,44 @@ class LiveRunner:
                         self.args.max_actors,
                         self.device,
                     )
+                    object_inputs = None
+                    packed_objects = []
+                    if self.actor.scene_object_tokens:
+                        object_boxes_norm, object_keep = transform_boxes_to_crop(
+                            self.last_object_boxes_xyxy,
+                            transform,
+                            self.args.input_size,
+                        )
+                        object_inputs, packed_objects = pack_object_tokens(
+                            object_boxes_norm,
+                            object_keep,
+                            self.last_object_class_ids,
+                            self.last_object_conf,
+                            self.last_object_labels,
+                            self.actor.num_scene_object_tokens,
+                            self.device,
+                        )
                     if valid.any():
                         started = time.perf_counter()
-                        logits, presence_logits = self.actor(clip, boxes, valid)
+                        logits, presence_logits, object_selection_logits = self.actor(
+                            clip,
+                            boxes,
+                            valid,
+                            object_inputs,
+                        )
                         self.last_actor_ms = (time.perf_counter() - started) * 1000.0
                         action_probs = torch.softmax(logits[0], dim=-1).detach().cpu().numpy()
                         presence_probs = (
                             torch.sigmoid(presence_logits[0]).detach().cpu().numpy()
                         )
+                        selection_probs = None
+                        if object_selection_logits is not None:
+                            selection_probs = (
+                                torch.softmax(object_selection_logits[0], dim=-1)
+                                .detach()
+                                .cpu()
+                                .numpy()
+                            )
                         kept_actor_idx = np.flatnonzero(keep)[: self.args.max_actors]
                         for slot, actor_idx in enumerate(kept_actor_idx):
                             if actor_idx >= len(self.current_track_ids):
@@ -732,12 +1023,44 @@ class LiveRunner:
                             track = self.tracks.get(track_id)
                             if track is None:
                                 continue
-                            track.update_action(action_probs[slot], presence_probs[slot])
                             action_id = int(action_probs[slot].argmax())
                             raw_payload = {
                                 "raw_label": ACTION_CLASSES[action_id],
                                 "raw_action_conf": float(action_probs[slot, action_id]),
                             }
+                            if selection_probs is not None:
+                                selected_index = int(selection_probs[slot].argmax())
+                                selected_conf = float(selection_probs[slot, selected_index])
+                                selection_payload = {
+                                    "selected_object": "none",
+                                    "selected_object_conf": selected_conf,
+                                }
+                                if selected_index > 0:
+                                    object_slot = selected_index - 1
+                                    if object_slot < len(packed_objects):
+                                        selected_object = packed_objects[object_slot]
+                                        selection_payload.update(
+                                            {
+                                                "selected_object": selected_object["label"],
+                                                "selected_object_slot": int(object_slot),
+                                                "selected_object_det_conf": float(
+                                                    selected_object["conf"]
+                                                ),
+                                            }
+                                        )
+                                    else:
+                                        selection_payload.update(
+                                            {
+                                                "selected_object": "invalid_slot",
+                                                "selected_object_slot": int(object_slot),
+                                            }
+                                        )
+                                raw_payload.update(selection_payload)
+                            track.update_action(
+                                action_probs[slot],
+                                presence_probs[slot],
+                                raw_payload,
+                            )
                             actors[int(actor_idx)].update(
                                 track.action_payload()
                             )
@@ -751,6 +1074,7 @@ class LiveRunner:
                                 actor.update(payload)
                         message = (
                             f"{self.actor.backend_name} actors={int(valid.sum().item())} "
+                            f"objects={len(packed_objects)}/{len(objects)} "
                             f"det={self.last_detector_ms:.0f}ms "
                             f"actor={self.last_actor_ms:.0f}ms "
                             f"det_age={det_age} "
@@ -764,7 +1088,7 @@ class LiveRunner:
                 elif len(self.last_boxes_xyxy) == 0:
                     message = "no RF-DETR person detections"
 
-                overlay = draw_overlay(frame_bgr, actors, message)
+                overlay = draw_overlay(frame_bgr, actors, objects, message)
                 ok, encoded = cv2.imencode(
                     ".jpg",
                     overlay,
@@ -777,6 +1101,7 @@ class LiveRunner:
                         message=message,
                         frame=self.frame_count,
                         actors=actors,
+                        objects=objects,
                         last_detector_ms=self.last_detector_ms,
                         last_actor_ms=self.last_actor_ms,
                         det_age_frames=det_age,
