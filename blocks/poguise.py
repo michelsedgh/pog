@@ -901,7 +901,6 @@ class VisionTransformer(nn.Module):
         actor_bbox_prior_weight=0.1,
         actor_bbox_prior_expand=1.75,
         actor_interaction_heatmaps=0,
-        interaction_object_classes=19,
         scene_object_tokens=0,
         num_scene_object_tokens=32,
         num_object_classes=19,
@@ -937,9 +936,12 @@ class VisionTransformer(nn.Module):
         self.actor_interaction_heatmaps = bool(actor_interaction_heatmaps)
         if self.actor_interaction_heatmaps and not self.actor_prompt:
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
-        self.interaction_object_classes = int(interaction_object_classes)
-        if self.interaction_object_classes <= 0:
-            raise ValueError("interaction_object_classes must be positive")
+        if "interaction_object_classes" in kwargs:
+            raise ValueError(
+                "interaction_object_classes was removed. Actor-object heatmaps "
+                "are now one interacted-object channel per actor; object class "
+                "semantics come from scene object tokens."
+            )
         self.scene_object_tokens = bool(scene_object_tokens)
         self.n_object_tokens = (
             int(num_scene_object_tokens) if self.scene_object_tokens else 0
@@ -955,7 +957,7 @@ class VisionTransformer(nn.Module):
         self.n_heatmap_tokens = self.HW_OUT_CONV[0] * self.HW_OUT_CONV[1]
         self.n_landmarks = int(n_landmarks)
         self.n_interaction_heatmap_channels = (
-            self.n_actor_tokens * self.interaction_object_classes
+            self.n_actor_tokens
             if self.actor_interaction_heatmaps
             else 0
         )

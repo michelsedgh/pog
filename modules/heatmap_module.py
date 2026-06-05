@@ -14,7 +14,12 @@ from losses.poguiseplus_losses import (
     target_weighted_heatmap_frobenius_loss,
 )
 import pickle
-from datasets.object_vocab import GROUPS, NUM_OBJECT_CLASSES, OBJECT_CLASSES
+from datasets.object_vocab import (
+    ACTION_OBJECT_CONFUSERS,
+    GROUPS,
+    NUM_OBJECT_CLASSES,
+    OBJECT_CLASSES,
+)
 from datasets.toyotasm import CS_DICT, CV_DICT
 
 try:
@@ -49,15 +54,6 @@ class HeatmapModule(pl.LightningModule):
         self.scene_object_tokens = bool(hparams.get("scene_object_tokens", 0))
         if self.scene_object_tokens and not self.actor_prompt:
             raise ValueError("scene_object_tokens requires actor_prompt")
-        self.interaction_object_classes = int(
-            hparams.get("interaction_object_classes", NUM_OBJECT_CLASSES)
-        )
-        if self.interaction_object_classes != NUM_OBJECT_CLASSES:
-            raise ValueError(
-                "Actor PO-GUISE+ interaction heatmaps use the full Toyota object "
-                f"vocabulary ({NUM_OBJECT_CLASSES} classes), got "
-                f"{self.interaction_object_classes}"
-            )
         self.actor_poguiseplus_loss = self.actor_prompt and self.actor_interaction_heatmaps
         self.poguiseplus_heatmap_loss_weight = float(
             hparams.get("poguiseplus_heatmap_loss_weight", 1.0)
@@ -80,6 +76,12 @@ class HeatmapModule(pl.LightningModule):
         self.object_selection_loss_weight = float(
             hparams.get("object_selection_loss_weight", 0.5)
         )
+        self.object_action_confuser_loss_weight = float(
+            hparams.get("object_action_confuser_loss_weight", 0.5)
+        )
+        self.object_action_confuser_margin = float(
+            hparams.get("object_action_confuser_margin", 0.20)
+        )
         self.object_counterfactual_loss_weight = float(
             hparams.get("object_counterfactual_loss_weight", 0.0)
         )
@@ -91,6 +93,7 @@ class HeatmapModule(pl.LightningModule):
         )
         self.num_classes = hparams.num_classes
         self.dataset_name = hparams.dataset_artifact
+        self.object_action_confuser_specs = self._object_action_confuser_specs()
 
         # Create model
         self.lr = hparams.lr
@@ -389,6 +392,24 @@ class HeatmapModule(pl.LightningModule):
             indices.append((metric_name, int(label_dict[action_name]) - 1))
         return indices
 
+    def _object_action_confuser_specs(self):
+        label_dict = self._toyota_label_dict()
+        specs = []
+        for action_name, confuser_names in ACTION_OBJECT_CONFUSERS.items():
+            if action_name not in label_dict:
+                continue
+            target_idx = int(label_dict[action_name]) - 1
+            confuser_indices = [
+                int(label_dict[name]) - 1
+                for name in confuser_names
+                if name in label_dict
+            ]
+            if not confuser_indices:
+                continue
+            metric_name = action_name.replace(".", "_")
+            specs.append((metric_name, target_idx, tuple(confuser_indices)))
+        return specs
+
     def _pose_heatmap_pred(self, hm_preds):
         if not torch.is_tensor(hm_preds):
             return hm_preds
@@ -402,23 +423,16 @@ class HeatmapModule(pl.LightningModule):
             return None
         n_pose = int(self.model.hparams.n_landmarks)
         n_actor = int(self.model.hparams.get("num_actor_tokens", 8))
-        n_object = self.interaction_object_classes
-        n_interaction = n_actor * n_object
+        n_interaction = n_actor
         end = n_pose + n_interaction
         if hm_preds.shape[1] < end:
             raise RuntimeError(
                 "Interaction heatmaps require heatmap channels "
-                f"[pose={n_pose} + actors={n_actor} * objects={n_object}], "
+                f"[pose={n_pose} + actors={n_actor}], "
                 f"got {hm_preds.shape[1]}"
             )
         heatmaps = hm_preds[:, n_pose:end]
-        return heatmaps.reshape(
-            heatmaps.shape[0],
-            n_actor,
-            n_object,
-            heatmaps.shape[-2],
-            heatmaps.shape[-1],
-        )
+        return heatmaps.reshape(heatmaps.shape[0], n_actor, *heatmaps.shape[-2:])
 
     def _log_interaction_heatmap_metrics(
         self,
@@ -426,6 +440,7 @@ class HeatmapModule(pl.LightningModule):
         target_heatmap,
         heatmap_valid,
         stage,
+        interaction_cls=None,
     ):
         if pred_heatmap is None:
             return
@@ -526,17 +541,24 @@ class HeatmapModule(pl.LightningModule):
             count,
         )
 
-        if pred_heatmap.ndim == 5:
+        if interaction_cls is not None:
+            interaction_cls = interaction_cls.to(
+                device=pred_heatmap.device,
+                dtype=torch.long,
+            )
+            if interaction_cls.shape != heatmap_valid.shape:
+                raise RuntimeError(
+                    "interaction class shape mismatch: "
+                    f"{tuple(interaction_cls.shape)} vs {tuple(heatmap_valid.shape)}"
+                )
             for cls_id, object_name in OBJECT_CLASSES.items():
-                class_valid = heatmap_valid[:, :, int(cls_id)]
+                class_valid = heatmap_valid & (interaction_cls == int(cls_id))
                 if not class_valid.any():
                     continue
-                class_pred = pred_heatmap[:, :, int(cls_id)].float().clamp(0.0, 1.0)[
-                    class_valid
-                ]
+                class_pred = pred_heatmap.float().clamp(0.0, 1.0)[class_valid]
                 class_target = target_heatmap.to(
                     device=pred_heatmap.device
-                ).float()[:, :, int(cls_id)][class_valid]
+                ).float()[class_valid]
                 class_target_bin = class_target > 0.3
                 if not class_target_bin.flatten(1).any(dim=1).any():
                     continue
@@ -599,16 +621,28 @@ class HeatmapModule(pl.LightningModule):
                 mask.sum().item(),
             )
 
-    def _log_interaction_teacher_metrics(self, actions, valid, heatmap_valid, stage):
+    def _log_interaction_teacher_metrics(
+        self,
+        actions,
+        valid,
+        heatmap_valid,
+        interaction_cls,
+        stage,
+    ):
         valid = valid.to(device=actions.device, dtype=torch.bool)
         heatmap_valid = heatmap_valid.to(device=actions.device, dtype=torch.bool)
-        if heatmap_valid.ndim != 3:
+        if heatmap_valid.ndim != 2:
             raise RuntimeError(
-                "Class-specific interaction teacher mask must have shape "
-                f"[batch, actors, object_classes], got {tuple(heatmap_valid.shape)}"
+                "Actor interaction teacher mask must have shape "
+                f"[batch, actors], got {tuple(heatmap_valid.shape)}"
             )
-        heatmap_valid = heatmap_valid & valid.unsqueeze(-1)
-        slot_has_teacher = heatmap_valid.any(dim=-1)
+        if interaction_cls.shape != heatmap_valid.shape:
+            raise RuntimeError(
+                "interaction_cls must have shape "
+                f"{tuple(heatmap_valid.shape)}, got {tuple(interaction_cls.shape)}"
+            )
+        interaction_cls = interaction_cls.to(device=actions.device, dtype=torch.long)
+        slot_has_teacher = heatmap_valid & valid
         valid_count = int(valid.sum().item())
         if valid_count <= 0:
             return
@@ -642,7 +676,7 @@ class HeatmapModule(pl.LightningModule):
 
         for cls_id, object_name in OBJECT_CLASSES.items():
             cls_id = int(cls_id)
-            class_teacher = heatmap_valid[:, :, cls_id]
+            class_teacher = slot_has_teacher & (interaction_cls == cls_id)
             if not class_teacher.any():
                 continue
             self.log(
@@ -743,7 +777,7 @@ class HeatmapModule(pl.LightningModule):
         label_valid = (
             label_valid
             & valid.to(device=object_selection_logits.device, dtype=torch.bool)
-            & (labels > 0)
+            & (labels >= 0)
             & (labels < object_selection_logits.shape[-1])
         )
         if not label_valid.any():
@@ -751,7 +785,18 @@ class HeatmapModule(pl.LightningModule):
 
         logits = object_selection_logits[label_valid].float()
         selection_labels = labels[label_valid]
-        loss = F.cross_entropy(logits, selection_labels)
+        none_mask = selection_labels == 0
+        object_mask = selection_labels > 0
+        loss_terms = []
+        if none_mask.any():
+            loss_terms.append(
+                F.cross_entropy(logits[none_mask], selection_labels[none_mask])
+            )
+        if object_mask.any():
+            loss_terms.append(
+                F.cross_entropy(logits[object_mask], selection_labels[object_mask])
+            )
+        loss = torch.stack(loss_terms).mean()
         count = int(selection_labels.numel())
         self.log(
             f"{stage}_object_selection_loss",
@@ -768,6 +813,18 @@ class HeatmapModule(pl.LightningModule):
             (pred == selection_labels).float().mean(),
             count,
         )
+        if none_mask.any():
+            self._log_scalar(
+                f"{stage}_object_selection_none_acc",
+                (pred[none_mask] == 0).float().mean(),
+                int(none_mask.sum().item()),
+            )
+        if object_mask.any():
+            self._log_scalar(
+                f"{stage}_object_selection_object_acc",
+                (pred[object_mask] == selection_labels[object_mask]).float().mean(),
+                int(object_mask.sum().item()),
+            )
         self.log(
             f"{stage}_object_selection_teacher_count",
             torch.tensor(
@@ -792,6 +849,96 @@ class HeatmapModule(pl.LightningModule):
             true_prob.mean(),
             count,
         )
+        return loss
+
+    def _object_action_confuser_loss(self, preds, actions, target, valid, stage):
+        if not self.scene_object_tokens or not self.object_action_confuser_specs:
+            return None
+        if (
+            "interaction_object_index" not in target
+            or "interaction_object_index_valid" not in target
+        ):
+            return None
+
+        selected_indices = target["interaction_object_index"].to(
+            device=preds.device,
+            dtype=torch.long,
+        )
+        selected_valid = target["interaction_object_index_valid"].to(
+            device=preds.device,
+            dtype=torch.bool,
+        )
+        selected_valid = (
+            selected_valid
+            & valid.to(device=preds.device, dtype=torch.bool)
+            & (selected_indices > 0)
+        )
+        if not selected_valid.any():
+            return None
+
+        actions = actions.to(device=preds.device, dtype=torch.long)
+        preds = preds.float()
+        all_margins = []
+        all_losses = []
+        total_count = 0
+        for metric_name, action_idx, confuser_indices in self.object_action_confuser_specs:
+            mask = selected_valid & (actions == int(action_idx))
+            if not mask.any():
+                continue
+            confuser_idx = torch.tensor(
+                confuser_indices,
+                device=preds.device,
+                dtype=torch.long,
+            )
+            masked_preds = preds[mask]
+            action_logits = masked_preds[:, int(action_idx)]
+            confuser_logits = masked_preds.index_select(dim=1, index=confuser_idx)
+            strongest_confuser = confuser_logits.max(dim=1).values
+            margin = action_logits - strongest_confuser
+            count = int(margin.numel())
+            total_count += count
+            all_margins.append(margin)
+            all_losses.append(
+                F.relu(self.object_action_confuser_margin - margin)
+            )
+            self._log_scalar(
+                f"{stage}_object_action_{metric_name}_margin",
+                margin.detach().mean(),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_object_action_{metric_name}_confuser_acc",
+                (margin.detach() > 0).float().mean(),
+                count,
+            )
+
+        if not all_margins:
+            return None
+
+        margins = torch.cat(all_margins)
+        losses = torch.cat(all_losses)
+        self._log_scalar(
+            f"{stage}_object_action_confuser_margin",
+            margins.detach().mean(),
+            total_count,
+        )
+        self._log_scalar(
+            f"{stage}_object_action_confuser_acc",
+            (margins.detach() > 0).float().mean(),
+            total_count,
+        )
+        loss = losses.mean()
+        self.log(
+            f"{stage}_object_action_confuser_loss",
+            loss,
+            on_step=stage == "train",
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+        )
+        if stage != "train" or self.object_action_confuser_loss_weight <= 0:
+            return None
         return loss
 
     def _selected_object_removed_inputs(
@@ -1147,6 +1294,22 @@ class HeatmapModule(pl.LightningModule):
                 loss_object_selection * self.object_selection_loss_weight
             )
 
+        loss_object_action_confuser = self._object_action_confuser_loss(
+            preds,
+            actions,
+            target,
+            valid,
+            stage,
+        )
+        if (
+            loss_object_action_confuser is not None
+            and self.object_action_confuser_loss_weight > 0
+        ):
+            object_aux_terms.append(
+                loss_object_action_confuser
+                * self.object_action_confuser_loss_weight
+            )
+
         loss_object_counterfactual = self._object_counterfactual_loss(
             imgs,
             boxes,
@@ -1164,6 +1327,8 @@ class HeatmapModule(pl.LightningModule):
             object_aux_terms.append(
                 loss_object_counterfactual * self.object_counterfactual_loss_weight
             )
+        if object_aux_terms:
+            loss_action_task = loss_action_task + torch.stack(object_aux_terms).sum()
 
         loss_kp = None
         loss_pose_frobenius = None
@@ -1218,13 +1383,13 @@ class HeatmapModule(pl.LightningModule):
                 heatmap_valid = target["interaction_heatmap_valid"].to(
                     device=valid.device, dtype=torch.bool
                 )
-                if heatmap_valid.ndim != 3:
+                if heatmap_valid.ndim != 2:
                     raise RuntimeError(
                         "interaction_heatmap_valid must have shape "
-                        "[batch, actors, object_classes], got "
+                        "[batch, actors], got "
                         f"{tuple(heatmap_valid.shape)}"
                     )
-                heatmap_valid = heatmap_valid & valid.unsqueeze(-1)
+                heatmap_valid = heatmap_valid & valid
                 positive_heatmap_valid = target.get(
                     "interaction_heatmap_positive_valid",
                     target["interaction_heatmap_valid"],
@@ -1240,6 +1405,7 @@ class HeatmapModule(pl.LightningModule):
                     actions,
                     valid,
                     positive_heatmap_valid,
+                    target["interaction_cls"],
                     stage,
                 )
                 target_heatmap = target["interaction_heatmap"].to(
@@ -1248,7 +1414,7 @@ class HeatmapModule(pl.LightningModule):
                 )
                 if target_heatmap.shape != interaction_heatmap.shape:
                     raise RuntimeError(
-                        "Class-specific interaction heatmap target/prediction "
+                        "Actor interaction heatmap target/prediction "
                         f"shape mismatch: {tuple(target_heatmap.shape)} vs "
                         f"{tuple(interaction_heatmap.shape)}"
                     )
@@ -1314,6 +1480,7 @@ class HeatmapModule(pl.LightningModule):
                         target_heatmap,
                         positive_heatmap_valid,
                         stage,
+                        interaction_cls=target["interaction_cls"],
                     )
 
         if self.actor_poguiseplus_loss:
@@ -1354,8 +1521,6 @@ class HeatmapModule(pl.LightningModule):
                 sync_dist=True,
             )
             loss_aux_task = loss_heatmap_task * self.poguiseplus_heatmap_loss_weight
-            if object_aux_terms:
-                loss_aux_task = loss_aux_task + torch.stack(object_aux_terms).sum()
             if stage == "train" and self.model.hparams.grad_weights:
                 loss = torch.stack([loss_action_task, loss_aux_task])
             elif self.model.hparams.get("kp_only", False):
@@ -1372,8 +1537,6 @@ class HeatmapModule(pl.LightningModule):
                     loss = torch.stack([loss, loss_kp * kp_loss_weight])
                 elif kp_loss_weight > 0.0:
                     loss = loss + loss_kp * kp_loss_weight
-            if object_aux_terms:
-                loss = loss + torch.stack(object_aux_terms).sum()
 
         return (
             loss,

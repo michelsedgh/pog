@@ -6,7 +6,7 @@ from models.poguise import POGUISE
 from train import _load_checkpoint
 
 
-def load_actor_model(checkpoint_path, device, return_metadata=False):
+def load_actor_model(checkpoint_path, device, return_metadata=False, dtype=torch.float32):
     checkpoint = _load_checkpoint(checkpoint_path)
     hparams = {}
     hparams.update(checkpoint.get("hyper_parameters", {}))
@@ -42,7 +42,11 @@ def load_actor_model(checkpoint_path, device, return_metadata=False):
     if device.type == "cuda":
         torch.cuda.empty_cache()
 
-    model.to(device=device, dtype=torch.float32)
+    if device.type == "cuda" and dtype != torch.float32:
+        model.to(dtype=dtype)
+        model.to(device=device)
+    else:
+        model.to(device=device, dtype=dtype)
     model.eval()
     if return_metadata:
         return model, hparams, metadata

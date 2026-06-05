@@ -202,7 +202,7 @@ class ActorObjectSelectionHead(nn.Module):
 
 
 class ActorObjectActionFusion(nn.Module):
-    def __init__(self, dim, hidden_dim=512, gate_init=1.0):
+    def __init__(self, dim, hidden_dim=512):
         super().__init__()
         self.actor_norm = nn.LayerNorm(dim)
         self.object_norm = nn.LayerNorm(dim)
@@ -212,7 +212,6 @@ class ActorObjectActionFusion(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim, dim),
         )
-        self.gate = nn.Parameter(torch.tensor(float(gate_init)))
 
     def forward(self, actor_tokens, object_tokens, object_selection_logits):
         if actor_tokens.ndim != 3 or object_tokens.ndim != 3:
@@ -242,7 +241,7 @@ class ActorObjectActionFusion(nn.Module):
                 dim=-1,
             )
         )
-        return actor_tokens + self.gate.to(dtype=actor_tokens.dtype) * fused_delta
+        return actor_tokens + fused_delta.to(dtype=actor_tokens.dtype)
 
 
 class POGUISE(pl.LightningModule):
@@ -264,6 +263,12 @@ class POGUISE(pl.LightningModule):
             raise ValueError("actor_object_action_fusion requires scene_object_tokens")
         if self.actor_interaction_heatmaps and not self.actor_prompt:
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
+        if "interaction_object_classes" in self.hparams:
+            raise ValueError(
+                "interaction_object_classes was removed. Actor-object heatmaps "
+                "are now one interacted-object channel per actor; object class "
+                "semantics come from scene object tokens."
+            )
         if self.hparams.get("interaction_warmup_freeze_actor_path", 0):
             if not (self.actor_prompt and self.actor_interaction_heatmaps):
                 raise ValueError(
@@ -313,9 +318,6 @@ class POGUISE(pl.LightningModule):
                     "actor_bbox_prior_expand", 1.75
                 ),
                 actor_interaction_heatmaps=self.actor_interaction_heatmaps,
-                interaction_object_classes=self.hparams.get(
-                    "interaction_object_classes", 19
-                ),
                 scene_object_tokens=self.scene_object_tokens,
                 num_scene_object_tokens=self.hparams.get("num_scene_object_tokens", 32),
                 num_object_classes=self.hparams.get("num_object_classes", 19),
@@ -348,9 +350,6 @@ class POGUISE(pl.LightningModule):
                     "actor_bbox_prior_expand", 1.75
                 ),
                 actor_interaction_heatmaps=self.actor_interaction_heatmaps,
-                interaction_object_classes=self.hparams.get(
-                    "interaction_object_classes", 19
-                ),
                 scene_object_tokens=self.scene_object_tokens,
                 num_scene_object_tokens=self.hparams.get("num_scene_object_tokens", 32),
                 num_object_classes=self.hparams.get("num_object_classes", 19),
@@ -396,10 +395,6 @@ class POGUISE(pl.LightningModule):
                     hidden_dim=self.hparams.get(
                         "actor_object_action_fusion_hidden_dim",
                         512,
-                    ),
-                    gate_init=self.hparams.get(
-                        "actor_object_action_fusion_gate_init",
-                        1.0,
                     ),
                 )
                 if self.actor_object_action_fusion
@@ -679,7 +674,6 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--actor_val_diagnostics", type=int, default=1)
         parser.add_argument("--actor_val_diagnostic_max_pairs", type=int, default=8)
         parser.add_argument("--actor_interaction_heatmaps", type=int, default=0)
-        parser.add_argument("--interaction_object_classes", type=int, default=19)
         parser.add_argument("--scene_object_tokens", type=int, default=0)
         parser.add_argument("--num_scene_object_tokens", type=int, default=32)
         parser.add_argument("--num_object_classes", type=int, default=19)
@@ -688,11 +682,6 @@ class POGUISE(pl.LightningModule):
             "--actor_object_action_fusion_hidden_dim",
             type=int,
             default=512,
-        )
-        parser.add_argument(
-            "--actor_object_action_fusion_gate_init",
-            type=float,
-            default=1.0,
         )
         parser.add_argument("--interaction_unfreeze_last_blocks", type=int, default=0)
         parser.add_argument("--ret_feat", type=int, default=0)

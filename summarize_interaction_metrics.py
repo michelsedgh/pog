@@ -28,8 +28,13 @@ CORE_COLUMNS = [
     "val_interaction_heatmap_center_l2",
     "val_object_selection_loss",
     "val_object_selection_acc",
+    "val_object_selection_none_acc",
+    "val_object_selection_object_acc",
     "val_object_selection_true_prob",
     "val_object_selection_teacher_count",
+    "val_object_action_confuser_loss",
+    "val_object_action_confuser_margin",
+    "val_object_action_confuser_acc",
     "val_object_counterfactual_selected_logit_drop",
     "val_object_counterfactual_selected_prob_drop",
     "interaction_score",
@@ -162,12 +167,16 @@ def compute_interaction_score(df):
     )
     action = df_metric(df, "val_f1", 0.0)
     selection_acc = df_metric(df, "val_object_selection_acc", 0.0)
+    confuser_acc = df_metric(df, "val_object_action_confuser_acc", 0.0)
+    confuser_margin = df_metric(df, "val_object_action_confuser_margin", 0.0)
     logit_drop = df_metric(df, "val_object_counterfactual_selected_logit_drop", 0.0)
     return (
         iou
         + soft_iou
         + pos
         + 0.25 * selection_acc
+        + 0.25 * confuser_acc
+        + 0.05 * confuser_margin
         + 0.1 * logit_drop
         - 0.02 * center
         + 0.25 * action
@@ -199,7 +208,11 @@ def print_compact_object_use_summary(epoch_df):
         "val_acc_macro",
         "val_f1",
         "val_object_selection_acc",
+        "val_object_selection_none_acc",
+        "val_object_selection_object_acc",
         "val_object_selection_true_prob",
+        "val_object_action_confuser_margin",
+        "val_object_action_confuser_acc",
         "val_object_counterfactual_selected_logit_drop",
         "val_object_counterfactual_selected_prob_drop",
         "val_action_Uselaptop_acc",
@@ -256,7 +269,11 @@ def print_compact_best(epoch_df):
     metrics = [
         "val_f1",
         "val_object_selection_acc",
+        "val_object_selection_none_acc",
+        "val_object_selection_object_acc",
         "val_object_selection_true_prob",
+        "val_object_action_confuser_margin",
+        "val_object_action_confuser_acc",
         "val_object_counterfactual_selected_logit_drop",
         "val_object_counterfactual_selected_prob_drop",
         "val_action_Uselaptop_acc",
@@ -290,7 +307,11 @@ def print_object_use_epoch_table(epoch_df):
         "val_interaction_heatmap_soft_iou",
         "val_interaction_heatmap_center_l2",
         "val_object_selection_acc",
+        "val_object_selection_none_acc",
+        "val_object_selection_object_acc",
         "val_object_selection_true_prob",
+        "val_object_action_confuser_margin",
+        "val_object_action_confuser_acc",
         "val_object_counterfactual_selected_logit_drop",
         "val_object_counterfactual_selected_prob_drop",
     ]
@@ -305,7 +326,11 @@ def print_object_use_epoch_table(epoch_df):
         "val_interaction_heatmap_soft_iou",
         "val_interaction_heatmap_center_l2",
         "val_object_selection_acc",
+        "val_object_selection_none_acc",
+        "val_object_selection_object_acc",
         "val_object_selection_true_prob",
+        "val_object_action_confuser_margin",
+        "val_object_action_confuser_acc",
         "val_object_counterfactual_selected_logit_drop",
         "val_object_counterfactual_selected_prob_drop",
     ]
@@ -518,6 +543,8 @@ def print_best_epochs(epoch_df):
         "val_interaction_heatmap_laptop_iou",
         "val_object_selection_acc",
         "val_object_selection_true_prob",
+        "val_object_action_confuser_margin",
+        "val_object_action_confuser_acc",
         "val_object_counterfactual_selected_logit_drop",
         "interaction_score",
     ]
@@ -557,6 +584,8 @@ def print_decision(epoch_df):
     laptop_iou = metric(latest, "val_interaction_heatmap_laptop_iou")
     selection_acc = metric(latest, "val_object_selection_acc")
     selection_prob = metric(latest, "val_object_selection_true_prob")
+    confuser_margin = metric(latest, "val_object_action_confuser_margin")
+    confuser_acc = metric(latest, "val_object_action_confuser_acc")
     cf_logit = metric(latest, "val_object_counterfactual_selected_logit_drop")
     cf_prob = metric(latest, "val_object_counterfactual_selected_prob_drop")
 
@@ -575,6 +604,11 @@ def print_decision(epoch_df):
             "object selection: "
             f"acc {fmt(selection_acc)}, true_prob {fmt(selection_prob)}"
         )
+    if pd.notna(confuser_margin) or pd.notna(confuser_acc):
+        print(
+            "object-action confusers: "
+            f"margin {fmt(confuser_margin)}, acc {fmt(confuser_acc)}"
+        )
     if pd.notna(cf_logit) or pd.notna(cf_prob):
         print(
             "selected-object removal: "
@@ -583,6 +617,23 @@ def print_decision(epoch_df):
 
     if pd.notna(f1_delta) and f1_delta < -0.01:
         print("STOP/ROLL BACK: action F1 dropped more than 0.01 from epoch 0.")
+        return
+    if pd.notna(confuser_acc):
+        if confuser_acc >= 0.70 and pd.notna(selection_acc) and selection_acc >= 0.50:
+            print(
+                "GOOD SIGN: selected objects are being chosen and the fused "
+                "action logits beat object-confusable actions."
+            )
+        elif confuser_acc < 0.50:
+            print(
+                "WARNING: object selection may exist, but object-confusable "
+                "action boundaries are still weak."
+            )
+        else:
+            print(
+                "CONTINUE/COMPARE: object-action boundaries are forming; "
+                "check target actions and live probes."
+            )
         return
     if pd.notna(cf_logit):
         if cf_logit > 0.02 and pd.notna(selection_acc) and selection_acc > 0.20:
@@ -601,11 +652,11 @@ def print_decision(epoch_df):
     if pd.notna(pos) and pd.notna(pred_max):
         if pos > 0.05 and pred_max > 0.10:
             print(
-                "GOOD HEATMAP SIGN: semantic object heatmaps are responding; "
+                "GOOD HEATMAP SIGN: actor-object heatmaps are responding; "
                 "use object-token metrics for final proof."
             )
         else:
-            print("CONTINUE: heatmap/object channels are not strong yet.")
+            print("CONTINUE: actor-object heatmaps are not strong yet.")
         return
     print("INSUFFICIENT SIGNAL: no object-use metrics were found in this run.")
 
@@ -637,8 +688,17 @@ def print_row(title, row):
             "object selection: "
             f"loss {metric(row, 'val_object_selection_loss'):.4f}, "
             f"acc {metric(row, 'val_object_selection_acc'):.4f}, "
+            f"none_acc {metric(row, 'val_object_selection_none_acc'):.4f}, "
+            f"object_acc {metric(row, 'val_object_selection_object_acc'):.4f}, "
             f"true_prob {metric(row, 'val_object_selection_true_prob'):.4f}, "
             f"teachers {metric(row, 'val_object_selection_teacher_count'):.1f}"
+        )
+    if pd.notna(metric(row, "val_object_action_confuser_margin")):
+        print(
+            "object-action confusers: "
+            f"loss {metric(row, 'val_object_action_confuser_loss'):.4f}, "
+            f"margin {metric(row, 'val_object_action_confuser_margin'):.4f}, "
+            f"acc {metric(row, 'val_object_action_confuser_acc'):.4f}"
         )
     if pd.notna(metric(row, "val_object_counterfactual_selected_logit_drop")):
         print(
@@ -685,7 +745,7 @@ def print_row(title, row):
         if pd.notna(pos) or pd.notna(iou) or pd.notna(count):
             object_rows.append((object_name, count, pos, iou))
     if object_rows:
-        print("\nOBJECT HEATMAP CHANNELS:")
+        print("\nHEATMAP BY SELECTED OBJECT CLASS:")
         for object_name, count, pos, iou in object_rows:
             count_text = "nan" if pd.isna(count) else f"{float(count):.0f}"
             pos_text = "nan" if pd.isna(pos) else f"{float(pos):.4f}"
@@ -753,7 +813,9 @@ def main():
     print_decision(epoch_df)
 
     print("\nREAD THIS:")
-    print("- Main proof: object selection is high AND selected-object removal drops the true action logit/prob.")
+    print("- Main proof: object selection is high AND object-action confuser margins/accuracy improve.")
+    print("- NONE selection should be strong for objectless actions, so detector misses do not dominate.")
+    print("- Counterfactual selected-object removal is supporting evidence, not the checkpoint target by itself.")
     print("- Guardrail: val_f1/per-action target accuracy should not collapse while object-use metrics rise.")
     print("- Heatmap/object-channel metrics are secondary; use --verbose when debugging teacher quality.")
     print("- With --scene_object_tokens 1, RF-DETR boxes are runtime model inputs as well as teacher labels.")

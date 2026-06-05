@@ -27,10 +27,13 @@ def parse_args():
     parser.add_argument("--clip-frames", type=int, default=None)
     parser.add_argument("--input-size", type=int, default=224)
     parser.add_argument("--max-actors", type=int, default=None)
+    parser.add_argument("--max-objects", type=int, default=None)
     parser.add_argument("--opset", type=int, default=17)
     parser.add_argument("--precision", choices=["fp16", "fp32"], default="fp16")
     parser.add_argument("--workspace-mib", type=int, default=1024)
     parser.add_argument("--max-aux-streams", type=int, default=0)
+    parser.add_argument("--builder-optimization-level", type=int, default=None)
+    parser.add_argument("--no-tf32", action="store_true")
     parser.add_argument("--force", action="store_true", help="Overwrite output files.")
     parser.add_argument("--benchmark", action="store_true")
     parser.add_argument("--warmup-ms", type=int, default=500)
@@ -70,7 +73,16 @@ def default_output_paths(args, hparams):
 
     clip_frames = int(args.clip_frames or hparams.get("n_frames", 16))
     max_actors = int(args.max_actors or hparams.get("num_actor_tokens", 0))
-    fixed = f"{stem}_b{args.batch_size}_t{clip_frames}_k{max_actors}_{args.input_size}"
+    max_objects = int(
+        args.max_objects
+        if args.max_objects is not None
+        else hparams.get("num_scene_object_tokens", 0)
+    )
+    object_suffix = f"_o{max_objects}" if int(hparams.get("scene_object_tokens", 0)) else ""
+    fixed = (
+        f"{stem}_b{args.batch_size}_t{clip_frames}_k{max_actors}"
+        f"{object_suffix}_{args.input_size}"
+    )
     onnx_out = Path(args.onnx_out) if args.onnx_out else out_dir / f"{fixed}.onnx"
     engine_out = (
         Path(args.engine_out)
@@ -92,6 +104,9 @@ def make_dummy_inputs(
     clip_frames,
     input_size,
     max_actors,
+    max_objects,
+    num_object_classes,
+    scene_object_tokens,
     device,
 ):
     import torch
@@ -109,7 +124,56 @@ def make_dummy_inputs(
     )
     valid = torch.zeros((batch_size, max_actors), dtype=torch.bool, device=device)
     valid[:, 0] = True
-    return (video, boxes, valid), ["video", "boxes", "valid"]
+    if not scene_object_tokens:
+        return (video, boxes, valid), ["video", "boxes", "valid"]
+
+    object_boxes = torch.zeros(
+        (batch_size, max_objects, 4),
+        dtype=torch.float32,
+        device=device,
+    )
+    object_classes = torch.full(
+        (batch_size, max_objects),
+        int(num_object_classes),
+        dtype=torch.int32,
+        device=device,
+    )
+    object_confs = torch.zeros(
+        (batch_size, max_objects),
+        dtype=torch.float32,
+        device=device,
+    )
+    object_valid = torch.zeros(
+        (batch_size, max_objects),
+        dtype=torch.bool,
+        device=device,
+    )
+    if max_objects > 0:
+        object_boxes[:, 0] = torch.tensor(
+            [0.30, 0.35, 0.70, 0.75],
+            dtype=torch.float32,
+            device=device,
+        )
+        object_classes[:, 0] = 1
+        object_confs[:, 0] = 0.95
+        object_valid[:, 0] = True
+    return (
+        video,
+        boxes,
+        valid,
+        object_boxes,
+        object_classes,
+        object_confs,
+        object_valid,
+    ), [
+        "video",
+        "boxes",
+        "valid",
+        "object_boxes",
+        "object_classes",
+        "object_confs",
+        "object_valid",
+    ]
 
 
 def run_command(command):
@@ -117,19 +181,43 @@ def run_command(command):
     subprocess.run(command, check=True)
 
 
-def export_onnx(model, onnx_out, args, clip_frames, max_actors, device):
+def export_onnx(model, onnx_out, args, clip_frames, max_actors, max_objects, hparams, device):
     import torch
 
-    class ActorOnly(torch.nn.Module):
+    scene_object_tokens = bool(hparams.get("scene_object_tokens", 0))
+    num_object_classes = int(hparams.get("num_object_classes", 19))
+
+    class ActorExport(torch.nn.Module):
         def __init__(self, actor_model):
             super().__init__()
             self.actor_model = actor_model
 
-        def forward(self, video, boxes, valid):
+        def forward(
+            self,
+            video,
+            boxes,
+            valid,
+            object_boxes=None,
+            object_classes=None,
+            object_confs=None,
+            object_valid=None,
+        ):
+            kwargs = {
+                "boxes": boxes,
+                "valid": valid,
+            }
+            if scene_object_tokens:
+                kwargs.update(
+                    {
+                        "object_boxes": object_boxes,
+                        "object_classes": object_classes.to(dtype=torch.long),
+                        "object_confs": object_confs,
+                        "object_valid": object_valid,
+                    }
+                )
             output = self.actor_model(
                 video,
-                boxes=boxes,
-                valid=valid,
+                **kwargs,
             )
             if not isinstance(output, (tuple, list)) or len(output) < 3:
                 raise RuntimeError(
@@ -141,28 +229,45 @@ def export_onnx(model, onnx_out, args, clip_frames, max_actors, device):
                 raise RuntimeError(
                     "Actor TensorRT export requires presence-head checkpoints."
                 )
+            if scene_object_tokens:
+                if len(output) != 4:
+                    raise RuntimeError(
+                        "Object-token actor export requires object_selection output."
+                    )
+                object_selection = output[3]
+                return logits, presence, object_selection
             return logits, presence
 
-    wrapped = ActorOnly(model).to(device).eval()
+    wrapped = ActorExport(model).to(device).eval()
     dummy_inputs, input_names = make_dummy_inputs(
         args.batch_size,
         clip_frames,
         args.input_size,
         max_actors,
+        max_objects,
+        num_object_classes,
+        scene_object_tokens,
         device,
     )
     with torch.inference_mode():
-        logits, presence = wrapped(*dummy_inputs)
+        outputs = wrapped(*dummy_inputs)
+    logits = outputs[0]
+    presence = outputs[1]
+    output_names = ["logits", "presence"]
+    output_shapes = {
+        "logits": tuple(logits.shape),
+        "presence": tuple(presence.shape),
+    }
+    if scene_object_tokens:
+        output_names.append("object_selection")
+        output_shapes["object_selection"] = tuple(outputs[2].shape)
     print(
         "PyTorch check:",
         {
             name: tuple(tensor.shape)
             for name, tensor in zip(input_names, dummy_inputs)
         }
-        | {
-            "logits": tuple(logits.shape),
-            "presence": tuple(presence.shape),
-        },
+        | output_shapes,
         flush=True,
     )
 
@@ -171,7 +276,7 @@ def export_onnx(model, onnx_out, args, clip_frames, max_actors, device):
         dummy_inputs,
         str(onnx_out),
         input_names=input_names,
-        output_names=["logits", "presence"],
+        output_names=output_names,
         opset_version=args.opset,
         do_constant_folding=False,
     )
@@ -188,6 +293,10 @@ def build_engine(trtexec, onnx_out, engine_out, args):
     ]
     if args.precision == "fp16":
         command.append("--fp16")
+    if args.precision == "fp32" and args.no_tf32:
+        command.append("--noTF32")
+    if args.builder_optimization_level is not None:
+        command.append(f"--builderOptimizationLevel={int(args.builder_optimization_level)}")
     run_command(command)
     return command
 
@@ -222,7 +331,13 @@ def checkpoint_payload(checkpoint_path):
         "actor_interaction_heatmaps": int(
             hparams.get("actor_interaction_heatmaps", 0)
         ),
-        "interaction_object_classes": int(hparams.get("interaction_object_classes", 19)),
+        "interaction_heatmap_channels": "per_actor_interacted_object",
+        "scene_object_tokens": int(hparams.get("scene_object_tokens", 0)),
+        "num_scene_object_tokens": int(hparams.get("num_scene_object_tokens", 0)),
+        "num_object_classes": int(hparams.get("num_object_classes", 19)),
+        "actor_object_action_fusion": int(
+            hparams.get("actor_object_action_fusion", 0)
+        ),
         "n_frames": int(hparams.get("n_frames", 16)),
         "num_actor_tokens": int(hparams.get("num_actor_tokens", 0)),
         "num_classes": int(hparams.get("num_classes", 31)),
@@ -263,12 +378,24 @@ def internal_export(args):
             f"--max-actors={args.max_actors} does not match checkpoint "
             f"num_actor_tokens={checkpoint_actors}."
         )
+    if bool(hparams.get("scene_object_tokens", 0)):
+        checkpoint_objects = int(hparams.get("num_scene_object_tokens", 0))
+        if args.max_objects is not None and args.max_objects != checkpoint_objects:
+            raise ValueError(
+                f"--max-objects={args.max_objects} does not match checkpoint "
+                f"num_scene_object_tokens={checkpoint_objects}."
+            )
+        max_objects = checkpoint_objects
+    else:
+        max_objects = 0
     export_onnx(
         model,
         Path(args.onnx_out),
         args,
         int(args.clip_frames),
         int(args.max_actors),
+        int(max_objects),
+        hparams,
         device,
     )
 
@@ -292,7 +419,7 @@ def run_inspect_child(args):
     return payload
 
 
-def run_export_child(args, onnx_out, clip_frames, max_actors):
+def run_export_child(args, onnx_out, clip_frames, max_actors, max_objects):
     command = [
         sys.executable,
         str(Path(__file__).resolve()),
@@ -312,6 +439,8 @@ def run_export_child(args, onnx_out, clip_frames, max_actors):
         str(args.input_size),
         "--max-actors",
         str(max_actors),
+        "--max-objects",
+        str(max_objects),
         "--opset",
         str(args.opset),
     ]
@@ -348,6 +477,16 @@ def main():
             f"--max-actors={max_actors} does not match checkpoint "
             f"num_actor_tokens={checkpoint_actors}."
         )
+    checkpoint_objects = int(hparams.get("num_scene_object_tokens", 0))
+    scene_object_tokens = bool(hparams.get("scene_object_tokens", 0))
+    max_objects = int(args.max_objects if args.max_objects is not None else checkpoint_objects)
+    if scene_object_tokens and max_objects != checkpoint_objects:
+        raise ValueError(
+            f"--max-objects={max_objects} does not match checkpoint "
+            f"num_scene_object_tokens={checkpoint_objects}."
+        )
+    if not scene_object_tokens:
+        max_objects = 0
     require_writable(onnx_out, args.force)
     require_writable(engine_out, args.force)
     require_writable(metadata_out, args.force)
@@ -359,6 +498,7 @@ def main():
         onnx_out,
         clip_frames,
         max_actors,
+        max_objects,
     )
     print(f"Wrote ONNX: {onnx_out} ({onnx_out.stat().st_size / 1e6:.1f} MB)", flush=True)
 
@@ -379,6 +519,7 @@ def main():
         "onnx": str(onnx_out),
         "engine": str(engine_out),
         "precision": args.precision,
+        "no_tf32": bool(args.no_tf32),
         "input_shapes": {
             "video": [args.batch_size, clip_frames, 3, args.input_size, args.input_size],
             "boxes": [args.batch_size, max_actors, 4],
@@ -394,6 +535,20 @@ def main():
         "benchmark_command": benchmark_command,
         "elapsed_sec": round(time.time() - started, 3),
     }
+    if scene_object_tokens:
+        metadata["input_shapes"].update(
+            {
+                "object_boxes": [args.batch_size, max_objects, 4],
+                "object_classes": [args.batch_size, max_objects],
+                "object_confs": [args.batch_size, max_objects],
+                "object_valid": [args.batch_size, max_objects],
+            }
+        )
+        metadata["outputs"]["object_selection"] = [
+            args.batch_size,
+            max_actors,
+            max_objects + 1,
+        ]
     metadata_out.write_text(json.dumps(metadata, indent=2) + "\n")
     print(f"Wrote metadata: {metadata_out}", flush=True)
 

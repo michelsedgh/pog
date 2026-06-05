@@ -1,14 +1,11 @@
 import argparse
 import html
 import json
-import os
 import socket
 import threading
 import time
-import warnings
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 import cv2
 import numpy as np
@@ -16,7 +13,15 @@ import torch
 from PIL import Image
 
 from datasets.object_vocab import DETECTOR_TO_OBJECT, NONE_OBJECT_ID, OBJECT_CLASSES, OBJECT_TO_ID
-from utils.actor_tensorrt import TensorRTActorEngine
+from utils.rfdetr_tensorrt import TensorRTRFDETRNano
+
+TRAINING_CLIP_FRAMES = 16
+TRAINING_SPAN_FRAMES = 128
+MODEL_INPUT_SIZE = 224
+MODEL_SHORT_SIDE = 256
+DETECTION_EVERY_FRAME = 1
+ACTION_EVERY_FRAME = 1
+ACTION_SMOOTHING_WINDOW = 1
 
 
 ACTION_CLASSES = [
@@ -56,50 +61,22 @@ ACTION_CLASSES = [
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, default="epoch=003.ckpt")
+    parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--camera", type=str, default="0")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=7860)
-    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "cpu"])
-    parser.add_argument("--detector-device", type=str, default="cuda", choices=["cuda", "cpu"])
-    parser.add_argument("--detector-optimize", type=int, default=1, choices=[0, 1])
-    parser.add_argument("--detector-compile", type=int, default=1, choices=[0, 1])
-    parser.add_argument("--detector-fp16", type=int, default=0, choices=[0, 1])
-    parser.add_argument("--engine", type=str, default=None)
+    parser.add_argument("--detector-engine", type=str, default=None)
     parser.add_argument("--det-threshold", type=float, default=0.35)
     parser.add_argument("--object-threshold", type=float, default=0.25)
     parser.add_argument("--person-class-id", type=int, default=None)
-    parser.add_argument("--max-actors", type=int, default=8)
-    parser.add_argument("--max-objects", type=int, default=None)
-    parser.add_argument("--buffer-frames", type=int, default=32)
-    parser.add_argument("--clip-frames", type=int, default=16)
-    parser.add_argument("--clip-stride", type=int, default=1)
-    parser.add_argument("--input-size", type=int, default=224)
-    parser.add_argument("--short-side", type=int, default=256)
-    parser.add_argument("--crop-mode", type=str, default="actor", choices=["actor", "center"])
-    parser.add_argument("--detect-every", type=int, default=5)
-    parser.add_argument("--action-every", type=int, default=5)
-    parser.add_argument("--action-smoothing-window", type=int, default=2)
     parser.add_argument("--track-iou-threshold", type=float, default=0.30)
     parser.add_argument("--track-hold-frames", type=int, default=10)
     parser.add_argument("--camera-buffer-size", type=int, default=1)
     parser.add_argument("--jpeg-quality", type=int, default=80)
     parser.add_argument("--smoke", action="store_true")
     args = parser.parse_args()
-    if args.detect_every < 1:
-        raise ValueError("--detect-every must be >= 1")
-    if args.action_every < 1:
-        raise ValueError("--action-every must be >= 1")
-    if args.action_smoothing_window < 1:
-        raise ValueError("--action-smoothing-window must be >= 1")
-    if args.clip_stride < 1:
-        raise ValueError("--clip-stride must be >= 1")
-    min_buffer = required_clip_buffer(args.clip_frames, args.clip_stride)
-    if args.buffer_frames < min_buffer:
-        raise ValueError(
-            f"--buffer-frames must be >= {min_buffer} for "
-            f"--clip-frames {args.clip_frames} and --clip-stride {args.clip_stride}"
-        )
+    if not args.smoke and not args.detector_engine:
+        raise ValueError("--detector-engine is required for live inference.")
     if args.track_hold_frames < 0:
         raise ValueError("--track-hold-frames must be >= 0")
     if not 0.0 <= args.track_iou_threshold <= 1.0:
@@ -108,13 +85,21 @@ def parse_args():
         raise ValueError("--det-threshold must be in [0, 1]")
     if not 0.0 <= args.object_threshold <= 1.0:
         raise ValueError("--object-threshold must be in [0, 1]")
-    if args.max_objects is not None and args.max_objects < 0:
-        raise ValueError("--max-objects must be >= 0")
     return args
 
 
-def required_clip_buffer(clip_frames, clip_stride):
-    return 1 + (int(clip_frames) - 1) * int(clip_stride)
+def required_clip_buffer():
+    return TRAINING_SPAN_FRAMES
+
+
+def sample_buffer_items(buffer):
+    span = required_clip_buffer()
+    if len(buffer) < span:
+        raise ValueError(f"Need {span} buffered items, got {len(buffer)}")
+    start = len(buffer) - span
+    end = len(buffer) - 1
+    indices = np.linspace(start, end, TRAINING_CLIP_FRAMES, dtype=int)
+    return [buffer[int(index)] for index in indices]
 
 
 def camera_source(value):
@@ -122,12 +107,6 @@ def camera_source(value):
         return int(value)
     except ValueError:
         return value
-
-
-def resolve_device(value):
-    if value == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device(value)
 
 
 def local_ip_addresses():
@@ -158,69 +137,22 @@ def local_ip_addresses():
     return addresses
 
 
-def load_rfdetr(person_class_id, detector_device, optimize=True, compile_model=True, fp16=False):
-    if detector_device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("--detector-device cuda was requested, but CUDA is not available.")
-    if fp16 and detector_device != "cuda":
-        raise RuntimeError("--detector-fp16 1 requires --detector-device cuda.")
-
-    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-    from rfdetr import RFDETRNano
-
-    print(
-        "Loading RF-DETR Nano:",
-        {
-            "device": detector_device,
-            "optimize": bool(optimize),
-            "compile": bool(compile_model),
-            "fp16": bool(fp16),
-        },
-        flush=True,
-    )
-    detector = RFDETRNano(device=detector_device)
-    if optimize:
-        dtype = torch.float16 if fp16 else torch.float32
-        started = time.perf_counter()
-        with warnings.catch_warnings():
-            tracer_warning = getattr(torch.jit, "TracerWarning", Warning)
-            warnings.filterwarnings("ignore", category=tracer_warning)
-            detector.optimize_for_inference(
-                compile=bool(compile_model),
-                batch_size=1,
-                dtype=dtype,
-            )
-        print(
-            "RF-DETR optimized:",
-            {
-                "seconds": round(time.perf_counter() - started, 2),
-                "dtype": str(dtype).replace("torch.", ""),
-            },
-            flush=True,
-        )
-
-    person_ids = []
-    if person_class_id is not None:
-        person_ids = [int(person_class_id)]
+def load_detector_backend(args):
+    detector = TensorRTRFDETRNano(args.detector_engine)
+    if args.person_class_id is not None:
+        person_ids = [int(args.person_class_id)]
     else:
-        class_names = getattr(detector, "class_names", None)
-        if isinstance(class_names, dict):
-            person_ids = [
-                int(class_id)
-                for class_id, name in class_names.items()
-                if str(name).lower() == "person"
-            ]
-        elif isinstance(class_names, (list, tuple)):
-            person_ids = [
-                class_id
-                for class_id, name in enumerate(class_names)
-                if str(name).lower() == "person"
-            ]
+        person_ids = [
+            int(class_id)
+            for class_id, name in detector.class_names.items()
+            if str(name).lower() == "person"
+        ]
     if not person_ids:
         raise RuntimeError(
-            "RF-DETR class_names did not expose a 'person' class. "
+            "TensorRT RF-DETR class_names did not expose a 'person' class. "
             "Pass --person-class-id explicitly."
         )
-    return detector, set(person_ids)
+    return detector, set(person_ids), "tensorrt"
 
 
 def crop_center_from_boxes(boxes_xyxy):
@@ -301,13 +233,8 @@ def preprocess_clip(frames_rgb, short_side, input_size, device, crop_center_xy=N
     return clip, transform
 
 
-def sample_clip(buffer, clip_frames, clip_stride):
-    span = required_clip_buffer(clip_frames, clip_stride)
-    if len(buffer) < span:
-        raise ValueError(f"Need {span} buffered frames, got {len(buffer)}")
-    start = len(buffer) - span
-    indices = start + np.arange(clip_frames, dtype=int) * int(clip_stride)
-    return [buffer[int(index)] for index in indices]
+def sample_clip(buffer):
+    return sample_buffer_items(buffer)
 
 
 def detector_class_name(detector, class_id):
@@ -384,7 +311,6 @@ def detections_to_people_and_objects(
                 )
             )
     object_records.sort(key=lambda item: item[0], reverse=True)
-    object_records = object_records[:max_objects]
     if object_records:
         object_conf = np.asarray([item[0] for item in object_records], dtype=np.float32)
         object_xyxy = np.stack([item[1] for item in object_records], axis=0).astype(
@@ -418,15 +344,93 @@ def pack_actor_boxes(boxes_norm, valid_box_mask, max_actors, device):
     return boxes, valid
 
 
-def pack_object_tokens(
-    boxes_norm,
-    valid_box_mask,
-    object_class_ids,
-    object_confs,
-    object_labels,
+def _object_track_sort_key(track, clip_frames):
+    confs = [float(item["conf"]) for item in track["entries"]]
+    max_conf = max(confs) if confs else 0.0
+    mean_conf = float(np.mean(confs)) if confs else 0.0
+    coverage = len(track["sample_positions"]) / float(max(int(clip_frames), 1))
+    return (-max_conf, -mean_conf, -coverage, int(track["class_id"]))
+
+
+def _weighted_track_box(track):
+    boxes = [np.asarray(item["box_norm"], dtype=np.float32) for item in track["entries"]]
+    weights = np.asarray(
+        [max(float(item["conf"]), 1e-4) for item in track["entries"]],
+        dtype=np.float32,
+    )
+    if not boxes:
+        return None
+    weights = weights / max(float(weights.sum()), 1e-6)
+    box = np.stack(boxes, axis=0)
+    return np.sum(box * weights[:, None], axis=0).clip(0.0, 1.0).astype(np.float32)
+
+
+def pack_temporal_object_tokens(
+    detection_records,
+    transform,
+    input_size,
     max_objects,
     device,
+    track_iou_threshold=0.2,
 ):
+    entries = []
+    for sample_pos, record in enumerate(detection_records):
+        if not record:
+            continue
+        boxes_xyxy = np.asarray(record["boxes_xyxy"], dtype=np.float32)
+        if len(boxes_xyxy) == 0:
+            continue
+        boxes_norm, keep = transform_boxes_to_crop(
+            boxes_xyxy,
+            transform,
+            input_size,
+        )
+        kept_indices = np.flatnonzero(keep)
+        for source_index in kept_indices:
+            class_id = int(record["class_ids"][source_index])
+            entries.append(
+                {
+                    "sample_pos": int(sample_pos),
+                    "class_id": class_id,
+                    "conf": float(record["confs"][source_index]),
+                    "label": str(record["labels"][source_index]),
+                    "box_norm": boxes_norm[source_index].astype(np.float32),
+                }
+            )
+
+    tracks = []
+    for entry in sorted(
+        entries,
+        key=lambda item: (
+            int(item["sample_pos"]),
+            int(item["class_id"]),
+            -float(item["conf"]),
+        ),
+    ):
+        best_track = None
+        best_iou = 0.0
+        for track in tracks:
+            if int(track["class_id"]) != int(entry["class_id"]):
+                continue
+            iou = bbox_iou_xyxy(track["last_box"], entry["box_norm"])
+            if iou > best_iou:
+                best_iou = iou
+                best_track = track
+        if best_track is not None and best_iou >= float(track_iou_threshold):
+            best_track["entries"].append(entry)
+            best_track["sample_positions"].add(int(entry["sample_pos"]))
+            best_track["last_box"] = entry["box_norm"]
+        else:
+            tracks.append(
+                {
+                    "class_id": int(entry["class_id"]),
+                    "label": str(entry["label"]),
+                    "entries": [entry],
+                    "sample_positions": {int(entry["sample_pos"])},
+                    "last_box": entry["box_norm"],
+                }
+            )
+
     boxes = torch.zeros((1, max_objects, 4), dtype=torch.float32, device=device)
     classes = torch.full(
         (1, max_objects),
@@ -437,22 +441,27 @@ def pack_object_tokens(
     confs = torch.zeros((1, max_objects), dtype=torch.float32, device=device)
     valid = torch.zeros((1, max_objects), dtype=torch.bool, device=device)
     packed = []
-
-    kept_indices = np.flatnonzero(np.asarray(valid_box_mask, dtype=bool))[:max_objects]
-    for slot, source_index in enumerate(kept_indices):
-        boxes[0, slot] = torch.from_numpy(
-            np.asarray(boxes_norm[source_index], dtype=np.float32)
-        ).to(device=device)
-        classes[0, slot] = int(object_class_ids[source_index])
-        confs[0, slot] = float(object_confs[source_index])
+    sorted_tracks = sorted(
+        tracks,
+        key=lambda track: _object_track_sort_key(track, len(detection_records)),
+    )
+    for slot, track in enumerate(sorted_tracks[:max_objects]):
+        box = _weighted_track_box(track)
+        if box is None or box[2] <= box[0] or box[3] <= box[1]:
+            continue
+        track_confs = [float(item["conf"]) for item in track["entries"]]
+        boxes[0, slot] = torch.from_numpy(box).to(device=device)
+        classes[0, slot] = int(track["class_id"])
+        confs[0, slot] = float(np.mean(track_confs)) if track_confs else 0.0
         valid[0, slot] = True
         packed.append(
             {
                 "slot": int(slot),
-                "label": str(object_labels[source_index]),
-                "object_class_id": int(object_class_ids[source_index]),
-                "conf": float(object_confs[source_index]),
-                "box_norm": boxes_norm[source_index].astype(float).tolist(),
+                "label": str(track["label"]),
+                "object_class_id": int(track["class_id"]),
+                "conf": float(confs[0, slot].detach().cpu().item()),
+                "box_norm": box.astype(float).tolist(),
+                "sample_count": int(len(track["sample_positions"])),
             }
         )
 
@@ -486,12 +495,12 @@ def bbox_iou_xyxy(box_a, box_b):
 
 
 class ActionTrack:
-    def __init__(self, track_id, bbox_xyxy, frame_index, smoothing_window):
+    def __init__(self, track_id, bbox_xyxy, frame_index):
         self.track_id = int(track_id)
         self.bbox_xyxy = np.asarray(bbox_xyxy, dtype=np.float32)
         self.last_seen = int(frame_index)
-        self.action_probs = deque(maxlen=int(smoothing_window))
-        self.presence_probs = deque(maxlen=int(smoothing_window))
+        self.action_probs = deque(maxlen=ACTION_SMOOTHING_WINDOW)
+        self.presence_probs = deque(maxlen=ACTION_SMOOTHING_WINDOW)
         self.latest_extra_payload = {}
 
     def update_detection(self, bbox_xyxy, frame_index):
@@ -522,21 +531,48 @@ class ActionTrack:
 
 
 class TorchActorBackend:
-    def __init__(self, checkpoint_path, device):
+    def __init__(self, checkpoint_path):
         from utils.actor_model import load_actor_model
 
-        self.model, self.hparams = load_actor_model(checkpoint_path, device)
-        self.device = device
+        if not torch.cuda.is_available():
+            raise RuntimeError("Live actor inference requires CUDA.")
+        self.device = torch.device("cuda")
+        self.model, self.hparams = load_actor_model(
+            checkpoint_path,
+            self.device,
+            dtype=torch.float32,
+        )
+        self.precision = "fp32"
         self.num_actor_tokens = int(self.hparams.get("num_actor_tokens", 0))
         self.clip_frames = int(self.hparams.get("n_frames", 16))
-        self.input_size = 224
+        self.input_size = MODEL_INPUT_SIZE
         self.backend_name = "pytorch"
         self.scene_object_tokens = bool(self.hparams.get("scene_object_tokens", 0))
+        self.actor_object_action_fusion = bool(
+            self.hparams.get("actor_object_action_fusion", 0)
+        )
         self.num_scene_object_tokens = (
             int(self.hparams.get("num_scene_object_tokens", 0))
             if self.scene_object_tokens
             else 0
         )
+        if self.clip_frames != TRAINING_CLIP_FRAMES:
+            raise RuntimeError(
+                f"Checkpoint n_frames={self.clip_frames}; live inference is fixed to "
+                f"{TRAINING_CLIP_FRAMES} frames to match the trained object-fused model."
+            )
+        if not self.scene_object_tokens:
+            raise RuntimeError(
+                "This dashboard is fixed to the object-fused checkpoints and requires "
+                "scene_object_tokens=1."
+            )
+        if not self.actor_object_action_fusion:
+            raise RuntimeError(
+                "This dashboard is fixed to the object-fused checkpoints and requires "
+                "actor_object_action_fusion=1."
+            )
+        if self.num_scene_object_tokens <= 0:
+            raise RuntimeError("Checkpoint scene object token count must be positive.")
 
     def __call__(self, clip, boxes, valid, object_inputs=None):
         model_kwargs = {"boxes": boxes, "valid": valid}
@@ -573,66 +609,57 @@ class TorchActorBackend:
         return logits, presence, object_selection
 
 
-class TensorRTActorBackend:
-    def __init__(self, engine_path):
-        self.engine = TensorRTActorEngine(engine_path)
-        self.device = self.engine.device
-        self.num_actor_tokens = self.engine.num_actor_tokens
-        self.clip_frames = self.engine.clip_frames
-        self.input_size = self.engine.input_size
-        self.backend_name = "tensorrt"
-        self.scene_object_tokens = False
-        self.num_scene_object_tokens = 0
-
-    def __call__(self, clip, boxes, valid, object_inputs=None):
-        if object_inputs is not None:
-            raise RuntimeError("The TensorRT backend does not support live object tokens.")
-        logits, presence = self.engine(clip, boxes, valid)
-        return logits, presence, None
-
-
 def load_actor_backend(args):
-    if args.engine:
-        return TensorRTActorBackend(args.engine)
-    return TorchActorBackend(args.checkpoint, resolve_device(args.device))
+    return TorchActorBackend(args.checkpoint)
 
 
 def run_actor_smoke(args, actor):
-    frames = [np.zeros((480, 640, 3), dtype=np.uint8) for _ in range(args.clip_frames)]
+    frames = [
+        np.zeros((480, 640, 3), dtype=np.uint8)
+        for _ in range(TRAINING_CLIP_FRAMES)
+    ]
     boxes_xyxy = np.asarray([[160.0, 80.0, 480.0, 420.0]], dtype=np.float32)
     clip, transform = preprocess_clip(
         frames,
-        args.short_side,
-        args.input_size,
+        MODEL_SHORT_SIDE,
+        MODEL_INPUT_SIZE,
         actor.device,
-        crop_center_xy=crop_center_from_boxes(boxes_xyxy)
-        if args.crop_mode == "actor"
-        else None,
+        crop_center_xy=crop_center_from_boxes(boxes_xyxy),
     )
-    boxes_norm, keep = transform_boxes_to_crop(boxes_xyxy, transform, args.input_size)
-    boxes, valid = pack_actor_boxes(boxes_norm, keep, args.max_actors, actor.device)
-    object_inputs = None
-    if actor.scene_object_tokens:
-        object_inputs, _packed_objects = pack_object_tokens(
-            np.zeros((0, 4), dtype=np.float32),
-            np.zeros((0,), dtype=bool),
-            np.zeros((0,), dtype=np.int64),
-            np.zeros((0,), dtype=np.float32),
-            [],
-            actor.num_scene_object_tokens,
-            actor.device,
-        )
+    boxes_norm, keep = transform_boxes_to_crop(
+        boxes_xyxy,
+        transform,
+        MODEL_INPUT_SIZE,
+    )
+    boxes, valid = pack_actor_boxes(
+        boxes_norm,
+        keep,
+        actor.num_actor_tokens,
+        actor.device,
+    )
+    object_inputs, _packed_objects = pack_temporal_object_tokens(
+        [],
+        transform,
+        MODEL_INPUT_SIZE,
+        actor.num_scene_object_tokens,
+        actor.device,
+        track_iou_threshold=0.2,
+    )
     logits, presence, object_selection = actor(clip, boxes, valid, object_inputs)
     probs = torch.softmax(logits[0, 0], dim=-1)
     print(
         "smoke ok:",
         {
             "checkpoint": args.checkpoint,
-            "engine": args.engine,
             "backend": actor.backend_name,
+            "precision": actor.precision,
             "device": str(actor.device),
             "scene_object_tokens": bool(actor.scene_object_tokens),
+            "actor_object_action_fusion": bool(actor.actor_object_action_fusion),
             "num_scene_object_tokens": int(actor.num_scene_object_tokens),
+            "clip_frames": TRAINING_CLIP_FRAMES,
+            "span_frames": TRAINING_SPAN_FRAMES,
+            "sampling": "linspace",
             "valid_slots": int(valid.sum().item()),
             "object_selection_shape": None
             if object_selection is None
@@ -659,12 +686,13 @@ class DashboardState:
             "actor_device": None,
             "scene_object_tokens": None,
             "num_scene_object_tokens": None,
-            "detector_device": None,
-            "detector_optimized": None,
+            "detector_backend": None,
             "last_detector_ms": None,
             "last_actor_ms": None,
             "action_smoothing_window": None,
-            "clip_stride": None,
+            "clip_frames": None,
+            "clip_span_frames": None,
+            "clip_sampling": None,
             "crop_mode": None,
             "det_age_frames": None,
         }
@@ -745,45 +773,25 @@ class LiveRunner:
         self.state = state
         self.actor = load_actor_backend(args)
         self.device = self.actor.device
-        if self.actor.num_actor_tokens != args.max_actors:
+        if self.actor.input_size != MODEL_INPUT_SIZE:
             raise RuntimeError(
-                f"--max-actors must match actor slots={self.actor.num_actor_tokens}"
+                f"Actor input size {self.actor.input_size} does not match "
+                f"fixed live input size {MODEL_INPUT_SIZE}."
             )
-        if self.actor.clip_frames != args.clip_frames:
-            raise RuntimeError(
-                f"--clip-frames must match actor clip length={self.actor.clip_frames}"
-            )
-        if self.actor.input_size != args.input_size:
-            raise RuntimeError(
-                f"--input-size must match actor input size={self.actor.input_size}"
-            )
-        self.max_objects = (
-            self.actor.num_scene_object_tokens
-            if self.actor.scene_object_tokens
-            else int(args.max_objects or 0)
-        )
-        if self.actor.scene_object_tokens and args.max_objects is not None:
-            if int(args.max_objects) != self.actor.num_scene_object_tokens:
-                raise RuntimeError(
-                    "--max-objects must match checkpoint scene object slots="
-                    f"{self.actor.num_scene_object_tokens}"
-                )
-        self.detector, self.person_ids = load_rfdetr(
-            args.person_class_id,
-            args.detector_device,
-            optimize=bool(args.detector_optimize),
-            compile_model=bool(args.detector_compile),
-            fp16=bool(args.detector_fp16),
-        )
+        self.max_actors = int(self.actor.num_actor_tokens)
+        self.max_objects = int(self.actor.num_scene_object_tokens)
+        self.detector, self.person_ids, self.detector_backend_name = load_detector_backend(args)
         self.state.update(
             actor_backend=self.actor.backend_name,
+            actor_precision=self.actor.precision,
             actor_device=str(self.actor.device),
             scene_object_tokens=bool(self.actor.scene_object_tokens),
+            actor_object_action_fusion=bool(self.actor.actor_object_action_fusion),
             num_scene_object_tokens=int(self.actor.num_scene_object_tokens),
-            detector_device=args.detector_device,
-            detector_optimized=bool(args.detector_optimize),
+            detector_backend=self.detector_backend_name,
         )
-        self.buffer = deque(maxlen=args.buffer_frames)
+        self.buffer = deque(maxlen=TRAINING_SPAN_FRAMES)
+        self.detection_buffer = deque(maxlen=TRAINING_SPAN_FRAMES)
         self.frame_count = 0
         self.last_boxes_xyxy = np.zeros((0, 4), dtype=np.float32)
         self.last_det_conf = np.zeros((0,), dtype=np.float32)
@@ -798,9 +806,13 @@ class LiveRunner:
         self.tracks = {}
         self.current_track_ids = []
         self.state.update(
-            action_smoothing_window=args.action_smoothing_window,
-            clip_stride=args.clip_stride,
-            crop_mode=args.crop_mode,
+            action_smoothing_window=ACTION_SMOOTHING_WINDOW,
+            action_every=ACTION_EVERY_FRAME,
+            detect_every=DETECTION_EVERY_FRAME,
+            clip_frames=TRAINING_CLIP_FRAMES,
+            clip_sampling="linspace",
+            clip_span_frames=TRAINING_SPAN_FRAMES,
+            crop_mode="actor",
         )
 
     def smoke(self):
@@ -838,7 +850,6 @@ class LiveRunner:
                     track_id,
                     box,
                     self.frame_count,
-                    self.args.action_smoothing_window,
                 )
             else:
                 self.tracks[track_id].update_detection(box, self.frame_count)
@@ -876,34 +887,35 @@ class LiveRunner:
                 frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
                 self.buffer.append(frame_rgb)
 
-                clip_ready = len(self.buffer) >= required_clip_buffer(
-                    self.args.clip_frames,
-                    self.args.clip_stride,
+                started = time.perf_counter()
+                (
+                    self.last_boxes_xyxy,
+                    self.last_det_conf,
+                    self.last_object_boxes_xyxy,
+                    self.last_object_class_ids,
+                    self.last_object_conf,
+                    self.last_object_labels,
+                ) = detections_to_people_and_objects(
+                    self.detector,
+                    self.person_ids,
+                    frame_rgb,
+                    self.args.det_threshold,
+                    self.args.object_threshold,
+                    self.max_actors,
+                    self.max_objects,
                 )
-                action_due = clip_ready and self.frame_count % self.args.action_every == 0
-                run_detection = self.frame_count % self.args.detect_every == 0 or action_due
-
-                if run_detection:
-                    started = time.perf_counter()
-                    (
-                        self.last_boxes_xyxy,
-                        self.last_det_conf,
-                        self.last_object_boxes_xyxy,
-                        self.last_object_class_ids,
-                        self.last_object_conf,
-                        self.last_object_labels,
-                    ) = detections_to_people_and_objects(
-                        self.detector,
-                        self.person_ids,
-                        frame_rgb,
-                        self.args.det_threshold,
-                        self.args.object_threshold,
-                        self.args.max_actors,
-                        self.max_objects,
-                    )
-                    self.last_detector_ms = (time.perf_counter() - started) * 1000.0
-                    self.last_detection_frame = self.frame_count
-                    self._update_tracks(self.last_boxes_xyxy)
+                self.last_detector_ms = (time.perf_counter() - started) * 1000.0
+                self.last_detection_frame = self.frame_count
+                self._update_tracks(self.last_boxes_xyxy)
+                detection_record = {
+                    "boxes_xyxy": self.last_object_boxes_xyxy.copy(),
+                    "class_ids": self.last_object_class_ids.copy(),
+                    "confs": self.last_object_conf.copy(),
+                    "labels": list(self.last_object_labels),
+                }
+                self.detection_buffer.append(detection_record)
+                clip_ready = len(self.buffer) >= required_clip_buffer()
+                action_due = clip_ready
 
                 det_age = (
                     None
@@ -911,8 +923,9 @@ class LiveRunner:
                     else self.frame_count - self.last_detection_frame
                 )
                 message = (
-                    f"buffer {len(self.buffer)}/{self.args.buffer_frames} "
-                    f"stride={self.args.clip_stride}"
+                    f"buffer {len(self.buffer)}/{TRAINING_SPAN_FRAMES} "
+                    f"sampling=linspace span={TRAINING_SPAN_FRAMES} "
+                    f"frames={TRAINING_CLIP_FRAMES}"
                 )
                 actors = [
                     {
@@ -949,51 +962,35 @@ class LiveRunner:
 
                 should_run_action = action_due and len(self.last_boxes_xyxy) > 0
                 if should_run_action:
-                    clip_frames = sample_clip(
-                        self.buffer,
-                        self.args.clip_frames,
-                        self.args.clip_stride,
-                    )
-                    crop_center_xy = (
-                        crop_center_from_boxes(self.last_boxes_xyxy)
-                        if self.args.crop_mode == "actor"
-                        else None
-                    )
+                    clip_frames = sample_clip(self.buffer)
+                    clip_detection_records = sample_buffer_items(self.detection_buffer)
+                    crop_center_xy = crop_center_from_boxes(self.last_boxes_xyxy)
                     clip, transform = preprocess_clip(
                         clip_frames,
-                        self.args.short_side,
-                        self.args.input_size,
+                        MODEL_SHORT_SIDE,
+                        MODEL_INPUT_SIZE,
                         self.device,
                         crop_center_xy=crop_center_xy,
                     )
                     boxes_norm, keep = transform_boxes_to_crop(
                         self.last_boxes_xyxy,
                         transform,
-                        self.args.input_size,
+                        MODEL_INPUT_SIZE,
                     )
                     boxes, valid = pack_actor_boxes(
                         boxes_norm,
                         keep,
-                        self.args.max_actors,
+                        self.max_actors,
                         self.device,
                     )
-                    object_inputs = None
-                    packed_objects = []
-                    if self.actor.scene_object_tokens:
-                        object_boxes_norm, object_keep = transform_boxes_to_crop(
-                            self.last_object_boxes_xyxy,
-                            transform,
-                            self.args.input_size,
-                        )
-                        object_inputs, packed_objects = pack_object_tokens(
-                            object_boxes_norm,
-                            object_keep,
-                            self.last_object_class_ids,
-                            self.last_object_conf,
-                            self.last_object_labels,
-                            self.actor.num_scene_object_tokens,
-                            self.device,
-                        )
+                    object_inputs, packed_objects = pack_temporal_object_tokens(
+                        clip_detection_records,
+                        transform,
+                        MODEL_INPUT_SIZE,
+                        self.actor.num_scene_object_tokens,
+                        self.device,
+                        track_iou_threshold=0.2,
+                    )
                     if valid.any():
                         started = time.perf_counter()
                         logits, presence_logits, object_selection_logits = self.actor(
@@ -1015,7 +1012,7 @@ class LiveRunner:
                                 .cpu()
                                 .numpy()
                             )
-                        kept_actor_idx = np.flatnonzero(keep)[: self.args.max_actors]
+                        kept_actor_idx = np.flatnonzero(keep)[: self.max_actors]
                         for slot, actor_idx in enumerate(kept_actor_idx):
                             if actor_idx >= len(self.current_track_ids):
                                 continue
@@ -1078,9 +1075,11 @@ class LiveRunner:
                             f"det={self.last_detector_ms:.0f}ms "
                             f"actor={self.last_actor_ms:.0f}ms "
                             f"det_age={det_age} "
-                            f"stride={self.args.clip_stride} "
-                            f"crop={self.args.crop_mode} "
-                            f"smooth={self.args.action_smoothing_window} "
+                            f"sampling=linspace "
+                            f"span={TRAINING_SPAN_FRAMES} "
+                            f"frames={TRAINING_CLIP_FRAMES} "
+                            f"crop=actor "
+                            f"smooth={ACTION_SMOOTHING_WINDOW} "
                             f"frame={self.frame_count}"
                         )
                     else:
@@ -1182,10 +1181,6 @@ def main():
     args = parse_args()
     if args.smoke:
         actor = load_actor_backend(args)
-        if actor.num_actor_tokens != args.max_actors:
-            raise RuntimeError(
-                f"--max-actors must match actor slots={actor.num_actor_tokens}"
-            )
         run_actor_smoke(args, actor)
         return
 

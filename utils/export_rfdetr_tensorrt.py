@@ -35,6 +35,8 @@ def parse_args():
     parser.add_argument("--precision", choices=["fp16", "fp32"], default="fp16")
     parser.add_argument("--workspace-mib", type=int, default=1024)
     parser.add_argument("--max-aux-streams", type=int, default=0)
+    parser.add_argument("--builder-optimization-level", type=int, default=None)
+    parser.add_argument("--no-tf32", action="store_true")
     parser.add_argument("--benchmark", action="store_true")
     parser.add_argument("--force", action="store_true")
     return parser.parse_args()
@@ -115,6 +117,10 @@ def build_engine(trtexec, onnx_path, engine_path, args):
     ]
     if args.precision == "fp16":
         command.append("--fp16")
+    if args.precision == "fp32" and args.no_tf32:
+        command.append("--noTF32")
+    if args.builder_optimization_level is not None:
+        command.append(f"--builderOptimizationLevel={int(args.builder_optimization_level)}")
     run_command(command)
     return command
 
@@ -156,6 +162,7 @@ def main():
         "onnx": str(onnx_path),
         "engine": str(engine_path),
         "precision": args.precision,
+        "no_tf32": bool(args.no_tf32),
         "batch_size": int(args.batch_size),
         "shape": int(args.shape) if args.shape else None,
         "trtexec": trtexec,

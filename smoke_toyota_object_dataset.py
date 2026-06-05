@@ -9,7 +9,6 @@ import numpy as np
 import torch
 
 from datasets.object_vocab import (
-    NUM_OBJECT_CLASSES,
     NONE_OBJECT_ID,
     OBJECT_CLASSES,
     OBJECT_TO_ID,
@@ -198,14 +197,13 @@ def validate_interaction_target(name, frames, target, args, report):
     )
     report.check(interaction_valid.dtype == torch.bool, f"{name}: interaction_valid is bool")
     report.check(
-        interaction_heatmap.shape
-        == (args.num_actor_tokens, NUM_OBJECT_CLASSES, 56, 56),
-        f"{name}: interaction_heatmap shape is [K, C_object, 56, 56]",
+        interaction_heatmap.shape == (args.num_actor_tokens, 56, 56),
+        f"{name}: interaction_heatmap shape is [K, 56, 56]",
         interaction_heatmap.shape,
     )
     report.check(
-        interaction_heatmap_valid.shape == (args.num_actor_tokens, NUM_OBJECT_CLASSES),
-        f"{name}: interaction_heatmap_valid shape is [K, C_object]",
+        interaction_heatmap_valid.shape == (args.num_actor_tokens,),
+        f"{name}: interaction_heatmap_valid shape is [K]",
         interaction_heatmap_valid.shape,
     )
     report.check(
@@ -213,9 +211,8 @@ def validate_interaction_target(name, frames, target, args, report):
         f"{name}: interaction_heatmap_valid is bool",
     )
     report.check(
-        interaction_heatmap_positive_valid.shape
-        == (args.num_actor_tokens, NUM_OBJECT_CLASSES),
-        f"{name}: interaction_heatmap_positive_valid shape is [K, C_object]",
+        interaction_heatmap_positive_valid.shape == (args.num_actor_tokens,),
+        f"{name}: interaction_heatmap_positive_valid shape is [K]",
         interaction_heatmap_positive_valid.shape,
     )
     report.check(
@@ -235,7 +232,7 @@ def validate_interaction_target(name, frames, target, args, report):
         f"{name}: interaction targets only exist on valid actor slots",
     )
     report.check(
-        bool((interaction_heatmap_valid <= interaction_valid[:, None]).all()),
+        bool((interaction_heatmap_valid <= interaction_valid).all()),
         f"{name}: heatmap-valid slots are supervised interaction slots",
     )
     report.check(
@@ -299,12 +296,8 @@ def validate_interaction_target(name, frames, target, args, report):
                 interaction_cls[slot],
             )
             report.check(
-                bool(
-                    interaction_heatmap_positive_valid[
-                        slot, int(interaction_cls[slot])
-                    ]
-                ),
-                f"{name}: supervised object class has a class-specific heatmap",
+                bool(interaction_heatmap_positive_valid[slot]),
+                f"{name}: supervised actor slot has an interaction heatmap",
             )
 
 

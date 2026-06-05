@@ -58,9 +58,20 @@ class TensorRTActorEngine:
             else:
                 raise RuntimeError(f"Unknown TensorRT tensor mode for {name}: {mode}")
 
-        expected_inputs = {"video", "boxes", "valid"}
-        expected_outputs = {"logits", "presence"}
-        if set(self.input_names) != expected_inputs:
+        base_inputs = {"video", "boxes", "valid"}
+        object_inputs = {
+            "object_boxes",
+            "object_classes",
+            "object_confs",
+            "object_valid",
+        }
+        input_set = set(self.input_names)
+        self.scene_object_tokens = object_inputs.issubset(input_set)
+        expected_inputs = base_inputs | (object_inputs if self.scene_object_tokens else set())
+        expected_outputs = {"logits", "presence"} | (
+            {"object_selection"} if self.scene_object_tokens else set()
+        )
+        if input_set != expected_inputs:
             raise RuntimeError(
                 f"Engine inputs must be {sorted(expected_inputs)}, got {self.input_names}"
             )
@@ -91,6 +102,38 @@ class TensorRTActorEngine:
         self.input_size = video_shape[3]
         self.num_actor_tokens = boxes_shape[1]
         self.num_classes = logits_shape[2]
+        self.num_scene_object_tokens = 0
+        if self.scene_object_tokens:
+            object_boxes_shape = self.shapes["object_boxes"]
+            object_classes_shape = self.shapes["object_classes"]
+            object_confs_shape = self.shapes["object_confs"]
+            object_valid_shape = self.shapes["object_valid"]
+            object_selection_shape = self.shapes["object_selection"]
+            if object_boxes_shape[0] != self.batch_size or object_boxes_shape[-1] != 4:
+                raise RuntimeError(f"Unsupported object_boxes shape: {object_boxes_shape}")
+            if (
+                object_classes_shape != object_boxes_shape[:2]
+                or object_confs_shape != object_boxes_shape[:2]
+                or object_valid_shape != object_boxes_shape[:2]
+            ):
+                raise RuntimeError(
+                    "Inconsistent object input shapes: "
+                    f"object_boxes={object_boxes_shape}, "
+                    f"object_classes={object_classes_shape}, "
+                    f"object_confs={object_confs_shape}, "
+                    f"object_valid={object_valid_shape}"
+                )
+            if object_selection_shape != (
+                self.batch_size,
+                self.num_actor_tokens,
+                object_boxes_shape[1] + 1,
+            ):
+                raise RuntimeError(
+                    "Inconsistent object_selection shape: "
+                    f"{object_selection_shape}, expected "
+                    f"{(self.batch_size, self.num_actor_tokens, object_boxes_shape[1] + 1)}"
+                )
+            self.num_scene_object_tokens = object_boxes_shape[1]
         self.stream = torch.cuda.Stream()
 
     def _prepare_input(self, tensor, name):
@@ -104,10 +147,36 @@ class TensorRTActorEngine:
             tensor = tensor.to(device=self.device)
         return tensor.contiguous()
 
-    def __call__(self, video, boxes, valid):
+    def __call__(self, video, boxes, valid, object_inputs=None):
         video = self._prepare_input(video, "video")
         boxes = self._prepare_input(boxes, "boxes")
         valid = self._prepare_input(valid, "valid")
+        if self.scene_object_tokens:
+            if object_inputs is None:
+                raise RuntimeError(
+                    "This TensorRT actor engine requires object inputs: "
+                    "object_boxes, object_classes, object_confs, object_valid."
+                )
+            missing = sorted(
+                {
+                    "object_boxes",
+                    "object_classes",
+                    "object_confs",
+                    "object_valid",
+                }
+                - set(object_inputs)
+            )
+            if missing:
+                raise RuntimeError(f"Missing TensorRT object input keys: {missing}")
+            object_boxes = self._prepare_input(object_inputs["object_boxes"], "object_boxes")
+            object_classes = self._prepare_input(
+                object_inputs["object_classes"],
+                "object_classes",
+            )
+            object_confs = self._prepare_input(object_inputs["object_confs"], "object_confs")
+            object_valid = self._prepare_input(object_inputs["object_valid"], "object_valid")
+        elif object_inputs is not None:
+            raise RuntimeError("Object inputs were passed to an actor-only TensorRT engine.")
 
         logits = torch.empty(
             self.shapes["logits"],
@@ -119,6 +188,13 @@ class TensorRTActorEngine:
             dtype=self.dtypes["presence"],
             device=self.device,
         )
+        object_selection = None
+        if self.scene_object_tokens:
+            object_selection = torch.empty(
+                self.shapes["object_selection"],
+                dtype=self.dtypes["object_selection"],
+                device=self.device,
+            )
 
         tensors = {
             "video": video,
@@ -127,6 +203,16 @@ class TensorRTActorEngine:
             "logits": logits,
             "presence": presence,
         }
+        if self.scene_object_tokens:
+            tensors.update(
+                {
+                    "object_boxes": object_boxes,
+                    "object_classes": object_classes,
+                    "object_confs": object_confs,
+                    "object_valid": object_valid,
+                    "object_selection": object_selection,
+                }
+            )
         current_stream = torch.cuda.current_stream()
         self.stream.wait_stream(current_stream)
         with torch.cuda.stream(self.stream):
@@ -135,5 +221,6 @@ class TensorRTActorEngine:
             ok = self.context.execute_async_v3(stream_handle=self.stream.cuda_stream)
         if not ok:
             raise RuntimeError("TensorRT actor execution failed.")
+        self.stream.synchronize()
         current_stream.wait_stream(self.stream)
-        return logits, presence
+        return logits, presence, object_selection

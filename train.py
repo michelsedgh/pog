@@ -288,8 +288,8 @@ def _adapt_heatmap_final_layer_checkpoint(module, checkpoint):
             int(module.model.hparams.get("n_landmarks", 0)),
         )
         copy_note = (
-            "copied pose channels only and zero-initialized semantic "
-            "actor-object channels"
+            "copied pose channels only and zero-initialized actor-object "
+            "interaction channels"
         )
     else:
         copy_channels = min(old_w.shape[0], target_w.shape[0])
@@ -309,25 +309,31 @@ def _validate_no_deprecated_object_path(checkpoint):
     if checkpoint is None:
         return
     state_dict = checkpoint.get("state_dict", {})
-    deprecated = [
-        key
-        for key in state_dict
+
+    def is_deprecated_object_key(key):
         if any(
             needle in key
             for needle in (
                 "object_interaction",
                 "object_relation",
-                "object_action",
                 "specialist",
             )
-        )
+        ):
+            return True
+        return "object_action" in key and "object_action_fusion" not in key
+
+    deprecated = [
+        key
+        for key in state_dict
+        if is_deprecated_object_key(key)
     ]
     if deprecated:
         preview = ", ".join(deprecated[:12])
         raise ValueError(
             "Deprecated object specialist/residual checkpoint detected. The active "
-            "hybrid path uses semantic interaction heatmaps plus clean scene object "
-            f"tokens. First deprecated keys: {preview}"
+            "actor-object path uses actor interaction heatmaps, scene object "
+            "tokens, object selection, and object-action confuser margins. "
+            f"First deprecated keys: {preview}"
         )
 
 
@@ -440,6 +446,8 @@ def build_parser():
     )
     parser.add_argument("--poguiseplus_heatmap_log_eps", type=float, default=1e-6)
     parser.add_argument("--object_selection_loss_weight", type=float, default=0.5)
+    parser.add_argument("--object_action_confuser_loss_weight", type=float, default=0.5)
+    parser.add_argument("--object_action_confuser_margin", type=float, default=0.20)
     parser.add_argument("--object_counterfactual_loss_weight", type=float, default=0.0)
     parser.add_argument("--object_counterfactual_margin", type=float, default=0.05)
     parser.add_argument("--object_counterfactual_eval", type=int, default=1)
