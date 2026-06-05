@@ -10,6 +10,14 @@ CORE_COLUMNS = [
     "val_loss",
     "val_acc_macro",
     "val_f1",
+    "val_actor_all_slot_acc",
+    "val_actor_slot_consistency",
+    "val_actor_pair_acc",
+    "val_actor_pair_swap_acc",
+    "val_actor_pair_same_acc",
+    "val_actor_pair_diff_acc",
+    "val_actor_presence_acc",
+    "val_actor_presence_bg_acc",
     "val_loss_interaction_heatmap",
     "val_loss_heatmap_log",
     "val_loss_heatmap_frobenius",
@@ -207,6 +215,12 @@ def print_compact_object_use_summary(epoch_df):
         "epoch",
         "val_acc_macro",
         "val_f1",
+        "val_actor_all_slot_acc",
+        "val_actor_pair_acc",
+        "val_actor_pair_swap_acc",
+        "val_actor_pair_same_acc",
+        "val_actor_pair_diff_acc",
+        "val_actor_presence_acc",
         "val_object_selection_acc",
         "val_object_selection_none_acc",
         "val_object_selection_object_acc",
@@ -541,6 +555,8 @@ def print_best_epochs(epoch_df):
         "val_interaction_heatmap_positive_mean",
         "val_interaction_heatmap_laptop_positive_mean",
         "val_interaction_heatmap_laptop_iou",
+        "val_actor_all_slot_acc",
+        "val_actor_pair_acc",
         "val_object_selection_acc",
         "val_object_selection_true_prob",
         "val_object_action_confuser_margin",
@@ -584,6 +600,10 @@ def print_decision(epoch_df):
     laptop_iou = metric(latest, "val_interaction_heatmap_laptop_iou")
     selection_acc = metric(latest, "val_object_selection_acc")
     selection_prob = metric(latest, "val_object_selection_true_prob")
+    actor_all_slot = metric(latest, "val_actor_all_slot_acc")
+    actor_pair = metric(latest, "val_actor_pair_acc")
+    actor_pair_swap = metric(latest, "val_actor_pair_swap_acc")
+    actor_presence = metric(latest, "val_actor_presence_acc")
     confuser_margin = metric(latest, "val_object_action_confuser_margin")
     confuser_acc = metric(latest, "val_object_action_confuser_acc")
     cf_logit = metric(latest, "val_object_counterfactual_selected_logit_drop")
@@ -603,6 +623,17 @@ def print_decision(epoch_df):
         print(
             "object selection: "
             f"acc {fmt(selection_acc)}, true_prob {fmt(selection_prob)}"
+        )
+    if (
+        pd.notna(actor_all_slot)
+        or pd.notna(actor_pair)
+        or pd.notna(actor_pair_swap)
+        or pd.notna(actor_presence)
+    ):
+        print(
+            "actor slots: "
+            f"all_slot {fmt(actor_all_slot)}, pair {fmt(actor_pair)}, "
+            f"swap {fmt(actor_pair_swap)}, presence {fmt(actor_presence)}"
         )
     if pd.notna(confuser_margin) or pd.notna(confuser_acc):
         print(
