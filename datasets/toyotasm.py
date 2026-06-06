@@ -21,6 +21,8 @@ from datasets.object_vocab import (
     NONE_OBJECT_ID,
     NUM_OBJECT_CLASSES,
     OBJECT_TO_ID,
+    OBJECTLESS_ACTIONS,
+    OBJECT_ACTIONS_WITHOUT_RELIABLE_TEACHER,
     QUALITY_GATED_ACTION_OBJECTS,
     RELIABLE_ACTION_OBJECTS,
     STRONG_ACTION_OBJECTS,
@@ -1921,8 +1923,14 @@ class ToyotaSMDataset(Dataset):
                 if object_name in OBJECT_TO_ID
             ]
             if not positive_ids:
-                interaction_object_index[slot] = 0
-                interaction_object_index_valid[slot] = True
+                if action_name in OBJECTLESS_ACTIONS:
+                    interaction_object_index[slot] = 0
+                    interaction_object_index_valid[slot] = True
+                elif action_name not in OBJECT_ACTIONS_WITHOUT_RELIABLE_TEACHER:
+                    raise RuntimeError(
+                        "Toyota action is missing an object-target policy: "
+                        f"{action_name}"
+                    )
                 continue
             positive_id_set = set(positive_ids)
             positive_tracks = [

@@ -99,6 +99,12 @@ object-positive action + no usable matching object token -> unlabeled selector
 objectless action -> NONE=0
 ```
 
+`NONE` is reserved for true body/motion actions: `Enter`, `Getup`,
+`Laydown`, `Leave`, `Sitdown`, and `Walk`. Object-involving actions without a
+trusted object teacher, such as `Drink.Fromcan`, `Usetablet`, and coffee/tea
+preparation variants, are left unlabeled for object selection instead of being
+treated as objectless.
+
 The heatmap teacher stays stricter: it is present only for a trusted matching
 object track. Detector misses never create fake zero object heatmaps.
 

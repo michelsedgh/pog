@@ -17,6 +17,7 @@ from datasets.object_vocab import (
     GROUPS,
     NUM_OBJECT_CLASSES,
     OBJECT_CLASSES,
+    OBJECTLESS_ACTIONS,
     STRONG_ACTION_OBJECTS,
 )
 from datasets.toyotasm import CS_DICT, CV_DICT
@@ -353,9 +354,9 @@ class HeatmapModule(pl.LightningModule):
                 dtype=torch.long,
             )
         objectless_indices = [
-            int(action_id) - 1
-            for action_name, action_id in label_dict.items()
-            if action_name not in STRONG_ACTION_OBJECTS
+            int(label_dict[action_name]) - 1
+            for action_name in OBJECTLESS_ACTIONS
+            if action_name in label_dict
         ]
         if objectless_indices:
             groups["objectless"] = torch.tensor(objectless_indices, dtype=torch.long)

@@ -11,6 +11,8 @@ import torch
 from datasets.object_vocab import (
     NONE_OBJECT_ID,
     OBJECT_CLASSES,
+    OBJECTLESS_ACTIONS,
+    OBJECT_ACTIONS_WITHOUT_RELIABLE_TEACHER,
     OBJECT_TO_ID,
     STRONG_ACTION_OBJECTS,
 )
@@ -184,6 +186,8 @@ def validate_interaction_target(name, frames, target, args, report):
     interaction_heatmap_positive_valid = target[
         "interaction_heatmap_positive_valid"
     ].bool()
+    interaction_object_index = target["interaction_object_index"]
+    interaction_object_index_valid = target["interaction_object_index_valid"].bool()
 
     report.check(
         interaction_cls.shape == (args.num_actor_tokens,),
@@ -262,25 +266,24 @@ def validate_interaction_target(name, frames, target, args, report):
 
     for slot in torch.nonzero(actor_valid, as_tuple=False).flatten().tolist():
         name_for_slot = action_name(target["actions"][slot])
-        if name_for_slot == "WatchTV":
+        if name_for_slot in OBJECTLESS_ACTIONS:
             report.check(
-                not bool(interaction_valid[slot]),
-                f"{name}: WatchTV is not a forced interacted-object target",
+                bool(interaction_object_index_valid[slot]),
+                f"{name}: true objectless action has a NONE object label",
             )
-        if name_for_slot == "Usetablet":
             report.check(
-                not bool(interaction_valid[slot]),
-                f"{name}: Usetablet does not force a COCO phone surrogate",
+                int(interaction_object_index[slot]) == 0,
+                f"{name}: true objectless action label is NONE",
+                interaction_object_index[slot],
             )
-        if name_for_slot == "Drink.Fromcan":
+        if name_for_slot in OBJECT_ACTIONS_WITHOUT_RELIABLE_TEACHER:
             report.check(
-                not bool(interaction_valid[slot]),
-                f"{name}: Drink.Fromcan has no forced COCO object target",
+                not bool(interaction_object_index_valid[slot]),
+                f"{name}: untrusted object action does not get a fake NONE label",
             )
-        if name_for_slot == "Drink.Fromglass":
             report.check(
                 not bool(interaction_valid[slot]),
-                f"{name}: Drink.Fromglass has no reliable glass teacher target",
+                f"{name}: untrusted object action has no forced interaction target",
             )
         if name_for_slot in STRONG_ACTION_OBJECTS and bool(interaction_valid[slot]):
             expected_ids = {

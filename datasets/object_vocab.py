@@ -242,7 +242,9 @@ RELIABLE_ACTION_OBJECTS = {
 QUALITY_GATED_ACTION_OBJECTS = {
     "Usetelephone": ("phone",),
     "Drink.Frombottle": ("bottle",),
+    "Drink.Fromglass": ("glass",),
     "Pour.Frombottle": ("bottle",),
+    "WatchTV": ("tv_monitor",),
     "Cutbread": ("utensil",),
     "Cook.Cut": ("utensil",),
     "Cook.Stir": ("bowl",),
@@ -254,6 +256,40 @@ STRONG_ACTION_OBJECTS = {
     **RELIABLE_ACTION_OBJECTS,
     **QUALITY_GATED_ACTION_OBJECTS,
 }
+
+OBJECTLESS_ACTIONS = {
+    "Enter",
+    "Getup",
+    "Laydown",
+    "Leave",
+    "Sitdown",
+    "Walk",
+}
+
+OBJECT_ACTIONS_WITHOUT_RELIABLE_TEACHER = {
+    "Cook.Cleanup",
+    "Drink.Fromcan",
+    "Eat.Attable",
+    "Eat.Snack",
+    "Makecoffee.Pourgrains",
+    "Makecoffee.Pourwater",
+    "Maketea.Boilwater",
+    "Maketea.Insertteabag",
+    "Pour.Fromcan",
+    "Pour.Fromkettle",
+    "Takepills",
+    "Usetablet",
+}
+
+_overlapping_target_actions = (
+    set(STRONG_ACTION_OBJECTS)
+    & (OBJECTLESS_ACTIONS | OBJECT_ACTIONS_WITHOUT_RELIABLE_TEACHER)
+)
+if _overlapping_target_actions:
+    raise RuntimeError(
+        "Object target action sets must be mutually exclusive, overlap: "
+        f"{sorted(_overlapping_target_actions)}"
+    )
 
 # These pairs are not object-presence rules. They are used only when the Toyota
 # action label and actor-associated object teacher already say the actor is
