@@ -22,6 +22,7 @@ MODEL_SHORT_SIDE = 256
 DETECTION_EVERY_FRAME = 1
 ACTION_EVERY_FRAME = 1
 ACTION_SMOOTHING_WINDOW = 1
+MIN_OBJECT_TRACK_SAMPLE_COUNT = 2
 
 
 ACTION_CLASSES = [
@@ -372,6 +373,7 @@ def pack_temporal_object_tokens(
     max_objects,
     device,
     track_iou_threshold=0.2,
+    min_sample_count=MIN_OBJECT_TRACK_SAMPLE_COUNT,
 ):
     entries = []
     for sample_pos, record in enumerate(detection_records):
@@ -441,8 +443,14 @@ def pack_temporal_object_tokens(
     confs = torch.zeros((1, max_objects), dtype=torch.float32, device=device)
     valid = torch.zeros((1, max_objects), dtype=torch.bool, device=device)
     packed = []
+    min_sample_count = max(int(min_sample_count), 1)
+    supported_tracks = [
+        track
+        for track in tracks
+        if len(track["sample_positions"]) >= min_sample_count
+    ]
     sorted_tracks = sorted(
-        tracks,
+        supported_tracks,
         key=lambda track: _object_track_sort_key(track, len(detection_records)),
     )
     for slot, track in enumerate(sorted_tracks[:max_objects]):
@@ -653,6 +661,7 @@ def run_actor_smoke(args, actor):
             "clip_frames": TRAINING_CLIP_FRAMES,
             "span_frames": TRAINING_SPAN_FRAMES,
             "sampling": "linspace",
+            "min_object_track_sample_count": MIN_OBJECT_TRACK_SAMPLE_COUNT,
             "valid_slots": int(valid.sum().item()),
             "object_selection_shape": None
             if object_selection is None
@@ -1073,6 +1082,7 @@ class LiveRunner:
                             f"frames={TRAINING_CLIP_FRAMES} "
                             f"crop=actor "
                             f"smooth={ACTION_SMOOTHING_WINDOW} "
+                            f"min_obj_samples={MIN_OBJECT_TRACK_SAMPLE_COUNT} "
                             f"frame={self.frame_count}"
                         )
                         packed_object_payload = [
