@@ -48,14 +48,18 @@ TOYOTA_CS_ACTION_TO_INDEX = {
 
 
 def _toyota_object_residual_action_indices(num_classes):
+    if int(num_classes) != len(TOYOTA_CS_ACTION_TO_INDEX):
+        raise ValueError(
+            "Toyota object-logit residuals require the 31-class Toyota action "
+            f"space, got num_classes={num_classes}."
+        )
     indices = []
     for action_name in sorted(STRONG_ACTION_OBJECTS):
         if action_name not in TOYOTA_CS_ACTION_TO_INDEX:
             raise ValueError(f"Missing Toyota action index for {action_name}")
         index = int(TOYOTA_CS_ACTION_TO_INDEX[action_name])
-        if index < int(num_classes):
-            indices.append(index)
-    if int(num_classes) == len(TOYOTA_CS_ACTION_TO_INDEX) and not indices:
+        indices.append(index)
+    if not indices:
         raise ValueError("No Toyota object-action indices available for residual head")
     return sorted(set(indices))
 
