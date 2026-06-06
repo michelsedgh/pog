@@ -556,7 +556,7 @@ class TorchActorBackend:
         self.input_size = MODEL_INPUT_SIZE
         self.backend_name = "pytorch"
         self.scene_object_tokens = bool(self.hparams.get("scene_object_tokens", 0))
-        self.actor_object_action_fusion = self.scene_object_tokens
+        self.actor_object_logit_residual = self.scene_object_tokens
         self.num_scene_object_tokens = (
             int(self.hparams.get("num_scene_object_tokens", 0))
             if self.scene_object_tokens
@@ -656,7 +656,7 @@ def run_actor_smoke(args, actor):
             "precision": actor.precision,
             "device": str(actor.device),
             "scene_object_tokens": bool(actor.scene_object_tokens),
-            "actor_object_action_fusion": bool(actor.actor_object_action_fusion),
+            "actor_object_logit_residual": bool(actor.actor_object_logit_residual),
             "num_scene_object_tokens": int(actor.num_scene_object_tokens),
             "clip_frames": TRAINING_CLIP_FRAMES,
             "span_frames": TRAINING_SPAN_FRAMES,
@@ -788,7 +788,7 @@ class LiveRunner:
             actor_precision=self.actor.precision,
             actor_device=str(self.actor.device),
             scene_object_tokens=bool(self.actor.scene_object_tokens),
-            actor_object_action_fusion=bool(self.actor.actor_object_action_fusion),
+            actor_object_logit_residual=bool(self.actor.actor_object_logit_residual),
             num_scene_object_tokens=int(self.actor.num_scene_object_tokens),
             detector_backend=self.detector_backend_name,
         )

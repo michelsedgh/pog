@@ -36,13 +36,20 @@ The intended model path is:
 video tokens + actor tokens + heatmap tokens + object tokens
 -> transformer
 -> object selection head per actor
--> actor token fused with selected-object context when scene object tokens are enabled
--> existing actor action head
+-> actor-only action head
+-> selected-object context predicts masked object-action residual logits
+-> final logits = actor logits + object residual logits
 ```
 
 The model must learn interaction, not object proximity. A laptop token alone
 must not force `Uselaptop`; it is only useful when the actor visual evidence and
 teacher target say that actor is interacting with the laptop.
+
+The object residual is intentionally not allowed to score every class. It is
+masked to the explicitly mapped object-action classes from
+`datasets/object_vocab.py`, and it is scaled by the selector probability assigned
+to real object slots. True body/motion classes such as `Walk`, `Getup`,
+`Sitdown`, and `Laydown` stay on the actor-only action path.
 
 ## Kept
 
@@ -50,8 +57,7 @@ teacher target say that actor is interacting with the laptop.
 - One generic interacted-object heatmap per actor slot.
 - RF-DETR scene object tokens.
 - Object selection head.
-- Actor/object fusion before the existing actor action head. This is not a
-  separate training option: `scene_object_tokens=1` implies fusion.
+- Masked object-logit residual added after the actor-only action head.
 - PO-GUISE+ style `action CE + log(heatmap MSE)`.
 - Selected-object removal as a validation-only supporting signal.
 
@@ -60,6 +66,7 @@ teacher target say that actor is interacting with the laptop.
 - Selected-object token dropout.
 - Selected-object class dropout.
 - Learnable scalar object-fusion gate.
+- Pre-action actor/object token fusion.
 - Configurable object-action fusion on/off and hidden-size knobs.
 - Target/background weighted interacted-object heatmap loss.
 - Training/checkpoint logic that treats raw selected-object logit drop as the
@@ -120,12 +127,14 @@ action CE
 
 With Nash-MTL enabled, action CE and object selection are treated as the action
 task, while pose/object heatmap localization is treated as the heatmap task.
-Action CE owns the action boundary. Object selection binds the actor token to a
-usable object-token context, and the interacted-object heatmap teaches visual
-grounding. There is intentionally no supervised object-action margin loss:
-object presence alone must not force an action class. There is also no
-target/background weighted heatmap variant; interacted-object heatmaps use the
-same PO-GUISE+ style Frobenius/log-MSE objective as pose heatmaps.
+Action CE owns the action boundary. The actor-only action head is always present,
+and object evidence contributes only through a masked residual over mapped
+object-action logits. Object selection binds the actor token to a usable
+object-token context, and the interacted-object heatmap teaches visual grounding.
+There is intentionally no supervised object-action margin loss: object presence
+alone must not force an action class. There is also no target/background weighted
+heatmap variant; interacted-object heatmaps use the same PO-GUISE+ style
+Frobenius/log-MSE objective as pose heatmaps.
 
 ## Synthetic Actor Slots
 

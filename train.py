@@ -317,10 +317,11 @@ def _validate_no_deprecated_object_path(checkpoint):
                 "object_interaction",
                 "object_relation",
                 "specialist",
+                "object_action_fusion",
             )
         ):
             return True
-        return "object_action" in key and "object_action_fusion" not in key
+        return "object_action" in key and "object_action_residual" not in key
 
     deprecated = [
         key
@@ -332,7 +333,7 @@ def _validate_no_deprecated_object_path(checkpoint):
         raise ValueError(
             "Deprecated object specialist/residual checkpoint detected. The active "
             "actor-object path uses actor interaction heatmaps, scene object "
-            "tokens, and object selection. "
+            "tokens, object selection, and masked object-logit residuals. "
             f"First deprecated keys: {preview}"
         )
 

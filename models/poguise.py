@@ -9,6 +9,8 @@ import os
 import os.path
 import pickle
 
+from datasets.object_vocab import STRONG_ACTION_OBJECTS
+
 
 TOYOTA_CS_ACTION_TO_INDEX = {
     "Cook.Cleandishes": 0,
@@ -43,6 +45,20 @@ TOYOTA_CS_ACTION_TO_INDEX = {
     "Walk": 29,
     "WatchTV": 30,
 }
+
+
+def _toyota_object_residual_action_indices(num_classes):
+    indices = []
+    for action_name in sorted(STRONG_ACTION_OBJECTS):
+        if action_name not in TOYOTA_CS_ACTION_TO_INDEX:
+            raise ValueError(f"Missing Toyota action index for {action_name}")
+        index = int(TOYOTA_CS_ACTION_TO_INDEX[action_name])
+        if index < int(num_classes):
+            indices.append(index)
+    if int(num_classes) == len(TOYOTA_CS_ACTION_TO_INDEX) and not indices:
+        raise ValueError("No Toyota object-action indices available for residual head")
+    return sorted(set(indices))
+
 
 def load_state_dict(
     model, state_dict, prefix="", ignore_missing="relative_position_index"
@@ -201,16 +217,29 @@ class ActorObjectSelectionHead(nn.Module):
         return torch.cat([none_logits, object_logits], dim=-1)
 
 
-class ActorObjectActionFusion(nn.Module):
-    def __init__(self, dim, hidden_dim=512):
+class ActorObjectActionResidual(nn.Module):
+    def __init__(self, dim, num_classes, allowed_action_indices, hidden_dim=512):
         super().__init__()
+        self.num_classes = int(num_classes)
         self.actor_norm = nn.LayerNorm(dim)
         self.object_norm = nn.LayerNorm(dim)
-        self.fusion = nn.Sequential(
+        self.residual = nn.Sequential(
             nn.LayerNorm(dim * 3),
             nn.Linear(dim * 3, hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, dim),
+            nn.Linear(hidden_dim, self.num_classes),
+        )
+        final = self.residual[-1]
+        nn.init.zeros_(final.weight)
+        nn.init.zeros_(final.bias)
+        mask = torch.zeros(self.num_classes, dtype=torch.float32)
+        for index in allowed_action_indices:
+            if 0 <= int(index) < self.num_classes:
+                mask[int(index)] = 1.0
+        self.register_buffer(
+            "allowed_action_mask",
+            mask.view(1, 1, self.num_classes),
+            persistent=False,
         )
 
     def forward(self, actor_tokens, object_tokens, object_selection_logits):
@@ -225,13 +254,14 @@ class ActorObjectActionFusion(nn.Module):
                 f"{expected}, got {tuple(object_selection_logits.shape)}"
             )
 
-        # Index 0 is NONE. Excluding it makes the selected object context shrink
-        # naturally when the actor should not use any detected object.
+        # Index 0 is NONE. Excluding it keeps the object residual small when the
+        # selector believes this actor should use no object.
         object_probs = object_selection_logits.softmax(dim=-1)[..., 1:]
+        object_mass = object_probs.sum(dim=-1, keepdim=True)
         object_context = torch.einsum("bkm,bmd->bkd", object_probs, object_tokens)
         actor_norm = self.actor_norm(actor_tokens)
         object_norm = self.object_norm(object_context)
-        fused_delta = self.fusion(
+        residual_logits = self.residual(
             torch.cat(
                 (
                     actor_norm,
@@ -241,7 +271,13 @@ class ActorObjectActionFusion(nn.Module):
                 dim=-1,
             )
         )
-        return actor_tokens + fused_delta.to(dtype=actor_tokens.dtype)
+        mask = self.allowed_action_mask.to(
+            device=residual_logits.device,
+            dtype=residual_logits.dtype,
+        )
+        residual_logits = residual_logits * mask
+        residual_logits = residual_logits * object_mass.to(dtype=residual_logits.dtype)
+        return residual_logits.to(dtype=actor_tokens.dtype)
 
 
 class POGUISE(pl.LightningModule):
@@ -254,7 +290,7 @@ class POGUISE(pl.LightningModule):
             self.hparams.get("actor_interaction_heatmaps", 0)
         )
         self.scene_object_tokens = bool(self.hparams.get("scene_object_tokens", 0))
-        self.actor_object_action_fusion = self.scene_object_tokens
+        self.actor_object_logit_residual = self.scene_object_tokens
         if self.scene_object_tokens and not self.actor_prompt:
             raise ValueError("scene_object_tokens requires actor_prompt")
         if self.actor_interaction_heatmaps and not self.actor_prompt:
@@ -385,8 +421,15 @@ class POGUISE(pl.LightningModule):
                 if self.scene_object_tokens
                 else None
             )
-            self.object_action_fusion = (
-                ActorObjectActionFusion(self.net.num_features)
+            object_residual_action_indices = _toyota_object_residual_action_indices(
+                self.hparams.num_classes
+            )
+            self.object_action_residual = (
+                ActorObjectActionResidual(
+                    self.net.num_features,
+                    self.hparams.num_classes,
+                    object_residual_action_indices,
+                )
                 if self.scene_object_tokens
                 else None
             )
@@ -446,8 +489,8 @@ class POGUISE(pl.LightningModule):
             if self.object_selection_head is not None:
                 for param in self.object_selection_head.parameters():
                     param.requires_grad = True
-            if getattr(self, "object_action_fusion", None) is not None:
-                for param in self.object_action_fusion.parameters():
+            if getattr(self, "object_action_residual", None) is not None:
+                for param in self.object_action_residual.parameters():
                     param.requires_grad = True
         interaction_unfreeze_last_blocks = int(
             self.hparams.get("interaction_unfreeze_last_blocks", 0) or 0
@@ -498,8 +541,8 @@ class POGUISE(pl.LightningModule):
                 if self.object_selection_head is not None:
                     for param in self.object_selection_head.parameters():
                         param.requires_grad = True
-                if getattr(self, "object_action_fusion", None) is not None:
-                    for param in self.object_action_fusion.parameters():
+                if getattr(self, "object_action_residual", None) is not None:
+                    for param in self.object_action_residual.parameters():
                         param.requires_grad = True
 
     def _freeze_stages(self):
@@ -578,20 +621,19 @@ class POGUISE(pl.LightningModule):
                     x_object,
                     object_valid.to(device=x_actor.device, dtype=torch.bool),
                 )
-            action_tokens = x_actor
-            if getattr(self, "object_action_fusion", None) is not None:
+            if self.hparams.ret_feat:
+                return x_actor
+            action_logits = self.actor_head(x_actor)
+            if getattr(self, "object_action_residual", None) is not None:
                 if object_selection_logits is None:
                     raise RuntimeError(
                         "scene_object_tokens requires object_selection_logits"
                     )
-                action_tokens = self.object_action_fusion(
+                action_logits = action_logits + self.object_action_residual(
                     x_actor,
                     x_object,
                     object_selection_logits,
                 )
-            if self.hparams.ret_feat:
-                return action_tokens
-            action_logits = self.actor_head(action_tokens)
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
                 if object_selection_logits is not None:
