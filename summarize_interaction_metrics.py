@@ -42,9 +42,6 @@ CORE_COLUMNS = [
     "val_object_selection_teacher_count",
     "val_object_selection_none_teacher_count",
     "val_object_selection_object_teacher_count",
-    "val_object_action_confuser_loss",
-    "val_object_action_confuser_margin",
-    "val_object_action_confuser_acc",
     "val_object_counterfactual_selected_logit_drop",
     "val_object_counterfactual_selected_prob_drop",
     "interaction_score",
@@ -177,16 +174,12 @@ def compute_interaction_score(df):
     )
     action = df_metric(df, "val_f1", 0.0)
     selection_acc = df_metric(df, "val_object_selection_acc", 0.0)
-    confuser_acc = df_metric(df, "val_object_action_confuser_acc", 0.0)
-    confuser_margin = df_metric(df, "val_object_action_confuser_margin", 0.0)
     logit_drop = df_metric(df, "val_object_counterfactual_selected_logit_drop", 0.0)
     return (
         iou
         + soft_iou
         + pos
         + 0.25 * selection_acc
-        + 0.25 * confuser_acc
-        + 0.05 * confuser_margin
         + 0.1 * logit_drop
         - 0.02 * center
         + 0.25 * action
@@ -229,8 +222,6 @@ def print_compact_object_use_summary(epoch_df):
         "val_object_selection_true_prob",
         "val_object_selection_none_teacher_count",
         "val_object_selection_object_teacher_count",
-        "val_object_action_confuser_margin",
-        "val_object_action_confuser_acc",
         "val_object_counterfactual_selected_logit_drop",
         "val_object_counterfactual_selected_prob_drop",
         "val_action_Uselaptop_acc",
@@ -292,8 +283,6 @@ def print_compact_best(epoch_df):
         "val_object_selection_true_prob",
         "val_object_selection_none_teacher_count",
         "val_object_selection_object_teacher_count",
-        "val_object_action_confuser_margin",
-        "val_object_action_confuser_acc",
         "val_object_counterfactual_selected_logit_drop",
         "val_object_counterfactual_selected_prob_drop",
         "val_action_Uselaptop_acc",
@@ -332,8 +321,6 @@ def print_object_use_epoch_table(epoch_df):
         "val_object_selection_true_prob",
         "val_object_selection_none_teacher_count",
         "val_object_selection_object_teacher_count",
-        "val_object_action_confuser_margin",
-        "val_object_action_confuser_acc",
         "val_object_counterfactual_selected_logit_drop",
         "val_object_counterfactual_selected_prob_drop",
     ]
@@ -351,8 +338,6 @@ def print_object_use_epoch_table(epoch_df):
         "val_object_selection_none_acc",
         "val_object_selection_object_acc",
         "val_object_selection_true_prob",
-        "val_object_action_confuser_margin",
-        "val_object_action_confuser_acc",
         "val_object_counterfactual_selected_logit_drop",
         "val_object_counterfactual_selected_prob_drop",
     ]
@@ -567,8 +552,6 @@ def print_best_epochs(epoch_df):
         "val_actor_pair_acc",
         "val_object_selection_acc",
         "val_object_selection_true_prob",
-        "val_object_action_confuser_margin",
-        "val_object_action_confuser_acc",
         "val_object_counterfactual_selected_logit_drop",
         "interaction_score",
     ]
@@ -614,8 +597,6 @@ def print_decision(epoch_df):
     actor_pair = metric(latest, "val_actor_pair_acc")
     actor_pair_swap = metric(latest, "val_actor_pair_swap_acc")
     actor_presence = metric(latest, "val_actor_presence_acc")
-    confuser_margin = metric(latest, "val_object_action_confuser_margin")
-    confuser_acc = metric(latest, "val_object_action_confuser_acc")
     cf_logit = metric(latest, "val_object_counterfactual_selected_logit_drop")
     cf_prob = metric(latest, "val_object_counterfactual_selected_prob_drop")
 
@@ -647,11 +628,6 @@ def print_decision(epoch_df):
             f"all_slot {fmt(actor_all_slot)}, pair {fmt(actor_pair)}, "
             f"swap {fmt(actor_pair_swap)}, presence {fmt(actor_presence)}"
         )
-    if pd.notna(confuser_margin) or pd.notna(confuser_acc):
-        print(
-            "object-action confusers: "
-            f"margin {fmt(confuser_margin)}, acc {fmt(confuser_acc)}"
-        )
     if pd.notna(cf_logit) or pd.notna(cf_prob):
         print(
             "selected-object removal: "
@@ -660,23 +636,6 @@ def print_decision(epoch_df):
 
     if pd.notna(f1_delta) and f1_delta < -0.01:
         print("STOP/ROLL BACK: action F1 dropped more than 0.01 from epoch 0.")
-        return
-    if pd.notna(confuser_acc):
-        if confuser_acc >= 0.70 and pd.notna(selection_acc) and selection_acc >= 0.50:
-            print(
-                "GOOD SIGN: selected objects are being chosen and the fused "
-                "action logits beat object-confusable actions."
-            )
-        elif confuser_acc < 0.50:
-            print(
-                "WARNING: object selection may exist, but object-confusable "
-                "action boundaries are still weak."
-            )
-        else:
-            print(
-                "CONTINUE/COMPARE: object-action boundaries are forming; "
-                "check target actions and live probes."
-            )
         return
     if pd.notna(cf_logit):
         if cf_logit > 0.02 and pd.notna(selection_acc) and selection_acc > 0.20:
@@ -737,13 +696,6 @@ def print_row(title, row):
             f"teachers {metric(row, 'val_object_selection_teacher_count'):.1f}, "
             f"none_teachers {metric(row, 'val_object_selection_none_teacher_count'):.0f}, "
             f"object_teachers {metric(row, 'val_object_selection_object_teacher_count'):.0f}"
-        )
-    if pd.notna(metric(row, "val_object_action_confuser_margin")):
-        print(
-            "object-action confusers: "
-            f"loss {metric(row, 'val_object_action_confuser_loss'):.4f}, "
-            f"margin {metric(row, 'val_object_action_confuser_margin'):.4f}, "
-            f"acc {metric(row, 'val_object_action_confuser_acc'):.4f}"
         )
     if pd.notna(metric(row, "val_object_counterfactual_selected_logit_drop")):
         print(
@@ -858,7 +810,7 @@ def main():
     print_decision(epoch_df)
 
     print("\nREAD THIS:")
-    print("- Main proof: object selection is high AND object-action confuser margins/accuracy improve.")
+    print("- Main proof: object selection is high and selected-object removal affects the true-action logit.")
     print("- NONE selection should be strong for objectless actions, so detector misses do not dominate.")
     print("- Counterfactual selected-object removal is supporting evidence, not the checkpoint target by itself.")
     print("- Guardrail: val_f1/per-action target accuracy should not collapse while object-use metrics rise.")

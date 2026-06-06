@@ -15,7 +15,6 @@ from losses.poguiseplus_losses import (
 )
 import pickle
 from datasets.object_vocab import (
-    ACTION_OBJECT_CONFUSERS,
     GROUPS,
     NUM_OBJECT_CLASSES,
     OBJECT_CLASSES,
@@ -76,24 +75,11 @@ class HeatmapModule(pl.LightningModule):
         self.object_selection_loss_weight = float(
             hparams.get("object_selection_loss_weight", 0.5)
         )
-        self.object_action_confuser_loss_weight = float(
-            hparams.get("object_action_confuser_loss_weight", 0.5)
-        )
-        self.object_action_confuser_margin = float(
-            hparams.get("object_action_confuser_margin", 0.20)
-        )
-        self.object_counterfactual_loss_weight = float(
-            hparams.get("object_counterfactual_loss_weight", 0.0)
-        )
-        self.object_counterfactual_margin = float(
-            hparams.get("object_counterfactual_margin", 0.05)
-        )
         self.object_counterfactual_eval = bool(
             hparams.get("object_counterfactual_eval", 1)
         )
         self.num_classes = hparams.num_classes
         self.dataset_name = hparams.dataset_artifact
-        self.object_action_confuser_specs = self._object_action_confuser_specs()
 
         # Create model
         self.lr = hparams.lr
@@ -391,24 +377,6 @@ class HeatmapModule(pl.LightningModule):
             metric_name = action_name.replace(".", "_")
             indices.append((metric_name, int(label_dict[action_name]) - 1))
         return indices
-
-    def _object_action_confuser_specs(self):
-        label_dict = self._toyota_label_dict()
-        specs = []
-        for action_name, confuser_names in ACTION_OBJECT_CONFUSERS.items():
-            if action_name not in label_dict:
-                continue
-            target_idx = int(label_dict[action_name]) - 1
-            confuser_indices = [
-                int(label_dict[name]) - 1
-                for name in confuser_names
-                if name in label_dict
-            ]
-            if not confuser_indices:
-                continue
-            metric_name = action_name.replace(".", "_")
-            specs.append((metric_name, target_idx, tuple(confuser_indices)))
-        return specs
 
     def _pose_heatmap_pred(self, hm_preds):
         if not torch.is_tensor(hm_preds):
@@ -873,96 +841,6 @@ class HeatmapModule(pl.LightningModule):
         )
         return loss
 
-    def _object_action_confuser_loss(self, preds, actions, target, valid, stage):
-        if not self.scene_object_tokens or not self.object_action_confuser_specs:
-            return None
-        if (
-            "interaction_object_index" not in target
-            or "interaction_object_index_valid" not in target
-        ):
-            return None
-
-        selected_indices = target["interaction_object_index"].to(
-            device=preds.device,
-            dtype=torch.long,
-        )
-        selected_valid = target["interaction_object_index_valid"].to(
-            device=preds.device,
-            dtype=torch.bool,
-        )
-        selected_valid = (
-            selected_valid
-            & valid.to(device=preds.device, dtype=torch.bool)
-            & (selected_indices > 0)
-        )
-        if not selected_valid.any():
-            return None
-
-        actions = actions.to(device=preds.device, dtype=torch.long)
-        preds = preds.float()
-        all_margins = []
-        all_losses = []
-        total_count = 0
-        for metric_name, action_idx, confuser_indices in self.object_action_confuser_specs:
-            mask = selected_valid & (actions == int(action_idx))
-            if not mask.any():
-                continue
-            confuser_idx = torch.tensor(
-                confuser_indices,
-                device=preds.device,
-                dtype=torch.long,
-            )
-            masked_preds = preds[mask]
-            action_logits = masked_preds[:, int(action_idx)]
-            confuser_logits = masked_preds.index_select(dim=1, index=confuser_idx)
-            strongest_confuser = confuser_logits.max(dim=1).values
-            margin = action_logits - strongest_confuser
-            count = int(margin.numel())
-            total_count += count
-            all_margins.append(margin)
-            all_losses.append(
-                F.relu(self.object_action_confuser_margin - margin)
-            )
-            self._log_scalar(
-                f"{stage}_object_action_{metric_name}_margin",
-                margin.detach().mean(),
-                count,
-            )
-            self._log_scalar(
-                f"{stage}_object_action_{metric_name}_confuser_acc",
-                (margin.detach() > 0).float().mean(),
-                count,
-            )
-
-        if not all_margins:
-            return None
-
-        margins = torch.cat(all_margins)
-        losses = torch.cat(all_losses)
-        self._log_scalar(
-            f"{stage}_object_action_confuser_margin",
-            margins.detach().mean(),
-            total_count,
-        )
-        self._log_scalar(
-            f"{stage}_object_action_confuser_acc",
-            (margins.detach() > 0).float().mean(),
-            total_count,
-        )
-        loss = losses.mean()
-        self.log(
-            f"{stage}_object_action_confuser_loss",
-            loss,
-            on_step=stage == "train",
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-            sync_dist=True,
-        )
-        if stage != "train" or self.object_action_confuser_loss_weight <= 0:
-            return None
-        return loss
-
     def _selected_object_removed_inputs(
         self,
         object_inputs,
@@ -987,7 +865,7 @@ class HeatmapModule(pl.LightningModule):
         output["object_classes"][batch_idx, object_slots] = none_id
         return output
 
-    def _object_counterfactual_loss(
+    def _log_object_counterfactual_eval(
         self,
         imgs,
         boxes,
@@ -1000,7 +878,7 @@ class HeatmapModule(pl.LightningModule):
     ):
         if not self.scene_object_tokens:
             return None
-        if stage == "train" and self.object_counterfactual_loss_weight <= 0:
+        if stage == "train":
             return None
         if stage != "train" and not self.object_counterfactual_eval:
             return None
@@ -1069,10 +947,7 @@ class HeatmapModule(pl.LightningModule):
             (base_true_probs - counterfactual_true_probs).mean(),
             count,
         )
-
-        if stage != "train" or self.object_counterfactual_loss_weight <= 0:
-            return None
-        return F.relu(self.object_counterfactual_margin - logit_drop).mean()
+        return None
 
     def _append_nash_mtl_params(self, params):
         if not (
@@ -1316,23 +1191,7 @@ class HeatmapModule(pl.LightningModule):
                 loss_object_selection * self.object_selection_loss_weight
             )
 
-        loss_object_action_confuser = self._object_action_confuser_loss(
-            preds,
-            actions,
-            target,
-            valid,
-            stage,
-        )
-        if (
-            loss_object_action_confuser is not None
-            and self.object_action_confuser_loss_weight > 0
-        ):
-            object_aux_terms.append(
-                loss_object_action_confuser
-                * self.object_action_confuser_loss_weight
-            )
-
-        loss_object_counterfactual = self._object_counterfactual_loss(
+        self._log_object_counterfactual_eval(
             imgs,
             boxes,
             valid,
@@ -1342,13 +1201,6 @@ class HeatmapModule(pl.LightningModule):
             object_inputs,
             stage,
         )
-        if (
-            loss_object_counterfactual is not None
-            and self.object_counterfactual_loss_weight > 0
-        ):
-            object_aux_terms.append(
-                loss_object_counterfactual * self.object_counterfactual_loss_weight
-            )
         if object_aux_terms:
             loss_action_task = loss_action_task + torch.stack(object_aux_terms).sum()
 

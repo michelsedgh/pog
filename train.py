@@ -332,7 +332,7 @@ def _validate_no_deprecated_object_path(checkpoint):
         raise ValueError(
             "Deprecated object specialist/residual checkpoint detected. The active "
             "actor-object path uses actor interaction heatmaps, scene object "
-            "tokens, object selection, and object-action confuser margins. "
+            "tokens, and object selection. "
             f"First deprecated keys: {preview}"
         )
 
@@ -446,10 +446,6 @@ def build_parser():
     )
     parser.add_argument("--poguiseplus_heatmap_log_eps", type=float, default=1e-6)
     parser.add_argument("--object_selection_loss_weight", type=float, default=0.5)
-    parser.add_argument("--object_action_confuser_loss_weight", type=float, default=0.5)
-    parser.add_argument("--object_action_confuser_margin", type=float, default=0.20)
-    parser.add_argument("--object_counterfactual_loss_weight", type=float, default=0.0)
-    parser.add_argument("--object_counterfactual_margin", type=float, default=0.05)
     parser.add_argument("--object_counterfactual_eval", type=int, default=1)
     parser.add_argument("--deepspeed_optim", type=int, default=0)
     parser.add_argument("--kp_only", type=int, default=0)

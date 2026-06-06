@@ -92,7 +92,7 @@ The selector teacher is about usable object-token binding:
 
 ```text
 object-positive action + trusted matching object token -> selected token
-object-positive action + no usable matching object token -> NONE=0
+object-positive action + no usable matching object token -> unlabeled selector
 objectless action -> NONE=0
 ```
 
@@ -106,28 +106,15 @@ The intended training objective is:
 ```text
 action CE
 + balanced object/NONE selection CE
-+ interaction-conditioned object-action confuser margin
 + log(pose/object heatmap MSE)
-+ optional selected-object counterfactual margin
 ```
 
-With Nash-MTL enabled, action/object-reasoning losses are treated as the action
-task, and pose/object heatmap localization is treated as the heatmap task.
-
-The important object-action term is the confuser margin. It only applies when a
-valid actor-associated object teacher exists. Examples:
-
-```text
-Uselaptop        must beat Readbook / Usetelephone / WatchTV
-Readbook         must beat Uselaptop / Usetelephone / WatchTV
-Usetelephone     must beat Uselaptop / Readbook / WatchTV
-Drink.Fromcup    must beat bottle/glass drink confusers
-Drink.Frombottle must beat cup/glass drink confusers
-```
-
-This does not mean "object present => action." It means "for an interaction-
-labeled positive sample, the fused actor/object representation must separate
-the correct action from visually similar alternatives."
+With Nash-MTL enabled, action CE and object selection are treated as the action
+task, while pose/object heatmap localization is treated as the heatmap task.
+Action CE owns the action boundary. Object selection binds the actor token to a
+usable object-token context, and the interacted-object heatmap teaches visual
+grounding. There is intentionally no supervised object-action margin loss:
+object presence alone must not force an action class.
 
 ## Synthetic Actor Slots
 
@@ -158,13 +145,13 @@ drop. Use all of these:
 - `val_object_selection_none_acc`
 - `val_object_selection_object_acc`
 - `val_object_selection_true_prob`
-- `val_object_action_confuser_margin`
-- `val_object_action_confuser_acc`
+- `val_object_counterfactual_selected_logit_drop`
 - live/saved probe sweeps for laptop/book/phone cases
 
-`val_object_counterfactual_selected_logit_drop` remains useful, but it is only
-supporting evidence. The epoch 55 failure showed that object removal can look
-reasonable while the laptop/book boundary is still wrong.
+`val_object_counterfactual_selected_logit_drop` is validation-only supporting
+evidence. It must not be used as a trainable loss or as the only checkpoint
+target. The epoch 55 failure showed that object removal can look reasonable
+while the laptop/book boundary is still wrong.
 
 ## Summary Command
 
