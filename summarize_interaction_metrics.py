@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from datasets.object_vocab import OBJECT_CLASSES
+
 
 CORE_COLUMNS = [
     "epoch",
@@ -107,17 +109,7 @@ KEY_ACTIONS = [
     "Cook_Cleandishes",
 ]
 
-OBJECTS = [
-    "laptop",
-    "book",
-    "phone",
-    "cup",
-    "bottle",
-    "utensil",
-    "bowl",
-    "sink",
-    "cooking_appliance",
-]
+OBJECTS = [OBJECT_CLASSES[index] for index in sorted(OBJECT_CLASSES)]
 
 
 def fmt(value, digits=4):
