@@ -254,13 +254,9 @@ class POGUISE(pl.LightningModule):
             self.hparams.get("actor_interaction_heatmaps", 0)
         )
         self.scene_object_tokens = bool(self.hparams.get("scene_object_tokens", 0))
-        self.actor_object_action_fusion = bool(
-            self.hparams.get("actor_object_action_fusion", 0)
-        ) and self.scene_object_tokens
+        self.actor_object_action_fusion = self.scene_object_tokens
         if self.scene_object_tokens and not self.actor_prompt:
             raise ValueError("scene_object_tokens requires actor_prompt")
-        if self.actor_object_action_fusion and not self.scene_object_tokens:
-            raise ValueError("actor_object_action_fusion requires scene_object_tokens")
         if self.actor_interaction_heatmaps and not self.actor_prompt:
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
         if "interaction_object_classes" in self.hparams:
@@ -390,14 +386,8 @@ class POGUISE(pl.LightningModule):
                 else None
             )
             self.object_action_fusion = (
-                ActorObjectActionFusion(
-                    self.net.num_features,
-                    hidden_dim=self.hparams.get(
-                        "actor_object_action_fusion_hidden_dim",
-                        512,
-                    ),
-                )
-                if self.actor_object_action_fusion
+                ActorObjectActionFusion(self.net.num_features)
+                if self.scene_object_tokens
                 else None
             )
         if self.hparams.get("linear_probe", 0):
@@ -592,7 +582,7 @@ class POGUISE(pl.LightningModule):
             if getattr(self, "object_action_fusion", None) is not None:
                 if object_selection_logits is None:
                     raise RuntimeError(
-                        "actor_object_action_fusion requires object_selection_logits"
+                        "scene_object_tokens requires object_selection_logits"
                     )
                 action_tokens = self.object_action_fusion(
                     x_actor,
@@ -677,12 +667,6 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--scene_object_tokens", type=int, default=0)
         parser.add_argument("--num_scene_object_tokens", type=int, default=32)
         parser.add_argument("--num_object_classes", type=int, default=19)
-        parser.add_argument("--actor_object_action_fusion", type=int, default=1)
-        parser.add_argument(
-            "--actor_object_action_fusion_hidden_dim",
-            type=int,
-            default=512,
-        )
         parser.add_argument("--interaction_unfreeze_last_blocks", type=int, default=0)
         parser.add_argument("--ret_feat", type=int, default=0)
         parser.add_argument("--linear_probe", type=int, default=0)

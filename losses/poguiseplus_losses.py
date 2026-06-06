@@ -68,34 +68,3 @@ def log_heatmap_frobenius_loss(
         mask=mask,
     )
     return torch.log(loss + float(eps))
-
-
-def target_weighted_heatmap_frobenius_loss(
-    pred_heatmap,
-    target_heatmap,
-    valid=None,
-    mask=None,
-    target_weight=1.0,
-    background_weight=1.0,
-):
-    if pred_heatmap.shape != target_heatmap.shape:
-        raise RuntimeError(
-            "heatmap target/prediction shape mismatch: "
-            f"{tuple(target_heatmap.shape)} vs {tuple(pred_heatmap.shape)}"
-        )
-
-    target = target_heatmap.to(device=pred_heatmap.device, dtype=torch.float32)
-    weight = float(background_weight) + float(target_weight) * target.clamp_min(0.0)
-    sq_error = (pred_heatmap.float() - target).pow(2) * weight
-    sq_error, active = _active_heatmap_items(
-        sq_error,
-        pred_heatmap,
-        valid=valid,
-        mask=mask,
-    )
-
-    if not active.any():
-        return pred_heatmap.sum() * 0.0
-
-    per_sample = sq_error.flatten(1).sum(dim=1)
-    return per_sample[active].mean()

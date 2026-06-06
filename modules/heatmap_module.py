@@ -11,7 +11,6 @@ from losses.heatmap_loss import KeypointMSELoss
 from losses.interaction_heatmap_losses import interaction_heatmap_loss
 from losses.poguiseplus_losses import (
     heatmap_frobenius_loss,
-    target_weighted_heatmap_frobenius_loss,
 )
 import pickle
 from datasets.object_vocab import (
@@ -30,6 +29,9 @@ try:
     from deepspeed.ops.adam import DeepSpeedCPUAdam
 except ImportError:
     DeepSpeedCPUAdam = None
+
+
+OBJECT_SELECTION_LOSS_WEIGHT = 0.5
 
 
 class HeatmapModule(pl.LightningModule):
@@ -63,20 +65,8 @@ class HeatmapModule(pl.LightningModule):
         self.poguiseplus_interaction_heatmap_weight = float(
             hparams.get("poguiseplus_interaction_heatmap_weight", 1.0)
         )
-        self.poguiseplus_interaction_target_weight = float(
-            hparams.get("poguiseplus_interaction_target_weight", 0.0)
-        )
-        self.poguiseplus_interaction_background_weight = float(
-            hparams.get("poguiseplus_interaction_background_weight", 1.0)
-        )
         self.poguiseplus_heatmap_log_eps = float(
             hparams.get("poguiseplus_heatmap_log_eps", 1e-6)
-        )
-        self.object_selection_loss_weight = float(
-            hparams.get("object_selection_loss_weight", 0.5)
-        )
-        self.object_counterfactual_eval = bool(
-            hparams.get("object_counterfactual_eval", 1)
         )
         self.num_classes = hparams.num_classes
         self.dataset_name = hparams.dataset_artifact
@@ -880,8 +870,6 @@ class HeatmapModule(pl.LightningModule):
             return None
         if stage == "train":
             return None
-        if stage != "train" and not self.object_counterfactual_eval:
-            return None
         if (
             "interaction_object_index" not in target
             or "interaction_object_index_valid" not in target
@@ -1185,10 +1173,10 @@ class HeatmapModule(pl.LightningModule):
         )
         if (
             loss_object_selection is not None
-            and self.object_selection_loss_weight > 0
+            and OBJECT_SELECTION_LOSS_WEIGHT > 0
         ):
             object_aux_terms.append(
-                loss_object_selection * self.object_selection_loss_weight
+                loss_object_selection * OBJECT_SELECTION_LOSS_WEIGHT
             )
 
         self._log_object_counterfactual_eval(
@@ -1304,23 +1292,7 @@ class HeatmapModule(pl.LightningModule):
                     target_heatmap,
                     valid=heatmap_valid,
                 )
-                if (
-                    self.poguiseplus_interaction_target_weight > 0
-                    or self.poguiseplus_interaction_background_weight != 1.0
-                ):
-                    loss_interaction_frobenius = (
-                        target_weighted_heatmap_frobenius_loss(
-                            interaction_heatmap,
-                            target_heatmap,
-                            valid=heatmap_valid,
-                            target_weight=self.poguiseplus_interaction_target_weight,
-                            background_weight=(
-                                self.poguiseplus_interaction_background_weight
-                            ),
-                        )
-                    )
-                else:
-                    loss_interaction_frobenius = loss_interaction_raw_frobenius
+                loss_interaction_frobenius = loss_interaction_raw_frobenius
                 self.log(
                     f"{stage}_loss_interaction_heatmap",
                     loss_interaction_heatmap,

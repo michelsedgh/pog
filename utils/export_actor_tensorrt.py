@@ -336,7 +336,7 @@ def checkpoint_payload(checkpoint_path):
         "num_scene_object_tokens": int(hparams.get("num_scene_object_tokens", 0)),
         "num_object_classes": int(hparams.get("num_object_classes", 19)),
         "actor_object_action_fusion": int(
-            hparams.get("actor_object_action_fusion", 0)
+            bool(hparams.get("scene_object_tokens", 0))
         ),
         "n_frames": int(hparams.get("n_frames", 16)),
         "num_actor_tokens": int(hparams.get("num_actor_tokens", 0)),

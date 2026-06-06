@@ -36,7 +36,7 @@ The intended model path is:
 video tokens + actor tokens + heatmap tokens + object tokens
 -> transformer
 -> object selection head per actor
--> actor token fused with selected-object context
+-> actor token fused with selected-object context when scene object tokens are enabled
 -> existing actor action head
 ```
 
@@ -50,15 +50,18 @@ teacher target say that actor is interacting with the laptop.
 - One generic interacted-object heatmap per actor slot.
 - RF-DETR scene object tokens.
 - Object selection head.
-- Actor/object fusion before the existing actor action head.
+- Actor/object fusion before the existing actor action head. This is not a
+  separate training option: `scene_object_tokens=1` implies fusion.
 - PO-GUISE+ style `action CE + log(heatmap MSE)`.
-- Optional selected-object removal as an evaluation/supporting signal.
+- Selected-object removal as a validation-only supporting signal.
 
 ## Removed
 
 - Selected-object token dropout.
 - Selected-object class dropout.
 - Learnable scalar object-fusion gate.
+- Configurable object-action fusion on/off and hidden-size knobs.
+- Target/background weighted interacted-object heatmap loss.
 - Training/checkpoint logic that treats raw selected-object logit drop as the
   main proof of object-action learning.
 
@@ -105,7 +108,7 @@ The intended training objective is:
 
 ```text
 action CE
-+ balanced object/NONE selection CE
++ balanced object/NONE selection CE at fixed weight 0.5
 + log(pose/object heatmap MSE)
 ```
 
@@ -114,7 +117,9 @@ task, while pose/object heatmap localization is treated as the heatmap task.
 Action CE owns the action boundary. Object selection binds the actor token to a
 usable object-token context, and the interacted-object heatmap teaches visual
 grounding. There is intentionally no supervised object-action margin loss:
-object presence alone must not force an action class.
+object presence alone must not force an action class. There is also no
+target/background weighted heatmap variant; interacted-object heatmaps use the
+same PO-GUISE+ style Frobenius/log-MSE objective as pose heatmaps.
 
 ## Synthetic Actor Slots
 

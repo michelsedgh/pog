@@ -548,9 +548,7 @@ class TorchActorBackend:
         self.input_size = MODEL_INPUT_SIZE
         self.backend_name = "pytorch"
         self.scene_object_tokens = bool(self.hparams.get("scene_object_tokens", 0))
-        self.actor_object_action_fusion = bool(
-            self.hparams.get("actor_object_action_fusion", 0)
-        )
+        self.actor_object_action_fusion = self.scene_object_tokens
         self.num_scene_object_tokens = (
             int(self.hparams.get("num_scene_object_tokens", 0))
             if self.scene_object_tokens
@@ -565,11 +563,6 @@ class TorchActorBackend:
             raise RuntimeError(
                 "This dashboard is fixed to the object-fused checkpoints and requires "
                 "scene_object_tokens=1."
-            )
-        if not self.actor_object_action_fusion:
-            raise RuntimeError(
-                "This dashboard is fixed to the object-fused checkpoints and requires "
-                "actor_object_action_fusion=1."
             )
         if self.num_scene_object_tokens <= 0:
             raise RuntimeError("Checkpoint scene object token count must be positive.")

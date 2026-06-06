@@ -436,17 +436,7 @@ def build_parser():
     parser.add_argument(
         "--poguiseplus_interaction_heatmap_weight", type=float, default=1.0
     )
-    parser.add_argument(
-        "--poguiseplus_interaction_target_weight",
-        type=float,
-        default=0.0,
-    )
-    parser.add_argument(
-        "--poguiseplus_interaction_background_weight", type=float, default=1.0
-    )
     parser.add_argument("--poguiseplus_heatmap_log_eps", type=float, default=1e-6)
-    parser.add_argument("--object_selection_loss_weight", type=float, default=0.5)
-    parser.add_argument("--object_counterfactual_eval", type=int, default=1)
     parser.add_argument("--deepspeed_optim", type=int, default=0)
     parser.add_argument("--kp_only", type=int, default=0)
 
