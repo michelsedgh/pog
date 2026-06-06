@@ -48,12 +48,51 @@ CORE_COLUMNS = [
 
 GROUPS = [
     "laptop_book_tv",
+    "phone_tablet",
     "phone_tv",
     "drink_cup_bottle_glass",
     "drink",
+    "eat_pills",
+    "cook_eat_kitchen",
+    "object_mapped",
+    "objectless",
 ]
 
 ACTIONS = [
+    "Cook_Cleandishes",
+    "Cook_Cleanup",
+    "Cook_Cut",
+    "Cook_Stir",
+    "Cook_Usestove",
+    "Cutbread",
+    "Drink_Frombottle",
+    "Drink_Fromcan",
+    "Drink_Fromcup",
+    "Drink_Fromglass",
+    "Eat_Attable",
+    "Eat_Snack",
+    "Enter",
+    "Getup",
+    "Laydown",
+    "Leave",
+    "Makecoffee_Pourgrains",
+    "Makecoffee_Pourwater",
+    "Maketea_Boilwater",
+    "Maketea_Insertteabag",
+    "Pour_Frombottle",
+    "Pour_Fromcan",
+    "Pour_Fromkettle",
+    "Readbook",
+    "Sitdown",
+    "Takepills",
+    "Uselaptop",
+    "Usetablet",
+    "Usetelephone",
+    "Walk",
+    "WatchTV",
+]
+
+KEY_ACTIONS = [
     "Uselaptop",
     "Readbook",
     "WatchTV",
@@ -66,7 +105,6 @@ ACTIONS = [
     "Cook_Cut",
     "Cook_Stir",
     "Cook_Cleandishes",
-    "Cook_Usestove",
 ]
 
 OBJECTS = [
@@ -170,6 +208,14 @@ def print_table(title, rows, columns=None):
     if columns is not None:
         columns = [col for col in columns if col in table.columns]
         table = table[columns]
+    empty_cols = [
+        col
+        for col in table.columns
+        if col not in {"action", "group", "object", "metric"}
+        and table[col].isna().all()
+    ]
+    if empty_cols:
+        table = table.drop(columns=empty_cols)
     with pd.option_context(
         "display.max_columns",
         None,
@@ -181,64 +227,46 @@ def print_table(title, rows, columns=None):
         print(table.to_string(index=False))
 
 
-def print_compact_object_use_summary(epoch_df):
+def print_compact_epoch_summary(epoch_df):
     cols = [
         "epoch",
         "val_acc_macro",
         "val_f1",
         "val_actor_all_slot_acc",
         "val_actor_pair_acc",
-        "val_actor_pair_swap_acc",
-        "val_actor_pair_same_acc",
-        "val_actor_pair_diff_acc",
-        "val_actor_presence_acc",
+        "val_group_object_mapped_acc",
+        "val_group_objectless_acc",
+        "val_group_laptop_book_tv_acc",
+        "val_group_phone_tv_acc",
+        "val_group_drink_cup_bottle_glass_acc",
+        "val_group_drink_acc",
         "val_object_selection_acc",
-        "val_object_selection_none_acc",
         "val_object_selection_object_acc",
         "val_object_selection_true_prob",
-        "val_object_selection_none_teacher_count",
-        "val_object_selection_object_teacher_count",
         "val_object_counterfactual_selected_logit_drop",
-        "val_object_counterfactual_selected_prob_drop",
-        "val_action_Uselaptop_acc",
-        "val_action_Readbook_acc",
-        "val_action_Usetelephone_acc",
-        "val_action_Drink_Fromcup_acc",
-        "val_action_Drink_Frombottle_acc",
-        "val_interaction_heatmap_laptop_positive_mean",
-        "val_interaction_heatmap_laptop_iou",
-        "val_interaction_heatmap_book_positive_mean",
-        "val_interaction_heatmap_phone_positive_mean",
-        "val_interaction_heatmap_cup_positive_mean",
-        "val_interaction_heatmap_bottle_positive_mean",
+        "val_interaction_heatmap_positive_mean",
+        "val_interaction_heatmap_pred_max",
+        "val_interaction_heatmap_soft_iou",
+        "val_interaction_heatmap_center_l2",
     ]
     display_cols = [col for col in cols if col in epoch_df.columns]
     if len(display_cols) > 1:
-        print("\nOBJECT-ACTION USE SUMMARY:\n")
+        print("\nEPOCH SNAPSHOT:\n")
         with pd.option_context("display.max_columns", None, "display.width", 220):
             print(epoch_df[display_cols].to_string(index=False))
 
 
-def print_compact_target_actions(epoch_df):
+def print_key_action_progress(epoch_df):
     rows = action_progress_rows(epoch_df)
     if not rows:
         return
-    keep = {
-        "Uselaptop",
-        "Readbook",
-        "Usetelephone",
-        "Drink_Fromcup",
-        "Drink_Frombottle",
-        "Pour_Frombottle",
-        "Cutbread",
-        "Cook_Cut",
-    }
-    rows = [row for row in rows if row["action"] in keep]
+    rows = [row for row in rows if row["action"] in KEY_ACTIONS]
     print_table(
-        "KEY TARGET ACTIONS",
+        "KEY ACTION PROGRESS",
         rows,
         [
             "action",
+            "count",
             "teacher",
             "e0_acc",
             "latest_acc",
@@ -253,16 +281,18 @@ def print_compact_target_actions(epoch_df):
 def print_compact_best(epoch_df):
     metrics = [
         "val_f1",
+        "val_acc_macro",
+        "val_group_object_mapped_acc",
+        "val_group_objectless_acc",
+        "val_group_laptop_book_tv_acc",
+        "val_group_phone_tv_acc",
         "val_object_selection_acc",
-        "val_object_selection_none_acc",
         "val_object_selection_object_acc",
         "val_object_selection_true_prob",
-        "val_object_selection_none_teacher_count",
-        "val_object_selection_object_teacher_count",
         "val_object_counterfactual_selected_logit_drop",
-        "val_object_counterfactual_selected_prob_drop",
         "val_action_Uselaptop_acc",
         "val_action_Readbook_acc",
+        "val_action_WatchTV_acc",
         "val_action_Usetelephone_acc",
     ]
     rows = []
@@ -396,6 +426,7 @@ def action_progress_rows(epoch_df):
     rows = []
     for action in ACTIONS:
         acc_col = f"val_action_{action}_acc"
+        count_col = f"val_action_{action}_count"
         teacher_col = f"val_action_{action}_interaction_teacher_rate"
         if not df_has_metric(epoch_df, acc_col):
             continue
@@ -411,6 +442,7 @@ def action_progress_rows(epoch_df):
         rows.append(
             {
                 "action": action,
+                "count": metric(latest, count_col),
                 "teacher": metric(latest, teacher_col),
                 "e0_acc": metric(base, acc_col),
                 "latest_acc": metric(latest, acc_col),
@@ -426,10 +458,11 @@ def action_progress_rows(epoch_df):
 def print_action_progress(epoch_df):
     rows = action_progress_rows(epoch_df)
     print_table(
-        "TARGET ACTION PROGRESS",
+        "ALL ACTION PROGRESS",
         rows,
         [
             "action",
+            "count",
             "teacher",
             "e0_acc",
             "latest_acc",
@@ -445,16 +478,19 @@ def print_action_progress(epoch_df):
         for row in rows
         if pd.notna(row["delta"]) and float(row["delta"]) < -0.005
     ]
+    hurt = sorted(hurt, key=lambda row: float(row["delta"]))
     improved = [
         row
         for row in rows
         if pd.notna(row["delta"]) and float(row["delta"]) >= 0.02
     ]
+    improved = sorted(improved, key=lambda row: float(row["delta"]), reverse=True)
     print_table(
         "ACTIONS HURT VS EPOCH 0",
         hurt,
         [
             "action",
+            "count",
             "teacher",
             "e0_acc",
             "latest_acc",
@@ -469,6 +505,7 @@ def print_action_progress(epoch_df):
         improved,
         [
             "action",
+            "count",
             "teacher",
             "e0_acc",
             "latest_acc",
@@ -488,6 +525,7 @@ def print_group_progress(epoch_df):
     rows = []
     for group in GROUPS:
         col = f"val_group_{group}_acc"
+        count_col = f"val_group_{group}_count"
         if not df_has_metric(epoch_df, col):
             continue
         series = df_metric(epoch_df, col, float("nan"))
@@ -501,6 +539,7 @@ def print_group_progress(epoch_df):
         rows.append(
             {
                 "group": group,
+                "count": metric(latest, count_col),
                 "e0_acc": metric(base, col),
                 "latest_acc": metric(latest, col),
                 "delta": metric(latest, col) - metric(base, col),
@@ -511,7 +550,7 @@ def print_group_progress(epoch_df):
     print_table(
         "GROUP PROGRESS",
         rows,
-        ["group", "e0_acc", "latest_acc", "delta", "best_epoch", "best_acc"],
+        ["group", "count", "e0_acc", "latest_acc", "delta", "best_epoch", "best_acc"],
     )
 
 
@@ -571,6 +610,8 @@ def print_decision(epoch_df):
     actor_pair = metric(latest, "val_actor_pair_acc")
     actor_pair_swap = metric(latest, "val_actor_pair_swap_acc")
     actor_presence = metric(latest, "val_actor_presence_acc")
+    object_mapped_acc = metric(latest, "val_group_object_mapped_acc")
+    objectless_acc = metric(latest, "val_group_objectless_acc")
     cf_logit = metric(latest, "val_object_counterfactual_selected_logit_drop")
     cf_prob = metric(latest, "val_object_counterfactual_selected_prob_drop")
 
@@ -590,6 +631,12 @@ def print_decision(epoch_df):
             f"acc {fmt(selection_acc)}, true_prob {fmt(selection_prob)}, "
             f"none_teachers {fmt(selection_none_count, 0)}, "
             f"object_teachers {fmt(selection_object_count, 0)}"
+        )
+    if pd.notna(object_mapped_acc) or pd.notna(objectless_acc):
+        print(
+            "action groups: "
+            f"object_mapped {fmt(object_mapped_acc)}, "
+            f"objectless {fmt(objectless_acc)}"
         )
     if (
         pd.notna(actor_all_slot)
@@ -690,22 +737,35 @@ def print_row(title, row):
         f"heatmap {metric(row, 'train_nash_weight_heatmap'):.4f}"
     )
 
-    print("\nTARGET GROUPS:")
+    print("\nACTION GROUPS:")
     for group in GROUPS:
         col = f"val_group_{group}_acc"
         if col in row.index and pd.notna(row[col]):
-            print(f"{group}: {float(row[col]):.4f}")
+            count = metric(row, f"val_group_{group}_count")
+            if pd.notna(count):
+                print(f"{group}: acc {float(row[col]):.4f}, count {count:.0f}")
+            else:
+                print(f"{group}: acc {float(row[col]):.4f}")
 
-    print("\nTARGET ACTIONS:")
+    action_lines = []
     for action in ACTIONS:
         col = f"val_action_{action}_acc"
         if col in row.index and pd.notna(row[col]):
             teacher_col = f"val_action_{action}_interaction_teacher_rate"
             teacher = metric(row, teacher_col)
+            count = metric(row, f"val_action_{action}_count")
+            count_text = "" if pd.isna(count) else f", count {count:.0f}"
             if pd.notna(teacher):
-                print(f"{action}: acc {float(row[col]):.4f}, teacher {teacher:.4f}")
+                action_lines.append(
+                    f"{action}: acc {float(row[col]):.4f}, "
+                    f"teacher {teacher:.4f}{count_text}"
+                )
             else:
-                print(f"{action}: acc {float(row[col]):.4f}")
+                action_lines.append(f"{action}: acc {float(row[col]):.4f}{count_text}")
+    if action_lines:
+        print("\nALL ACTIONS:")
+        for line in action_lines:
+            print(line)
 
     object_rows = []
     for object_name in OBJECTS:
@@ -768,8 +828,9 @@ def main():
         print_best_epochs(epoch_df)
         print_row("LATEST", latest)
     else:
-        print_compact_object_use_summary(epoch_df)
-        print_compact_target_actions(epoch_df)
+        print_compact_epoch_summary(epoch_df)
+        print_key_action_progress(epoch_df)
+        print_group_progress(epoch_df)
         print_compact_best(epoch_df)
 
     print_decision(epoch_df)

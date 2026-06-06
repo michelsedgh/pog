@@ -145,6 +145,8 @@ drop. Use all of these:
 
 - `val_f1`
 - `val_acc_macro`
+- `val_group_object_mapped_acc`
+- `val_group_objectless_acc`
 - target action accuracy for `Uselaptop`, `Readbook`, `Usetelephone`, and drink classes
 - `val_object_selection_acc`
 - `val_object_selection_none_acc`
@@ -157,6 +159,11 @@ drop. Use all of these:
 evidence. It must not be used as a trainable loss or as the only checkpoint
 target. The epoch 55 failure showed that object removal can look reasonable
 while the laptop/book boundary is still wrong.
+
+Validation logs every Toyota action as `val_action_<action>_acc` and
+`val_action_<action>_count`. The summary compact view shows key actions and
+groups; `--verbose` prints all logged per-class diagnostics. `val_f1` remains
+macro F1 over all Toyota classes, not only the object-confusable subset.
 
 ## Summary Command
 

@@ -17,6 +17,7 @@ from datasets.object_vocab import (
     GROUPS,
     NUM_OBJECT_CLASSES,
     OBJECT_CLASSES,
+    STRONG_ACTION_OBJECTS,
 )
 from datasets.toyotasm import CS_DICT, CV_DICT
 
@@ -341,31 +342,34 @@ class HeatmapModule(pl.LightningModule):
             ]
             if indices:
                 groups[group_name] = torch.tensor(indices, dtype=torch.long)
+        object_action_indices = [
+            int(label_dict[action_name]) - 1
+            for action_name in STRONG_ACTION_OBJECTS
+            if action_name in label_dict
+        ]
+        if object_action_indices:
+            groups["object_mapped"] = torch.tensor(
+                object_action_indices,
+                dtype=torch.long,
+            )
+        objectless_indices = [
+            int(action_id) - 1
+            for action_name, action_id in label_dict.items()
+            if action_name not in STRONG_ACTION_OBJECTS
+        ]
+        if objectless_indices:
+            groups["objectless"] = torch.tensor(objectless_indices, dtype=torch.long)
         return groups
 
     def _interaction_audit_action_indices(self):
         label_dict = self._toyota_label_dict()
-        action_names = (
-            "Uselaptop",
-            "Readbook",
-            "WatchTV",
-            "Usetelephone",
-            "Drink.Frombottle",
-            "Drink.Fromcup",
-            "Drink.Fromglass",
-            "Pour.Frombottle",
-            "Cutbread",
-            "Cook.Cut",
-            "Cook.Stir",
-            "Cook.Cleandishes",
-            "Cook.Usestove",
-        )
         indices = []
-        for action_name in action_names:
-            if action_name not in label_dict:
-                continue
+        for action_name, action_id in sorted(
+            label_dict.items(),
+            key=lambda item: item[1],
+        ):
             metric_name = action_name.replace(".", "_")
-            indices.append((metric_name, int(label_dict[action_name]) - 1))
+            indices.append((metric_name, int(action_id) - 1))
         return indices
 
     def _pose_heatmap_pred(self, hm_preds):
@@ -566,6 +570,17 @@ class HeatmapModule(pl.LightningModule):
                 (pred_labels[mask] == labels[mask]).float().mean(),
                 mask.sum().item(),
             )
+            self.log(
+                metric_name.replace("_acc", "_count"),
+                mask.float().sum(),
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+                reduce_fx="sum",
+                batch_size=1,
+            )
 
     def _log_action_metrics(self, prefix, preds, labels):
         pred_labels = preds.argmax(dim=-1)
@@ -577,6 +592,17 @@ class HeatmapModule(pl.LightningModule):
                 prefix.format(action=metric_name),
                 (pred_labels[mask] == labels[mask]).float().mean(),
                 mask.sum().item(),
+            )
+            self.log(
+                prefix.format(action=metric_name).replace("_acc", "_count"),
+                mask.float().sum(),
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+                reduce_fx="sum",
+                batch_size=1,
             )
 
     def _log_interaction_teacher_metrics(
