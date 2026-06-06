@@ -1082,10 +1082,25 @@ class LiveRunner:
                             f"smooth={ACTION_SMOOTHING_WINDOW} "
                             f"frame={self.frame_count}"
                         )
+                        packed_object_payload = [
+                            {
+                                "slot": int(item.get("slot", index)),
+                                "label": item.get("label"),
+                                "object_class_id": int(item.get("object_class_id", -1)),
+                                "conf": float(item.get("conf", 0.0)),
+                                "sample_count": int(item.get("sample_count", 0)),
+                                "box_norm": item.get("box_norm"),
+                            }
+                            for index, item in enumerate(packed_objects)
+                        ]
                     else:
                         message = "detections outside model crop"
+                        packed_object_payload = []
                 elif len(self.last_boxes_xyxy) == 0:
                     message = "no RF-DETR person detections"
+                    packed_object_payload = []
+                else:
+                    packed_object_payload = []
 
                 overlay = draw_overlay(frame_bgr, actors, objects, message)
                 ok, encoded = cv2.imencode(
@@ -1101,6 +1116,7 @@ class LiveRunner:
                         frame=self.frame_count,
                         actors=actors,
                         objects=objects,
+                        packed_objects=packed_object_payload,
                         last_detector_ms=self.last_detector_ms,
                         last_actor_ms=self.last_actor_ms,
                         det_age_frames=det_age,

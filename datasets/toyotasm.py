@@ -1508,7 +1508,12 @@ class ToyotaSMDataset(Dataset):
             src_index = int(target["interaction_object_index"][slot])
             if not bool(target["interaction_object_index_valid"][slot]):
                 continue
-            remapped = selection_remap.get((target_idx, src_index), 0)
+            if src_index == 0:
+                remapped = 0
+            else:
+                remapped = selection_remap.get((target_idx, src_index))
+                if remapped is None:
+                    continue
             interaction_object_index[slot] = int(remapped)
             interaction_object_index_valid[slot] = True
 
@@ -1926,8 +1931,6 @@ class ToyotaSMDataset(Dataset):
                 if int(track["cls_id"]) in positive_id_set
             ]
             if not positive_tracks:
-                interaction_object_index[slot] = 0
-                interaction_object_index_valid[slot] = True
                 continue
             actor_box = actor_target["boxes"][slot]
             scored_tracks = [
@@ -1948,29 +1951,20 @@ class ToyotaSMDataset(Dataset):
                 if math.isfinite(float(score))
             ]
             if not scored_tracks:
-                interaction_object_index[slot] = 0
-                interaction_object_index_valid[slot] = True
                 continue
             best_score, best_track = max(scored_tracks, key=lambda item: item[0])
             if not best_track["entries"]:
-                interaction_object_index[slot] = 0
-                interaction_object_index_valid[slot] = True
                 continue
             if not self._interaction_track_quality_passes(
                 action_name,
                 best_score,
                 best_track,
             ):
-                interaction_object_index[slot] = 0
-                interaction_object_index_valid[slot] = True
                 continue
             interaction_cls[slot] = int(best_track["cls_id"])
             interaction_valid[slot] = True
             if id(best_track) in track_to_object_slot:
                 interaction_object_index[slot] = int(track_to_object_slot[id(best_track)]) + 1
-                interaction_object_index_valid[slot] = True
-            else:
-                interaction_object_index[slot] = 0
                 interaction_object_index_valid[slot] = True
             interaction_heatmap[slot] = self._interaction_motion_heatmap_from_entries(
                 best_track["entries"],

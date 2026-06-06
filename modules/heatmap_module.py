@@ -819,11 +819,33 @@ class HeatmapModule(pl.LightningModule):
                 (pred[none_mask] == 0).float().mean(),
                 int(none_mask.sum().item()),
             )
+            self.log(
+                f"{stage}_object_selection_none_teacher_count",
+                none_mask.float().sum(),
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+                reduce_fx="sum",
+                batch_size=1,
+            )
         if object_mask.any():
             self._log_scalar(
                 f"{stage}_object_selection_object_acc",
                 (pred[object_mask] == selection_labels[object_mask]).float().mean(),
                 int(object_mask.sum().item()),
+            )
+            self.log(
+                f"{stage}_object_selection_object_teacher_count",
+                object_mask.float().sum(),
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+                reduce_fx="sum",
+                batch_size=1,
             )
         self.log(
             f"{stage}_object_selection_teacher_count",

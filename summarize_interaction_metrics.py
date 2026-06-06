@@ -40,6 +40,8 @@ CORE_COLUMNS = [
     "val_object_selection_object_acc",
     "val_object_selection_true_prob",
     "val_object_selection_teacher_count",
+    "val_object_selection_none_teacher_count",
+    "val_object_selection_object_teacher_count",
     "val_object_action_confuser_loss",
     "val_object_action_confuser_margin",
     "val_object_action_confuser_acc",
@@ -225,6 +227,8 @@ def print_compact_object_use_summary(epoch_df):
         "val_object_selection_none_acc",
         "val_object_selection_object_acc",
         "val_object_selection_true_prob",
+        "val_object_selection_none_teacher_count",
+        "val_object_selection_object_teacher_count",
         "val_object_action_confuser_margin",
         "val_object_action_confuser_acc",
         "val_object_counterfactual_selected_logit_drop",
@@ -286,6 +290,8 @@ def print_compact_best(epoch_df):
         "val_object_selection_none_acc",
         "val_object_selection_object_acc",
         "val_object_selection_true_prob",
+        "val_object_selection_none_teacher_count",
+        "val_object_selection_object_teacher_count",
         "val_object_action_confuser_margin",
         "val_object_action_confuser_acc",
         "val_object_counterfactual_selected_logit_drop",
@@ -324,6 +330,8 @@ def print_object_use_epoch_table(epoch_df):
         "val_object_selection_none_acc",
         "val_object_selection_object_acc",
         "val_object_selection_true_prob",
+        "val_object_selection_none_teacher_count",
+        "val_object_selection_object_teacher_count",
         "val_object_action_confuser_margin",
         "val_object_action_confuser_acc",
         "val_object_counterfactual_selected_logit_drop",
@@ -600,6 +608,8 @@ def print_decision(epoch_df):
     laptop_iou = metric(latest, "val_interaction_heatmap_laptop_iou")
     selection_acc = metric(latest, "val_object_selection_acc")
     selection_prob = metric(latest, "val_object_selection_true_prob")
+    selection_none_count = metric(latest, "val_object_selection_none_teacher_count")
+    selection_object_count = metric(latest, "val_object_selection_object_teacher_count")
     actor_all_slot = metric(latest, "val_actor_all_slot_acc")
     actor_pair = metric(latest, "val_actor_pair_acc")
     actor_pair_swap = metric(latest, "val_actor_pair_swap_acc")
@@ -622,7 +632,9 @@ def print_decision(epoch_df):
     if pd.notna(selection_acc) or pd.notna(selection_prob):
         print(
             "object selection: "
-            f"acc {fmt(selection_acc)}, true_prob {fmt(selection_prob)}"
+            f"acc {fmt(selection_acc)}, true_prob {fmt(selection_prob)}, "
+            f"none_teachers {fmt(selection_none_count, 0)}, "
+            f"object_teachers {fmt(selection_object_count, 0)}"
         )
     if (
         pd.notna(actor_all_slot)
@@ -722,7 +734,9 @@ def print_row(title, row):
             f"none_acc {metric(row, 'val_object_selection_none_acc'):.4f}, "
             f"object_acc {metric(row, 'val_object_selection_object_acc'):.4f}, "
             f"true_prob {metric(row, 'val_object_selection_true_prob'):.4f}, "
-            f"teachers {metric(row, 'val_object_selection_teacher_count'):.1f}"
+            f"teachers {metric(row, 'val_object_selection_teacher_count'):.1f}, "
+            f"none_teachers {metric(row, 'val_object_selection_none_teacher_count'):.0f}, "
+            f"object_teachers {metric(row, 'val_object_selection_object_teacher_count'):.0f}"
         )
     if pd.notna(metric(row, "val_object_action_confuser_margin")):
         print(
