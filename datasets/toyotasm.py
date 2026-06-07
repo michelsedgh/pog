@@ -190,6 +190,22 @@ class ToyotaSMDataset(Dataset):
         )
         if self.interaction_min_sampled_object_frames < 0:
             raise ValueError("interaction_min_sampled_object_frames must be >= 0")
+        self.objectless_hard_negative_sampling = bool(
+            kwargs.get("objectless_hard_negative_sampling", 1)
+        )
+        self.objectless_hard_negative_min_sampled_object_frames = int(
+            kwargs.get("objectless_hard_negative_min_sampled_object_frames", 1)
+        )
+        if self.objectless_hard_negative_min_sampled_object_frames < 0:
+            raise ValueError(
+                "objectless_hard_negative_min_sampled_object_frames must be >= 0"
+            )
+        self.objectless_hard_negative_object_ids = {
+            int(OBJECT_TO_ID[object_name])
+            for object_names in STRONG_ACTION_OBJECTS.values()
+            for object_name in object_names
+            if object_name in OBJECT_TO_ID
+        }
         self.interaction_repair_radius_frames = int(
             kwargs.get("interaction_repair_radius_frames", 8)
         )
@@ -473,6 +489,12 @@ class ToyotaSMDataset(Dataset):
         parser.add_argument("--interaction_heatmap_sigma", type=float, default=1.5)
         parser.add_argument("--interaction_guided_sampling", type=int, default=1)
         parser.add_argument("--interaction_min_sampled_object_frames", type=int, default=1)
+        parser.add_argument("--objectless_hard_negative_sampling", type=int, default=1)
+        parser.add_argument(
+            "--objectless_hard_negative_min_sampled_object_frames",
+            type=int,
+            default=1,
+        )
         parser.add_argument("--interaction_repair_radius_frames", type=int, default=8)
         parser.add_argument("--interaction_quality_min_actor_score", type=float, default=1.0)
         parser.add_argument("--interaction_quality_min_track_frames", type=int, default=1)
@@ -811,6 +833,87 @@ class ToyotaSMDataset(Dataset):
         self._expected_object_frame_cache[key] = output
         return output
 
+    def _hard_negative_object_frames(self, file_id):
+        key = (str(file_id), "__objectless_hard_negative__")
+        cached = self._expected_object_frame_cache.get(key)
+        if cached is not None:
+            return cached
+
+        frames = []
+        for frame_idx, objects in self._object_cache.get(file_id, {}).items():
+            if any(
+                int(obj["cls_id"]) in self.objectless_hard_negative_object_ids
+                for obj in objects
+            ):
+                frames.append(int(frame_idx))
+        output = np.asarray(sorted(set(frames)), dtype=int)
+        self._expected_object_frame_cache[key] = output
+        return output
+
+    def _ensure_objectless_hard_negative_frame_indices(
+        self,
+        frames_idx,
+        file_id,
+        action_name,
+    ):
+        if not (
+            self.objectless_hard_negative_sampling
+            and self.scene_object_tokens
+            and action_name in OBJECTLESS_ACTIONS
+            and self.objectless_hard_negative_min_sampled_object_frames > 0
+        ):
+            return frames_idx
+        object_frames = self._hard_negative_object_frames(file_id)
+        if object_frames.size == 0:
+            return frames_idx
+
+        frames_idx = np.asarray(frames_idx, dtype=int).copy()
+        frame_min = int(frames_idx.min())
+        frame_max = int(frames_idx.max())
+        object_frames = object_frames[
+            (object_frames >= frame_min) & (object_frames <= frame_max)
+        ]
+        if object_frames.size == 0:
+            return frames_idx
+
+        sampled = set(int(frame_idx) for frame_idx in frames_idx.tolist())
+        sampled_object = [
+            frame for frame in object_frames.tolist() if int(frame) in sampled
+        ]
+        target_count = min(
+            int(self.objectless_hard_negative_min_sampled_object_frames),
+            int(object_frames.size),
+        )
+        if len(sampled_object) >= target_count:
+            return frames_idx
+
+        missing = np.asarray(
+            [frame for frame in object_frames.tolist() if int(frame) not in sampled],
+            dtype=int,
+        )
+        if missing.size == 0:
+            return frames_idx
+
+        needed = target_count - len(sampled_object)
+        if self.set_type == "train":
+            replace_frames = np.random.choice(
+                missing,
+                size=min(needed, missing.size),
+                replace=False,
+            )
+        else:
+            center = float((frames_idx[0] + frames_idx[-1]) * 0.5)
+            order = np.argsort(np.abs(missing - center))
+            replace_frames = missing[order[:needed]]
+
+        used_slots = set()
+        for object_frame in replace_frames:
+            slot_order = np.argsort(np.abs(frames_idx - int(object_frame)))
+            slot = next(int(i) for i in slot_order if int(i) not in used_slots)
+            used_slots.add(slot)
+            frames_idx[slot] = int(object_frame)
+        return np.sort(frames_idx)
+
     def _ensure_interaction_frame_indices(self, frames_idx, file_id, action_name):
         if self.interaction_min_sampled_object_frames <= 0:
             return frames_idx
@@ -991,6 +1094,11 @@ class ToyotaSMDataset(Dataset):
                     file_id,
                     action_name,
                 )
+            frames_idx = self._ensure_objectless_hard_negative_frame_indices(
+                frames_idx,
+                file_id,
+                action_name,
+            )
             if len(frames_idx) < self.n_frames:
                 frames_idx = np.pad(
                     frames_idx, (0, self.n_frames - len(frames_idx)), "edge"

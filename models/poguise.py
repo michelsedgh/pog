@@ -9,7 +9,7 @@ import os
 import os.path
 import pickle
 
-from datasets.object_vocab import STRONG_ACTION_OBJECTS
+from datasets.object_vocab import OBJECT_TO_ID, STRONG_ACTION_OBJECTS
 
 
 TOYOTA_CS_ACTION_TO_INDEX = {
@@ -62,6 +62,30 @@ def _toyota_object_residual_action_indices(num_classes):
     if not indices:
         raise ValueError("No Toyota object-action indices available for residual head")
     return sorted(set(indices))
+
+
+def _toyota_object_residual_action_indices_by_object(num_classes):
+    if int(num_classes) != len(TOYOTA_CS_ACTION_TO_INDEX):
+        raise ValueError(
+            "Toyota object-logit residuals require the 31-class Toyota action "
+            f"space, got num_classes={num_classes}."
+        )
+    indices_by_object = {}
+    for action_name, object_names in STRONG_ACTION_OBJECTS.items():
+        if action_name not in TOYOTA_CS_ACTION_TO_INDEX:
+            raise ValueError(f"Missing Toyota action index for {action_name}")
+        action_index = int(TOYOTA_CS_ACTION_TO_INDEX[action_name])
+        for object_name in object_names:
+            if object_name not in OBJECT_TO_ID:
+                raise ValueError(f"Missing Toyota object index for {object_name}")
+            object_id = int(OBJECT_TO_ID[object_name])
+            indices_by_object.setdefault(object_id, set()).add(action_index)
+    if not indices_by_object:
+        raise ValueError("No Toyota object/action compatibility entries available")
+    return {
+        object_id: sorted(action_indices)
+        for object_id, action_indices in indices_by_object.items()
+    }
 
 
 def load_state_dict(
@@ -222,9 +246,18 @@ class ActorObjectSelectionHead(nn.Module):
 
 
 class ActorObjectActionResidual(nn.Module):
-    def __init__(self, dim, num_classes, allowed_action_indices, hidden_dim=512):
+    def __init__(
+        self,
+        dim,
+        num_classes,
+        allowed_action_indices,
+        object_action_indices,
+        num_object_classes,
+        hidden_dim=512,
+    ):
         super().__init__()
         self.num_classes = int(num_classes)
+        self.num_object_classes = int(num_object_classes)
         self.actor_norm = nn.LayerNorm(dim)
         self.object_norm = nn.LayerNorm(dim)
         self.residual = nn.Sequential(
@@ -245,8 +278,31 @@ class ActorObjectActionResidual(nn.Module):
             mask.view(1, 1, self.num_classes),
             persistent=False,
         )
+        object_action_mask = torch.zeros(
+            self.num_object_classes,
+            self.num_classes,
+            dtype=torch.float32,
+        )
+        for object_id, action_indices in object_action_indices.items():
+            if not (0 <= int(object_id) < self.num_object_classes):
+                continue
+            for action_index in action_indices:
+                if 0 <= int(action_index) < self.num_classes:
+                    object_action_mask[int(object_id), int(action_index)] = 1.0
+        self.register_buffer(
+            "object_action_mask",
+            object_action_mask,
+            persistent=False,
+        )
 
-    def forward(self, actor_tokens, object_tokens, object_selection_logits):
+    def forward(
+        self,
+        actor_tokens,
+        object_tokens,
+        object_selection_logits,
+        object_classes,
+        object_valid,
+    ):
         if actor_tokens.ndim != 3 or object_tokens.ndim != 3:
             raise ValueError("actor_tokens and object_tokens must be rank-3 tensors")
         if object_selection_logits.ndim != 3:
@@ -257,11 +313,22 @@ class ActorObjectActionResidual(nn.Module):
                 "object_selection_logits must have shape "
                 f"{expected}, got {tuple(object_selection_logits.shape)}"
             )
+        if object_classes.shape != object_tokens.shape[:2]:
+            raise ValueError(
+                "object_classes must have shape "
+                f"{tuple(object_tokens.shape[:2])}, got {tuple(object_classes.shape)}"
+            )
+        if object_valid.shape != object_tokens.shape[:2]:
+            raise ValueError(
+                "object_valid must have shape "
+                f"{tuple(object_tokens.shape[:2])}, got {tuple(object_valid.shape)}"
+            )
 
         # Index 0 is NONE. Excluding it keeps the object residual small when the
         # selector believes this actor should use no object.
         object_probs = object_selection_logits.softmax(dim=-1)[..., 1:]
-        object_mass = object_probs.sum(dim=-1, keepdim=True)
+        object_valid = object_valid.to(device=object_probs.device, dtype=torch.bool)
+        object_probs = object_probs * object_valid[:, None, :].to(dtype=object_probs.dtype)
         object_context = torch.einsum("bkm,bmd->bkd", object_probs, object_tokens)
         actor_norm = self.actor_norm(actor_tokens)
         object_norm = self.object_norm(object_context)
@@ -279,8 +346,30 @@ class ActorObjectActionResidual(nn.Module):
             device=residual_logits.device,
             dtype=residual_logits.dtype,
         )
-        residual_logits = residual_logits * mask
-        residual_logits = residual_logits * object_mass.to(dtype=residual_logits.dtype)
+        object_classes = object_classes.to(device=residual_logits.device, dtype=torch.long)
+        valid_class = (
+            object_valid
+            & (object_classes >= 0)
+            & (object_classes < self.num_object_classes)
+        )
+        safe_classes = torch.where(
+            valid_class,
+            object_classes,
+            torch.zeros_like(object_classes),
+        )
+        slot_action_mask = self.object_action_mask.to(
+            device=residual_logits.device,
+            dtype=residual_logits.dtype,
+        )[safe_classes]
+        slot_action_mask = slot_action_mask * valid_class[:, :, None].to(
+            dtype=residual_logits.dtype,
+        )
+        compatibility_mask = torch.einsum(
+            "bkm,bmc->bkc",
+            object_probs.to(dtype=residual_logits.dtype),
+            slot_action_mask,
+        )
+        residual_logits = residual_logits * mask * compatibility_mask
         return residual_logits.to(dtype=actor_tokens.dtype)
 
 
@@ -430,11 +519,18 @@ class POGUISE(pl.LightningModule):
             object_residual_action_indices = _toyota_object_residual_action_indices(
                 self.hparams.num_classes
             )
+            object_residual_action_indices_by_object = (
+                _toyota_object_residual_action_indices_by_object(
+                    self.hparams.num_classes
+                )
+            )
             self.object_action_residual = (
                 ActorObjectActionResidual(
                     self.net.num_features,
                     self.hparams.num_classes,
                     object_residual_action_indices,
+                    object_residual_action_indices_by_object,
+                    self.hparams.get("num_object_classes", 19),
                 )
                 if self.scene_object_tokens
                 else None
@@ -630,16 +726,26 @@ class POGUISE(pl.LightningModule):
             if self.hparams.ret_feat:
                 return x_actor
             action_logits = self.actor_head(x_actor)
+            self.last_actor_action_logits = action_logits
+            self.last_object_residual_logits = None
             if getattr(self, "object_action_residual", None) is not None:
                 if object_selection_logits is None:
                     raise RuntimeError(
                         "scene_object_tokens requires object_selection_logits"
                     )
-                action_logits = action_logits + self.object_action_residual(
+                if object_classes is None or object_valid is None:
+                    raise RuntimeError(
+                        "scene_object_tokens requires object classes and valid mask"
+                    )
+                object_residual_logits = self.object_action_residual(
                     x_actor,
                     x_object,
                     object_selection_logits,
+                    object_classes.to(device=x_actor.device, dtype=torch.long),
+                    object_valid.to(device=x_actor.device, dtype=torch.bool),
                 )
+                self.last_object_residual_logits = object_residual_logits
+                action_logits = action_logits + object_residual_logits
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
                 if object_selection_logits is not None:

@@ -17,6 +17,7 @@ from datasets.object_vocab import (
     GROUPS,
     NUM_OBJECT_CLASSES,
     OBJECT_CLASSES,
+    OBJECT_TO_ID,
     OBJECTLESS_ACTIONS,
     STRONG_ACTION_OBJECTS,
 )
@@ -146,6 +147,17 @@ class HeatmapModule(pl.LightningModule):
             hparams.get("actor_val_diagnostic_max_pairs", 8)
         )
         self.group_indices = self._build_group_indices()
+        self.objectless_action_indices = self.group_indices.get(
+            "objectless",
+            torch.empty(0, dtype=torch.long),
+        )
+        self.hard_negative_object_ids = {
+            int(OBJECT_TO_ID[object_name]): object_name
+            for object_names in STRONG_ACTION_OBJECTS.values()
+            for object_name in object_names
+            if object_name in OBJECT_TO_ID
+        }
+
     def load_state_dict(self, state_dict, strict=True, assign=False):
         result = super().load_state_dict(state_dict, strict=strict, assign=assign)
         if self.actor_prompt and not strict:
@@ -1159,6 +1171,12 @@ class HeatmapModule(pl.LightningModule):
             presence_logits,
             object_selection_logits,
         ) = self._unpack_model_data(data)
+        self._log_object_residual_diagnostics(
+            stage,
+            preds,
+            actions,
+            valid,
+        )
 
         valid_preds = preds[valid]
         valid_labels = actions[valid]
@@ -1455,6 +1473,184 @@ class HeatmapModule(pl.LightningModule):
             sync_dist=True,
             batch_size=int(batch_size),
         )
+
+    def _log_count(self, name, value):
+        self.log(
+            name,
+            value,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+            reduce_fx="sum",
+            batch_size=1,
+        )
+
+    def _labels_in_indices(self, labels, indices):
+        if indices is None or int(indices.numel()) == 0:
+            return torch.zeros_like(labels, dtype=torch.bool)
+        indices = indices.to(device=labels.device, dtype=labels.dtype)
+        return (labels.unsqueeze(-1) == indices).any(dim=-1)
+
+    def _log_objectless_hard_negative_metrics(
+        self,
+        stage,
+        full_preds,
+        actions,
+        valid,
+        target,
+    ):
+        if not self.scene_object_tokens or "object_classes" not in target:
+            return
+        if full_preds is None:
+            return
+        object_classes = target["object_classes"].to(
+            device=full_preds.device,
+            dtype=torch.long,
+        )
+        object_valid = target["object_valid"].to(
+            device=full_preds.device,
+            dtype=torch.bool,
+        )
+        valid = valid.to(device=full_preds.device, dtype=torch.bool)
+        actions = actions.to(device=full_preds.device, dtype=torch.long)
+        hard_ids = torch.tensor(
+            sorted(self.hard_negative_object_ids),
+            device=full_preds.device,
+            dtype=torch.long,
+        )
+        if hard_ids.numel() == 0:
+            return
+        visible_hard_object = (
+            object_valid
+            & (object_classes.unsqueeze(-1) == hard_ids).any(dim=-1)
+        )
+        sample_has_hard_object = visible_hard_object.any(dim=1)
+        objectless = self._labels_in_indices(actions, self.objectless_action_indices)
+        hard_mask = valid & objectless & sample_has_hard_object[:, None]
+        if not hard_mask.any():
+            return
+
+        pred_labels = full_preds.argmax(dim=-1)
+        correct = pred_labels == actions
+        count = int(hard_mask.sum().item())
+        self._log_scalar(
+            f"{stage}_objectless_with_object_visible_acc",
+            correct[hard_mask].float().mean(),
+            count,
+        )
+        self._log_count(
+            f"{stage}_objectless_with_object_visible_count",
+            hard_mask.float().sum(),
+        )
+        object_action_pred = self._labels_in_indices(
+            pred_labels,
+            self.group_indices.get("object_mapped"),
+        )
+        self._log_scalar(
+            f"{stage}_objectless_with_object_visible_object_action_pred_rate",
+            object_action_pred[hard_mask].float().mean(),
+            count,
+        )
+
+        for object_id, object_name in sorted(self.hard_negative_object_ids.items()):
+            object_mask = (
+                object_valid
+                & (object_classes == int(object_id))
+            ).any(dim=1)
+            slot_mask = valid & objectless & object_mask[:, None]
+            if not slot_mask.any():
+                continue
+            slot_count = int(slot_mask.sum().item())
+            self._log_scalar(
+                f"{stage}_objectless_with_{object_name}_visible_acc",
+                correct[slot_mask].float().mean(),
+                slot_count,
+            )
+            self._log_count(
+                f"{stage}_objectless_with_{object_name}_visible_count",
+                slot_mask.float().sum(),
+            )
+
+    def _action_index(self, action_name):
+        label_dict = self._toyota_label_dict()
+        if action_name not in label_dict:
+            return None
+        return int(label_dict[action_name]) - 1
+
+    def _log_object_residual_diagnostics(
+        self,
+        stage,
+        final_logits,
+        actions,
+        valid,
+    ):
+        if not self.scene_object_tokens:
+            return
+        base_logits = getattr(self.model, "last_actor_action_logits", None)
+        residual_logits = getattr(self.model, "last_object_residual_logits", None)
+        if base_logits is None or residual_logits is None:
+            return
+        base_logits = base_logits.to(device=final_logits.device)
+        residual_logits = residual_logits.to(device=final_logits.device)
+        valid = valid.to(device=final_logits.device, dtype=torch.bool)
+        actions = actions.to(device=final_logits.device, dtype=torch.long)
+        if not valid.any():
+            return
+
+        base_pred = base_logits.argmax(dim=-1)
+        final_pred = final_logits.argmax(dim=-1)
+        base_correct = base_pred == actions
+        final_correct = final_pred == actions
+        changed = base_pred != final_pred
+        count = int(valid.sum().item())
+
+        self._log_scalar(
+            f"{stage}_object_residual_abs_mean",
+            residual_logits[valid].float().abs().mean(),
+            count,
+        )
+        self._log_scalar(
+            f"{stage}_object_residual_abs_max",
+            residual_logits[valid].float().abs().amax(),
+            count,
+        )
+        self._log_scalar(
+            f"{stage}_object_residual_changed_pred_rate",
+            changed[valid].float().mean(),
+            count,
+        )
+        fixed = changed & (~base_correct) & final_correct
+        hurt = changed & base_correct & (~final_correct)
+        self._log_scalar(
+            f"{stage}_object_residual_fix_rate",
+            fixed[valid].float().mean(),
+            count,
+        )
+        self._log_scalar(
+            f"{stage}_object_residual_hurt_rate",
+            hurt[valid].float().mean(),
+            count,
+        )
+
+        laptop_idx = self._action_index("Uselaptop")
+        readbook_idx = self._action_index("Readbook")
+        if laptop_idx is not None and readbook_idx is not None:
+            laptop_base = valid & (base_pred == laptop_idx)
+            if laptop_base.any():
+                self._log_scalar(
+                    f"{stage}_object_residual_base_Uselaptop_final_Readbook_rate",
+                    (final_pred[laptop_base] == readbook_idx).float().mean(),
+                    int(laptop_base.sum().item()),
+                )
+            readbook_base = valid & (base_pred == readbook_idx)
+            if readbook_base.any():
+                self._log_scalar(
+                    f"{stage}_object_residual_base_Readbook_final_Uselaptop_rate",
+                    (final_pred[readbook_base] == laptop_idx).float().mean(),
+                    int(readbook_base.sum().item()),
+                )
 
     def _logger_run_name(self):
         logger = getattr(self.trainer, "logger", None)
@@ -1844,10 +2040,17 @@ class HeatmapModule(pl.LightningModule):
             batch.reraise()
         if self.actor_prompt:
             imgs, target = batch
-            loss, preds, labels, hm, loss_kp, _, presence_logits = self._actor_step(
+            loss, preds, labels, hm, loss_kp, full_preds, presence_logits = self._actor_step(
                 imgs, target, self.val_loss, "val"
             )
             self._log_actor_val_diagnostics(imgs, target, presence_logits)
+            self._log_objectless_hard_negative_metrics(
+                "val",
+                full_preds,
+                target["actions"].long(),
+                target["valid"].bool(),
+                target,
+            )
             if loss_kp is not None:
                 pose_hm = self._pose_heatmap_pred(hm)
                 self.val_mae(pose_hm.contiguous(), target["heatmap"].contiguous())

@@ -47,8 +47,11 @@ teacher target say that actor is interacting with the laptop.
 
 The object residual is intentionally not allowed to score every class. It is
 masked to the explicitly mapped object-action classes from
-`datasets/object_vocab.py`, and it is scaled by the selector probability assigned
-to real object slots. True body/motion classes such as `Walk`, `Getup`,
+`datasets/object_vocab.py`, further masked by the selected object's compatible
+action classes, and scaled by the selector probability assigned to real object
+slots. A selected `laptop` object can add residual score to `Uselaptop`, but not
+to `Readbook`; a selected `book` object can add residual score to `Readbook`,
+but not to `Uselaptop`. True body/motion classes such as `Walk`, `Getup`,
 `Sitdown`, and `Laydown` stay on the actor-only action path.
 
 ## Kept
@@ -57,7 +60,8 @@ to real object slots. True body/motion classes such as `Walk`, `Getup`,
 - One generic interacted-object heatmap per actor slot.
 - RF-DETR scene object tokens.
 - Object selection head.
-- Masked object-logit residual added after the actor-only action head.
+- Selected-object-compatible object-logit residual added after the actor-only
+  action head.
 - PO-GUISE+ style `action CE + log(heatmap MSE)`.
 - Selected-object removal as a validation-only supporting signal.
 
@@ -128,13 +132,20 @@ action CE
 With Nash-MTL enabled, action CE and object selection are treated as the action
 task, while pose/object heatmap localization is treated as the heatmap task.
 Action CE owns the action boundary. The actor-only action head is always present,
-and object evidence contributes only through a masked residual over mapped
-object-action logits. Object selection binds the actor token to a usable
-object-token context, and the interacted-object heatmap teaches visual grounding.
+and object evidence contributes only through a selected-object-compatible
+residual over mapped object-action logits. Object selection binds the actor token
+to a usable object-token context, and the interacted-object heatmap teaches
+visual grounding.
 There is intentionally no supervised object-action margin loss: object presence
 alone must not force an action class. There is also no target/background weighted
 heatmap variant; interacted-object heatmaps use the same PO-GUISE+ style
 Frobenius/log-MSE objective as pose heatmaps.
+
+Objectless hard-negative sampling is enabled for scene-object runs. For true
+body/motion labels, the dataset tries to keep at least one sampled frame where a
+mapped object is visible inside the same clip window. The selector target remains
+`NONE`; this teaches `object visible != object action` without inventing a fake
+object-positive label.
 
 ## Synthetic Actor Slots
 
@@ -167,6 +178,11 @@ drop. Use all of these:
 - `val_object_selection_none_acc`
 - `val_object_selection_object_acc`
 - `val_object_selection_true_prob`
+- `val_objectless_with_object_visible_acc`
+- `val_objectless_with_object_visible_object_action_pred_rate`
+- `val_object_residual_changed_pred_rate`
+- `val_object_residual_fix_rate`
+- `val_object_residual_hurt_rate`
 - `val_object_counterfactual_selected_logit_drop`
 - live/saved probe sweeps for laptop/book/phone cases
 

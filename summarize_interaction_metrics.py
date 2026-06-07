@@ -46,6 +46,20 @@ CORE_COLUMNS = [
     "val_object_selection_object_teacher_count",
     "val_object_counterfactual_selected_logit_drop",
     "val_object_counterfactual_selected_prob_drop",
+    "val_objectless_with_object_visible_acc",
+    "val_objectless_with_object_visible_count",
+    "val_objectless_with_object_visible_object_action_pred_rate",
+    "val_objectless_with_laptop_visible_acc",
+    "val_objectless_with_laptop_visible_count",
+    "val_objectless_with_book_visible_acc",
+    "val_objectless_with_book_visible_count",
+    "val_objectless_with_phone_visible_acc",
+    "val_objectless_with_phone_visible_count",
+    "val_object_residual_changed_pred_rate",
+    "val_object_residual_fix_rate",
+    "val_object_residual_hurt_rate",
+    "val_object_residual_base_Uselaptop_final_Readbook_rate",
+    "val_object_residual_base_Readbook_final_Uselaptop_rate",
 ]
 
 GROUPS = [
@@ -558,6 +572,9 @@ def print_best_epochs(epoch_df):
         "val_actor_pair_acc",
         "val_object_selection_acc",
         "val_object_selection_true_prob",
+        "val_objectless_with_object_visible_acc",
+        "val_objectless_with_laptop_visible_acc",
+        "val_object_residual_fix_rate",
         "val_object_counterfactual_selected_logit_drop",
     ]
     rows = []
@@ -606,6 +623,19 @@ def print_decision(epoch_df):
     objectless_acc = metric(latest, "val_group_objectless_acc")
     cf_logit = metric(latest, "val_object_counterfactual_selected_logit_drop")
     cf_prob = metric(latest, "val_object_counterfactual_selected_prob_drop")
+    hard_objectless = metric(latest, "val_objectless_with_object_visible_acc")
+    hard_objectless_count = metric(latest, "val_objectless_with_object_visible_count")
+    hard_object_action_rate = metric(
+        latest,
+        "val_objectless_with_object_visible_object_action_pred_rate",
+    )
+    residual_changed = metric(latest, "val_object_residual_changed_pred_rate")
+    residual_fix = metric(latest, "val_object_residual_fix_rate")
+    residual_hurt = metric(latest, "val_object_residual_hurt_rate")
+    laptop_to_book = metric(
+        latest,
+        "val_object_residual_base_Uselaptop_final_Readbook_rate",
+    )
 
     print("\nDECISION:\n")
     print(f"latest epoch: {latest_epoch}")
@@ -629,6 +659,18 @@ def print_decision(epoch_df):
             "action groups: "
             f"object_mapped {fmt(object_mapped_acc)}, "
             f"objectless {fmt(objectless_acc)}"
+        )
+    if pd.notna(hard_objectless):
+        print(
+            "objectless hard negatives: "
+            f"acc {fmt(hard_objectless)}, count {fmt(hard_objectless_count, 0)}, "
+            f"object_action_pred_rate {fmt(hard_object_action_rate)}"
+        )
+    if pd.notna(residual_changed):
+        print(
+            "object residual: "
+            f"changed {fmt(residual_changed)}, fix {fmt(residual_fix)}, "
+            f"hurt {fmt(residual_hurt)}, laptop_to_book {fmt(laptop_to_book)}"
         )
     if (
         pd.notna(actor_all_slot)
@@ -715,6 +757,23 @@ def print_row(title, row):
             "selected-object counterfactual: "
             f"logit_drop {metric(row, 'val_object_counterfactual_selected_logit_drop'):.4f}, "
             f"prob_drop {metric(row, 'val_object_counterfactual_selected_prob_drop'):.4f}"
+        )
+    if pd.notna(metric(row, "val_objectless_with_object_visible_acc")):
+        print(
+            "objectless hard negatives: "
+            f"acc {metric(row, 'val_objectless_with_object_visible_acc'):.4f}, "
+            f"count {metric(row, 'val_objectless_with_object_visible_count'):.0f}, "
+            "object_action_pred_rate "
+            f"{metric(row, 'val_objectless_with_object_visible_object_action_pred_rate'):.4f}"
+        )
+    if pd.notna(metric(row, "val_object_residual_changed_pred_rate")):
+        print(
+            "object residual: "
+            f"changed {metric(row, 'val_object_residual_changed_pred_rate'):.4f}, "
+            f"fix {metric(row, 'val_object_residual_fix_rate'):.4f}, "
+            f"hurt {metric(row, 'val_object_residual_hurt_rate'):.4f}, "
+            "laptop_to_book "
+            f"{metric(row, 'val_object_residual_base_Uselaptop_final_Readbook_rate'):.4f}"
         )
     print(
         "poguise+ heatmap loss: "
