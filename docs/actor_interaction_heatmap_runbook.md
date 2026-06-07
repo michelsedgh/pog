@@ -169,6 +169,7 @@ boundaries from `ACTION_OBJECT_CONFUSERS`.
 Do not select checkpoints only by global F1 or only by raw counterfactual logit
 drop. Use all of these:
 
+- `val_deploy_score`
 - `val_f1`
 - `val_acc_macro`
 - `val_group_object_mapped_acc`
@@ -185,6 +186,15 @@ drop. Use all of these:
 - `val_object_residual_hurt_rate`
 - `val_object_counterfactual_selected_logit_drop`
 - live/saved probe sweeps for laptop/book/phone cases
+
+`val_deploy_score` is the preferred checkpoint monitor for scene-object actor
+runs. It is validation-only and does not affect training gradients. It rewards
+macro F1, macro accuracy, object-mapped accuracy, objectless accuracy,
+objectless-with-object-visible accuracy, and key action accuracy for
+`Uselaptop`, `Readbook`, `Walk`, `Getup`, `Sitdown`, and `Laydown`. It penalizes
+objectless-with-object-visible predictions that become object actions, residual
+changes that hurt a correct base prediction, `Uselaptop` to `Readbook` residual
+drift, and any key action below a 0.60 accuracy floor.
 
 `val_object_counterfactual_selected_logit_drop` is validation-only supporting
 evidence. It must not be used as a trainable loss or as the only checkpoint

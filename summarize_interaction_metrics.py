@@ -12,6 +12,13 @@ CORE_COLUMNS = [
     "val_loss",
     "val_acc_macro",
     "val_f1",
+    "val_deploy_score",
+    "val_deploy_key_action_mean",
+    "val_deploy_key_action_min",
+    "val_deploy_objectless_with_object_visible_acc",
+    "val_deploy_objectless_with_object_visible_object_action_pred_rate",
+    "val_deploy_residual_hurt_rate",
+    "val_deploy_laptop_to_readbook_rate",
     "val_actor_all_slot_acc",
     "val_actor_slot_consistency",
     "val_actor_pair_acc",
@@ -286,6 +293,7 @@ def print_key_action_progress(epoch_df):
 
 def print_compact_best(epoch_df):
     metrics = [
+        "val_deploy_score",
         "val_f1",
         "val_acc_macro",
         "val_group_object_mapped_acc",
@@ -562,6 +570,7 @@ def print_group_progress(epoch_df):
 
 def print_best_epochs(epoch_df):
     metrics = [
+        "val_deploy_score",
         "val_f1",
         "val_acc_macro",
         "val_interaction_heatmap_soft_iou",
@@ -603,6 +612,9 @@ def print_decision(epoch_df):
     latest = epoch_df.iloc[-1]
     f1_base = metric(base, "val_f1")
     f1_latest = metric(latest, "val_f1")
+    deploy_score = metric(latest, "val_deploy_score")
+    deploy_key_mean = metric(latest, "val_deploy_key_action_mean")
+    deploy_key_min = metric(latest, "val_deploy_key_action_min")
     f1_delta = f1_latest - f1_base
     latest_epoch = int(latest["epoch"])
     pos = metric(latest, "val_interaction_heatmap_positive_mean")
@@ -636,9 +648,16 @@ def print_decision(epoch_df):
         latest,
         "val_object_residual_base_Uselaptop_final_Readbook_rate",
     )
+    deploy_laptop_to_book = metric(latest, "val_deploy_laptop_to_readbook_rate")
 
     print("\nDECISION:\n")
     print(f"latest epoch: {latest_epoch}")
+    if pd.notna(deploy_score):
+        print(
+            "deploy score: "
+            f"{fmt(deploy_score)}, key_mean {fmt(deploy_key_mean)}, "
+            f"key_min {fmt(deploy_key_min)}"
+        )
     print(f"F1 latest/base: {fmt(f1_latest)} / {fmt(f1_base)} delta {fmt(f1_delta)}")
     print(
         "heatmap: "
@@ -672,6 +691,8 @@ def print_decision(epoch_df):
             f"changed {fmt(residual_changed)}, fix {fmt(residual_fix)}, "
             f"hurt {fmt(residual_hurt)}, laptop_to_book {fmt(laptop_to_book)}"
         )
+    if pd.notna(deploy_laptop_to_book):
+        print(f"deploy laptop_to_book penalty signal: {fmt(deploy_laptop_to_book)}")
     if (
         pd.notna(actor_all_slot)
         or pd.notna(actor_pair)
@@ -725,6 +746,13 @@ def print_row(title, row):
         "macro/f1: "
         f"{metric(row, 'val_acc_macro'):.4f} / {metric(row, 'val_f1'):.4f}"
     )
+    if pd.notna(metric(row, "val_deploy_score")):
+        print(
+            "deploy score: "
+            f"{metric(row, 'val_deploy_score'):.4f}, "
+            f"key_mean {metric(row, 'val_deploy_key_action_mean'):.4f}, "
+            f"key_min {metric(row, 'val_deploy_key_action_min'):.4f}"
+        )
     print(
         "interaction heatmap: "
         f"loss {metric(row, 'val_loss_interaction_heatmap'):.6f}, "

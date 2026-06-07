@@ -35,6 +35,14 @@ except ImportError:
 
 
 OBJECT_SELECTION_LOSS_WEIGHT = 0.5
+DEPLOY_KEY_ACTIONS = (
+    "Uselaptop",
+    "Readbook",
+    "Walk",
+    "Getup",
+    "Sitdown",
+    "Laydown",
+)
 
 
 class HeatmapModule(pl.LightningModule):
@@ -141,7 +149,7 @@ class HeatmapModule(pl.LightningModule):
         self.test_f1 = torchmetrics.F1Score(
             num_classes=hparams.num_classes, average="macro", task="multiclass"
         )
-        self.validation_step_outputs = {"preds": [], "labels": []}
+        self.validation_step_outputs = self._empty_validation_outputs()
         self.actor_val_diagnostics = bool(hparams.get("actor_val_diagnostics", 1))
         self.actor_val_diagnostic_max_pairs = int(
             hparams.get("actor_val_diagnostic_max_pairs", 8)
@@ -156,6 +164,18 @@ class HeatmapModule(pl.LightningModule):
             for object_names in STRONG_ACTION_OBJECTS.values()
             for object_name in object_names
             if object_name in OBJECT_TO_ID
+        }
+
+    def _empty_validation_outputs(self):
+        return {
+            "preds": [],
+            "labels": [],
+            "hard_objectless": [],
+            "residual_changed": [],
+            "residual_fixed": [],
+            "residual_hurt": [],
+            "residual_base_laptop": [],
+            "residual_base_laptop_final_readbook": [],
         }
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
@@ -1493,18 +1513,17 @@ class HeatmapModule(pl.LightningModule):
         indices = indices.to(device=labels.device, dtype=labels.dtype)
         return (labels.unsqueeze(-1) == indices).any(dim=-1)
 
-    def _log_objectless_hard_negative_metrics(
+    def _objectless_hard_negative_mask(
         self,
-        stage,
         full_preds,
         actions,
         valid,
         target,
     ):
         if not self.scene_object_tokens or "object_classes" not in target:
-            return
+            return None
         if full_preds is None:
-            return
+            return None
         object_classes = target["object_classes"].to(
             device=full_preds.device,
             dtype=torch.long,
@@ -1521,16 +1540,44 @@ class HeatmapModule(pl.LightningModule):
             dtype=torch.long,
         )
         if hard_ids.numel() == 0:
-            return
+            return None
         visible_hard_object = (
             object_valid
             & (object_classes.unsqueeze(-1) == hard_ids).any(dim=-1)
         )
         sample_has_hard_object = visible_hard_object.any(dim=1)
         objectless = self._labels_in_indices(actions, self.objectless_action_indices)
-        hard_mask = valid & objectless & sample_has_hard_object[:, None]
+        return valid & objectless & sample_has_hard_object[:, None]
+
+    def _log_objectless_hard_negative_metrics(
+        self,
+        stage,
+        full_preds,
+        actions,
+        valid,
+        target,
+    ):
+        hard_mask = self._objectless_hard_negative_mask(
+            full_preds,
+            actions,
+            valid,
+            target,
+        )
+        if hard_mask is None:
+            return
+        object_classes = target["object_classes"].to(
+            device=full_preds.device,
+            dtype=torch.long,
+        )
+        object_valid = target["object_valid"].to(
+            device=full_preds.device,
+            dtype=torch.bool,
+        )
+        valid = valid.to(device=full_preds.device, dtype=torch.bool)
+        actions = actions.to(device=full_preds.device, dtype=torch.long)
         if not hard_mask.any():
             return
+        objectless = self._labels_in_indices(actions, self.objectless_action_indices)
 
         pred_labels = full_preds.argmax(dim=-1)
         correct = pred_labels == actions
@@ -1579,6 +1626,51 @@ class HeatmapModule(pl.LightningModule):
             return None
         return int(label_dict[action_name]) - 1
 
+    def _object_residual_diagnostic_masks(
+        self,
+        final_logits,
+        actions,
+        valid,
+    ):
+        if not self.scene_object_tokens:
+            return None
+        base_logits = getattr(self.model, "last_actor_action_logits", None)
+        residual_logits = getattr(self.model, "last_object_residual_logits", None)
+        if base_logits is None or residual_logits is None:
+            return None
+        base_logits = base_logits.to(device=final_logits.device)
+        residual_logits = residual_logits.to(device=final_logits.device)
+        valid = valid.to(device=final_logits.device, dtype=torch.bool)
+        actions = actions.to(device=final_logits.device, dtype=torch.long)
+        if not valid.any():
+            return None
+
+        base_pred = base_logits.argmax(dim=-1)
+        final_pred = final_logits.argmax(dim=-1)
+        base_correct = base_pred == actions
+        final_correct = final_pred == actions
+        changed = base_pred != final_pred
+        fixed = changed & (~base_correct) & final_correct
+        hurt = changed & base_correct & (~final_correct)
+        laptop_idx = self._action_index("Uselaptop")
+        readbook_idx = self._action_index("Readbook")
+        base_laptop = torch.zeros_like(valid, dtype=torch.bool)
+        base_laptop_final_readbook = torch.zeros_like(valid, dtype=torch.bool)
+        if laptop_idx is not None and readbook_idx is not None:
+            base_laptop = valid & (base_pred == laptop_idx)
+            base_laptop_final_readbook = (
+                base_laptop
+                & (final_pred == readbook_idx)
+            )
+        return {
+            "residual_logits": residual_logits,
+            "changed": changed,
+            "fixed": fixed,
+            "hurt": hurt,
+            "base_laptop": base_laptop,
+            "base_laptop_final_readbook": base_laptop_final_readbook,
+        }
+
     def _log_object_residual_diagnostics(
         self,
         stage,
@@ -1586,24 +1678,11 @@ class HeatmapModule(pl.LightningModule):
         actions,
         valid,
     ):
-        if not self.scene_object_tokens:
+        masks = self._object_residual_diagnostic_masks(final_logits, actions, valid)
+        if masks is None:
             return
-        base_logits = getattr(self.model, "last_actor_action_logits", None)
-        residual_logits = getattr(self.model, "last_object_residual_logits", None)
-        if base_logits is None or residual_logits is None:
-            return
-        base_logits = base_logits.to(device=final_logits.device)
-        residual_logits = residual_logits.to(device=final_logits.device)
+        residual_logits = masks["residual_logits"]
         valid = valid.to(device=final_logits.device, dtype=torch.bool)
-        actions = actions.to(device=final_logits.device, dtype=torch.long)
-        if not valid.any():
-            return
-
-        base_pred = base_logits.argmax(dim=-1)
-        final_pred = final_logits.argmax(dim=-1)
-        base_correct = base_pred == actions
-        final_correct = final_pred == actions
-        changed = base_pred != final_pred
         count = int(valid.sum().item())
 
         self._log_scalar(
@@ -1618,32 +1697,33 @@ class HeatmapModule(pl.LightningModule):
         )
         self._log_scalar(
             f"{stage}_object_residual_changed_pred_rate",
-            changed[valid].float().mean(),
+            masks["changed"][valid].float().mean(),
             count,
         )
-        fixed = changed & (~base_correct) & final_correct
-        hurt = changed & base_correct & (~final_correct)
         self._log_scalar(
             f"{stage}_object_residual_fix_rate",
-            fixed[valid].float().mean(),
+            masks["fixed"][valid].float().mean(),
             count,
         )
         self._log_scalar(
             f"{stage}_object_residual_hurt_rate",
-            hurt[valid].float().mean(),
+            masks["hurt"][valid].float().mean(),
             count,
         )
 
-        laptop_idx = self._action_index("Uselaptop")
+        base_laptop = masks["base_laptop"]
+        if base_laptop.any():
+            self._log_scalar(
+                f"{stage}_object_residual_base_Uselaptop_final_Readbook_rate",
+                masks["base_laptop_final_readbook"][base_laptop].float().mean(),
+                int(base_laptop.sum().item()),
+            )
         readbook_idx = self._action_index("Readbook")
-        if laptop_idx is not None and readbook_idx is not None:
-            laptop_base = valid & (base_pred == laptop_idx)
-            if laptop_base.any():
-                self._log_scalar(
-                    f"{stage}_object_residual_base_Uselaptop_final_Readbook_rate",
-                    (final_pred[laptop_base] == readbook_idx).float().mean(),
-                    int(laptop_base.sum().item()),
-                )
+        laptop_idx = self._action_index("Uselaptop")
+        if readbook_idx is not None and laptop_idx is not None:
+            base_logits = getattr(self.model, "last_actor_action_logits", None)
+            base_pred = base_logits.to(device=final_logits.device).argmax(dim=-1)
+            final_pred = final_logits.argmax(dim=-1)
             readbook_base = valid & (base_pred == readbook_idx)
             if readbook_base.any():
                 self._log_scalar(
@@ -1940,6 +2020,212 @@ class HeatmapModule(pl.LightningModule):
         self._log_actor_pair_diagnostics(diag_imgs, diag_boxes, diag_labels)
         self._log_actor_background_presence(diag_imgs, diag_boxes)
 
+    def _flatten_gathered_validation_tensor(self, outputs, name, trailing_dim=None):
+        tensors = []
+        for data in outputs.get(name, []):
+            tensor = torch.as_tensor(data)
+            if tensor.numel() == 0:
+                continue
+            if trailing_dim is None:
+                tensor = tensor.reshape(-1)
+            else:
+                tensor = tensor.reshape(-1, int(trailing_dim))
+            tensors.append(tensor)
+        if not tensors:
+            return None
+        return torch.cat(tensors, dim=0)
+
+    def _deploy_accuracy(self, pred_labels, labels, mask):
+        mask = mask.to(device=labels.device, dtype=torch.bool)
+        if not mask.any():
+            return None
+        return (pred_labels[mask] == labels[mask]).float().mean()
+
+    def _deploy_group_accuracy(self, pred_labels, labels, group_name):
+        indices = self.group_indices.get(group_name)
+        if indices is None:
+            return None
+        mask = self._labels_in_indices(labels, indices)
+        return self._deploy_accuracy(pred_labels, labels, mask)
+
+    def _deploy_action_accuracies(self, pred_labels, labels, action_names):
+        values = []
+        for action_name in action_names:
+            action_idx = self._action_index(action_name)
+            if action_idx is None:
+                continue
+            value = self._deploy_accuracy(pred_labels, labels, labels == action_idx)
+            if value is not None:
+                values.append(value)
+        return values
+
+    def _weighted_deploy_score(self, components, penalties):
+        weighted_values = []
+        weights = []
+        for value, weight in components:
+            if value is None:
+                continue
+            if not torch.isfinite(value):
+                continue
+            weighted_values.append(value.float() * float(weight))
+            weights.append(float(weight))
+        if not weighted_values:
+            return None
+        score = torch.stack(weighted_values).sum() / max(sum(weights), 1e-6)
+        for value, weight in penalties:
+            if value is None:
+                continue
+            if torch.isfinite(value):
+                score = score - value.float() * float(weight)
+        return score
+
+    def _log_deploy_checkpoint_metrics(self, preds, labels, gathered_outputs):
+        if preds is None or labels is None or preds.numel() == 0 or labels.numel() == 0:
+            return
+        labels = labels.to(dtype=torch.long)
+        pred_labels = preds.argmax(dim=-1)
+        macro_acc = torchmetrics.functional.accuracy(
+            preds,
+            labels,
+            task="multiclass",
+            num_classes=self.num_classes,
+            average="macro",
+        )
+        macro_f1 = torchmetrics.functional.f1_score(
+            preds,
+            labels,
+            task="multiclass",
+            num_classes=self.num_classes,
+            average="macro",
+        )
+        object_mapped_acc = self._deploy_group_accuracy(
+            pred_labels,
+            labels,
+            "object_mapped",
+        )
+        objectless_acc = self._deploy_group_accuracy(
+            pred_labels,
+            labels,
+            "objectless",
+        )
+        hard_objectless = self._flatten_gathered_validation_tensor(
+            gathered_outputs,
+            "hard_objectless",
+        )
+        hard_objectless_acc = None
+        hard_object_action_rate = None
+        if hard_objectless is not None:
+            hard_objectless = hard_objectless.to(
+                device=labels.device,
+                dtype=torch.bool,
+            )
+            if hard_objectless.numel() != labels.numel():
+                raise RuntimeError(
+                    "hard_objectless validation mask length does not match labels: "
+                    f"{hard_objectless.numel()} vs {labels.numel()}"
+                )
+            hard_objectless_acc = self._deploy_accuracy(
+                pred_labels,
+                labels,
+                hard_objectless,
+            )
+            object_action_pred = self._labels_in_indices(
+                pred_labels,
+                self.group_indices.get("object_mapped"),
+            )
+            hard_object_action_rate = (
+                object_action_pred[hard_objectless].float().mean()
+                if hard_objectless.any()
+                else None
+            )
+
+        key_action_values = self._deploy_action_accuracies(
+            pred_labels,
+            labels,
+            DEPLOY_KEY_ACTIONS,
+        )
+        key_action_mean = torch.stack(key_action_values).mean() if key_action_values else None
+        key_action_min = torch.stack(key_action_values).amin() if key_action_values else None
+        key_action_floor_deficit = (
+            (torch.tensor(0.60, device=labels.device) - key_action_min).clamp_min(0.0)
+            if key_action_min is not None
+            else None
+        )
+
+        residual_hurt = self._flatten_gathered_validation_tensor(
+            gathered_outputs,
+            "residual_hurt",
+        )
+        residual_hurt_rate = (
+            residual_hurt.float().mean()
+            if residual_hurt is not None and residual_hurt.numel() > 0
+            else None
+        )
+        residual_base_laptop = self._flatten_gathered_validation_tensor(
+            gathered_outputs,
+            "residual_base_laptop",
+        )
+        residual_laptop_to_readbook = self._flatten_gathered_validation_tensor(
+            gathered_outputs,
+            "residual_base_laptop_final_readbook",
+        )
+        laptop_to_readbook_rate = None
+        if (
+            residual_base_laptop is not None
+            and residual_laptop_to_readbook is not None
+            and residual_base_laptop.numel() > 0
+        ):
+            residual_base_laptop = residual_base_laptop.bool()
+            residual_laptop_to_readbook = residual_laptop_to_readbook.bool()
+            if residual_base_laptop.any():
+                laptop_to_readbook_rate = (
+                    residual_laptop_to_readbook[residual_base_laptop].float().mean()
+                )
+
+        deploy_score = self._weighted_deploy_score(
+            components=[
+                (macro_f1, 0.25),
+                (macro_acc, 0.15),
+                (object_mapped_acc, 0.20),
+                (objectless_acc, 0.15),
+                (hard_objectless_acc, 0.15),
+                (key_action_mean, 0.10),
+            ],
+            penalties=[
+                (hard_object_action_rate, 0.20),
+                (residual_hurt_rate, 0.20),
+                (laptop_to_readbook_rate, 0.20),
+                (key_action_floor_deficit, 0.15),
+            ],
+        )
+        if deploy_score is None:
+            return
+
+        for name, value in (
+            ("val_deploy_score", deploy_score),
+            ("val_deploy_key_action_mean", key_action_mean),
+            ("val_deploy_key_action_min", key_action_min),
+            (
+                "val_deploy_objectless_with_object_visible_acc",
+                hard_objectless_acc,
+            ),
+            (
+                "val_deploy_objectless_with_object_visible_object_action_pred_rate",
+                hard_object_action_rate,
+            ),
+            ("val_deploy_residual_hurt_rate", residual_hurt_rate),
+            ("val_deploy_laptop_to_readbook_rate", laptop_to_readbook_rate),
+        ):
+            if value is None:
+                continue
+            self.log(
+                name,
+                value,
+                prog_bar=name == "val_deploy_score",
+                logger=True,
+                sync_dist=False,
+            )
+
     def training_step(self, batch, batch_idx):
         # "batch" is the output of the training data loader.
         if isinstance(batch, torch._utils.ExceptionWrapper):
@@ -2080,6 +2366,37 @@ class HeatmapModule(pl.LightningModule):
             self._log_action_metrics("val_action_{action}_acc", preds, labels)
             self.validation_step_outputs["preds"].append(preds.detach())
             self.validation_step_outputs["labels"].append(labels.detach())
+            hard_mask = self._objectless_hard_negative_mask(
+                full_preds,
+                target["actions"].long(),
+                target["valid"].bool(),
+                target,
+            )
+            if hard_mask is not None:
+                valid_mask = target["valid"].bool().to(device=full_preds.device)
+                self.validation_step_outputs["hard_objectless"].append(
+                    hard_mask[valid_mask].detach()
+                )
+            residual_masks = self._object_residual_diagnostic_masks(
+                full_preds,
+                target["actions"].long(),
+                target["valid"].bool(),
+            )
+            if residual_masks is not None:
+                valid_mask = target["valid"].bool().to(device=full_preds.device)
+                for output_key, mask_key in (
+                    ("residual_changed", "changed"),
+                    ("residual_fixed", "fixed"),
+                    ("residual_hurt", "hurt"),
+                    ("residual_base_laptop", "base_laptop"),
+                    (
+                        "residual_base_laptop_final_readbook",
+                        "base_laptop_final_readbook",
+                    ),
+                ):
+                    self.validation_step_outputs[output_key].append(
+                        residual_masks[mask_key][valid_mask].detach()
+                    )
             self.log(
                 "val_loss",
                 loss,
@@ -2212,23 +2529,20 @@ class HeatmapModule(pl.LightningModule):
         # TODO check if best_val_loss is correctly called on multi gpu i.e. if it is synced across all gpus
         best_val_loss = self.trainer.callback_metrics.get("best_val_loss")
         outputs = self.all_gather(self.validation_step_outputs)
-        # merge the outputs
-        preds = None
-        for data in outputs["preds"]:
-            if preds is None:
-                preds = torch.Tensor(data).view(-1, self.num_classes)
-            else:
-                preds = torch.cat(
-                    (preds, torch.Tensor(data).view(-1, self.num_classes))
-                )
-        labels = None
-        for data in outputs["labels"]:
-            if labels is None:
-                labels = torch.Tensor(data).view(-1)
-            else:
-                labels = torch.cat((labels, torch.Tensor(data).view(-1)))
+        preds = self._flatten_gathered_validation_tensor(
+            outputs,
+            "preds",
+            trailing_dim=self.num_classes,
+        )
+        labels = self._flatten_gathered_validation_tensor(outputs, "labels")
+        if preds is None or labels is None:
+            self.validation_step_outputs.clear()
+            self.validation_step_outputs = self._empty_validation_outputs()
+            return super().on_validation_epoch_end()
+        labels = labels.to(dtype=torch.long)
 
         loss = self.val_loss(preds, labels)
+        self._log_deploy_checkpoint_metrics(preds, labels, outputs)
         # save prediction and labels for to csv
 
         if best_val_loss is None or loss < best_val_loss:
@@ -2289,7 +2603,7 @@ class HeatmapModule(pl.LightningModule):
                     index=False,
                 )
         self.validation_step_outputs.clear()
-        self.validation_step_outputs = {"preds": [], "labels": []}
+        self.validation_step_outputs = self._empty_validation_outputs()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         return super().on_validation_epoch_end()
