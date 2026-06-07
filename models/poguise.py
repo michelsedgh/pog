@@ -358,6 +358,7 @@ class POGUISE(pl.LightningModule):
                 num_scene_object_tokens=self.hparams.get("num_scene_object_tokens", 32),
                 num_object_classes=self.hparams.get("num_object_classes", 19),
                 return_heatmap_features=False,
+                trt_safe_attention=self.hparams.get("trt_safe_attention", 0),
             )
         else:
             self.net = vit_base_patch16_224(
@@ -390,6 +391,7 @@ class POGUISE(pl.LightningModule):
                 num_scene_object_tokens=self.hparams.get("num_scene_object_tokens", 32),
                 num_object_classes=self.hparams.get("num_object_classes", 19),
                 return_heatmap_features=False,
+                trt_safe_attention=self.hparams.get("trt_safe_attention", 0),
             )
         if self.hparams.pretrained == "DEFAULT":
             if os.path.exists("vit_b_k710_dl_from_giant.pth"):
@@ -713,6 +715,7 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--scene_object_tokens", type=int, default=0)
         parser.add_argument("--num_scene_object_tokens", type=int, default=32)
         parser.add_argument("--num_object_classes", type=int, default=19)
+        parser.add_argument("--trt_safe_attention", type=int, default=0)
         parser.add_argument("--interaction_unfreeze_last_blocks", type=int, default=0)
         parser.add_argument("--ret_feat", type=int, default=0)
         parser.add_argument("--linear_probe", type=int, default=0)

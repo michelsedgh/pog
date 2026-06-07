@@ -6,7 +6,13 @@ from models.poguise import POGUISE
 from train import _load_checkpoint
 
 
-def load_actor_model(checkpoint_path, device, return_metadata=False, dtype=torch.float32):
+def load_actor_model(
+    checkpoint_path,
+    device,
+    return_metadata=False,
+    dtype=torch.float32,
+    hparam_overrides=None,
+):
     checkpoint = _load_checkpoint(checkpoint_path)
     hparams = {}
     hparams.update(checkpoint.get("hyper_parameters", {}))
@@ -15,6 +21,8 @@ def load_actor_model(checkpoint_path, device, return_metadata=False, dtype=torch
         raise RuntimeError(f"No hyperparameters found in checkpoint: {checkpoint_path}")
     if not hparams.get("actor_prompt", 0):
         raise RuntimeError("Checkpoint is not an actor-prompt checkpoint.")
+    if hparam_overrides:
+        hparams.update(hparam_overrides)
 
     hparams["pretrained"] = "none"
     hparams["mode"] = "test"

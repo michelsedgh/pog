@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import torch
@@ -28,12 +29,21 @@ class TensorRTActorEngine:
         engine_path = Path(engine_path)
         if not engine_path.is_file():
             raise FileNotFoundError(f"TensorRT engine not found: {engine_path}")
+        self.engine_path = engine_path
+        self.metadata = {}
+        metadata_path = Path(str(engine_path) + ".json")
+        if metadata_path.is_file():
+            self.metadata = json.loads(metadata_path.read_text())
+        self.precision = str(self.metadata.get("precision", "unknown"))
 
         self.logger = trt.Logger(trt.Logger.WARNING)
         self.runtime = trt.Runtime(self.logger)
         self.engine = self.runtime.deserialize_cuda_engine(engine_path.read_bytes())
         if self.engine is None:
             raise RuntimeError(f"Failed to deserialize TensorRT engine: {engine_path}")
+        streamable_weights = int(getattr(self.engine, "streamable_weights_size", 0))
+        if streamable_weights > 0 and hasattr(self.engine, "weight_streaming_budget_v2"):
+            self.engine.weight_streaming_budget_v2 = streamable_weights
         self.context = self.engine.create_execution_context()
         if self.context is None:
             raise RuntimeError(f"Failed to create TensorRT execution context: {engine_path}")

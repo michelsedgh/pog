@@ -13,6 +13,7 @@ import torch
 from PIL import Image
 
 from datasets.object_vocab import DETECTOR_TO_OBJECT, NONE_OBJECT_ID, OBJECT_CLASSES, OBJECT_TO_ID
+from utils.actor_tensorrt import TensorRTActorEngine
 from utils.rfdetr_tensorrt import TensorRTRFDETRNano
 
 TRAINING_CLIP_FRAMES = 16
@@ -63,6 +64,12 @@ ACTION_CLASSES = [
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument(
+        "--actor-engine",
+        type=str,
+        default=None,
+        help="Optional TensorRT actor engine. If set, checkpoint is used only for metadata/comparison.",
+    )
     parser.add_argument("--camera", type=str, default="0")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=7860)
@@ -74,6 +81,22 @@ def parse_args():
     parser.add_argument("--track-hold-frames", type=int, default=10)
     parser.add_argument("--camera-buffer-size", type=int, default=1)
     parser.add_argument("--jpeg-quality", type=int, default=80)
+    parser.add_argument(
+        "--crop-mode",
+        choices=("actor", "actor_window", "center"),
+        default="actor_window",
+        help=(
+            "How to crop the 128-frame live clip. actor_window uses sampled "
+            "person boxes across the whole clip and is safer for walking/getup."
+        ),
+    )
+    parser.add_argument(
+        "--live-object-tokens",
+        type=int,
+        choices=(0, 1),
+        default=1,
+        help="Set to 0 to feed empty object tokens and isolate actor-only behavior.",
+    )
     parser.add_argument("--smoke", action="store_true")
     args = parser.parse_args()
     if not args.smoke and not args.detector_engine:
@@ -167,6 +190,18 @@ def crop_center_from_boxes(boxes_xyxy):
     return ((x1 + x2) * 0.5, (y1 + y2) * 0.5)
 
 
+def crop_center_from_sampled_people(sampled_people_records):
+    boxes = [
+        np.asarray(record.get("boxes_xyxy", []), dtype=np.float32)
+        for record in sampled_people_records
+        if record is not None
+    ]
+    boxes = [item for item in boxes if item.size > 0]
+    if not boxes:
+        return None
+    return crop_center_from_boxes(np.concatenate(boxes, axis=0))
+
+
 def resize_crop_frame(frame_rgb, short_side, input_size, crop_center_xy=None):
     height, width = frame_rgb.shape[:2]
     if width < height:
@@ -232,10 +267,6 @@ def preprocess_clip(frames_rgb, short_side, input_size, device, crop_center_xy=N
         crops.append(torch.from_numpy(crop).permute(2, 0, 1))
     clip = torch.stack(crops, dim=0).unsqueeze(0).to(device=device, dtype=torch.float32)
     return clip, transform
-
-
-def sample_clip(buffer):
-    return sample_buffer_items(buffer)
 
 
 def detector_class_name(detector, class_id):
@@ -610,7 +641,43 @@ class TorchActorBackend:
         return logits, presence, object_selection
 
 
+class TensorRTLiveActorBackend:
+    def __init__(self, engine_path):
+        self.engine = TensorRTActorEngine(engine_path)
+        self.device = self.engine.device
+        self.precision = self.engine.precision
+        self.num_actor_tokens = int(self.engine.num_actor_tokens)
+        self.clip_frames = int(self.engine.clip_frames)
+        self.input_size = int(self.engine.input_size)
+        self.backend_name = "tensorrt"
+        self.scene_object_tokens = bool(self.engine.scene_object_tokens)
+        self.actor_object_logit_residual = self.scene_object_tokens
+        self.num_scene_object_tokens = int(self.engine.num_scene_object_tokens)
+        if self.clip_frames != TRAINING_CLIP_FRAMES:
+            raise RuntimeError(
+                f"Actor engine clip_frames={self.clip_frames}; live inference is fixed "
+                f"to {TRAINING_CLIP_FRAMES} frames."
+            )
+        if self.input_size != MODEL_INPUT_SIZE:
+            raise RuntimeError(
+                f"Actor engine input_size={self.input_size}; live inference is fixed "
+                f"to {MODEL_INPUT_SIZE}."
+            )
+        if not self.scene_object_tokens:
+            raise RuntimeError(
+                "This dashboard is fixed to object-fused checkpoints and requires "
+                "a TensorRT engine with object token inputs."
+            )
+        if self.num_scene_object_tokens <= 0:
+            raise RuntimeError("TensorRT actor engine object token count must be positive.")
+
+    def __call__(self, clip, boxes, valid, object_inputs=None):
+        return self.engine(clip, boxes, valid, object_inputs)
+
+
 def load_actor_backend(args):
+    if args.actor_engine:
+        return TensorRTLiveActorBackend(args.actor_engine)
     return TorchActorBackend(args.checkpoint)
 
 
@@ -697,6 +764,12 @@ class DashboardState:
             "clip_sampling": None,
             "crop_mode": None,
             "det_age_frames": None,
+            "capture_mode": None,
+            "capture_fps": None,
+            "capture_buffer_frames": None,
+            "capture_span_sec": None,
+            "object_history_ready": None,
+            "people_history_ready": None,
         }
 
     def update(self, jpeg=None, **status):
@@ -769,6 +842,82 @@ def draw_overlay(frame_bgr, actors, objects, message):
     return out
 
 
+class CameraFrameBuffer:
+    def __init__(self, camera, camera_buffer_size, max_frames):
+        self.source = camera_source(camera)
+        self.camera_buffer_size = int(camera_buffer_size)
+        self.frames = deque(maxlen=int(max_frames))
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.thread = None
+        self.cap = None
+        self.frame_index = 0
+        self.read_count = 0
+        self.start_time = None
+        self.last_error = None
+
+    def start(self):
+        self.cap = cv2.VideoCapture(self.source)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Could not open camera source: {self.source}")
+        if self.camera_buffer_size > 0:
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, self.camera_buffer_size)
+        self.start_time = time.perf_counter()
+        self.thread = threading.Thread(target=self._read_loop, daemon=True)
+        self.thread.start()
+
+    def _read_loop(self):
+        while not self.stop_event.is_set():
+            ok, frame_bgr = self.cap.read()
+            now = time.perf_counter()
+            if not ok:
+                with self.lock:
+                    self.last_error = "camera read failed"
+                time.sleep(0.02)
+                continue
+
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            with self.lock:
+                self.frame_index += 1
+                self.read_count += 1
+                self.last_error = None
+                self.frames.append(
+                    {
+                        "index": self.frame_index,
+                        "time": now,
+                        "bgr": frame_bgr,
+                        "rgb": frame_rgb,
+                    }
+                )
+
+    def snapshot(self):
+        with self.lock:
+            frames = list(self.frames)
+            read_count = int(self.read_count)
+            start_time = self.start_time
+            last_error = self.last_error
+        now = time.perf_counter()
+        elapsed = max(now - start_time, 1e-6) if start_time is not None else 1e-6
+        capture_fps = float(read_count) / elapsed
+        span_sec = 0.0
+        if len(frames) >= 2:
+            span_sec = float(frames[-1]["time"] - frames[0]["time"])
+        return frames, {
+            "capture_fps": capture_fps,
+            "capture_buffer_frames": len(frames),
+            "capture_span_sec": span_sec,
+            "last_error": last_error,
+            "latest_camera_frame": int(frames[-1]["index"]) if frames else 0,
+        }
+
+    def close(self):
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout=1.0)
+        if self.cap is not None:
+            self.cap.release()
+
+
 class LiveRunner:
     def __init__(self, args, state):
         self.args = args
@@ -791,9 +940,11 @@ class LiveRunner:
             actor_object_logit_residual=bool(self.actor.actor_object_logit_residual),
             num_scene_object_tokens=int(self.actor.num_scene_object_tokens),
             detector_backend=self.detector_backend_name,
+            crop_mode=self.args.crop_mode,
+            live_object_tokens=bool(self.args.live_object_tokens),
         )
-        self.buffer = deque(maxlen=TRAINING_SPAN_FRAMES)
         self.detection_buffer = deque(maxlen=TRAINING_SPAN_FRAMES)
+        self.people_buffer = deque(maxlen=TRAINING_SPAN_FRAMES)
         self.frame_count = 0
         self.last_boxes_xyxy = np.zeros((0, 4), dtype=np.float32)
         self.last_det_conf = np.zeros((0,), dtype=np.float32)
@@ -814,7 +965,8 @@ class LiveRunner:
             clip_frames=TRAINING_CLIP_FRAMES,
             clip_sampling="linspace",
             clip_span_frames=TRAINING_SPAN_FRAMES,
-            crop_mode="actor",
+            crop_mode=self.args.crop_mode,
+            live_object_tokens=bool(self.args.live_object_tokens),
         )
 
     def smoke(self):
@@ -870,24 +1022,43 @@ class LiveRunner:
             del self.tracks[track_id]
 
     def run(self):
-        cap = cv2.VideoCapture(camera_source(self.args.camera))
-        if not cap.isOpened():
-            raise RuntimeError(f"Could not open camera source: {self.args.camera}")
-        if self.args.camera_buffer_size > 0:
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, int(self.args.camera_buffer_size))
+        camera = CameraFrameBuffer(
+            self.args.camera,
+            self.args.camera_buffer_size,
+            required_clip_buffer(),
+        )
+        camera.start()
 
-        self.state.update(state="running", message="camera open")
+        self.state.update(
+            state="running",
+            message="camera open",
+            capture_mode="async_camera",
+        )
+        last_processed_camera_frame = 0
         try:
             while True:
-                ok, frame_bgr = cap.read()
-                if not ok:
-                    self.state.update(state="error", message="camera read failed")
-                    time.sleep(0.25)
+                camera_frames, capture_info = camera.snapshot()
+                if not camera_frames:
+                    self.state.update(
+                        state="running",
+                        message=capture_info.get("last_error") or "waiting for camera frames",
+                        capture_mode="async_camera",
+                        capture_fps=capture_info["capture_fps"],
+                        capture_buffer_frames=capture_info["capture_buffer_frames"],
+                        capture_span_sec=capture_info["capture_span_sec"],
+                    )
+                    time.sleep(0.02)
                     continue
 
-                self.frame_count += 1
-                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-                self.buffer.append(frame_rgb)
+                latest_camera_frame = int(camera_frames[-1]["index"])
+                if latest_camera_frame == last_processed_camera_frame:
+                    time.sleep(0.005)
+                    continue
+                last_processed_camera_frame = latest_camera_frame
+
+                self.frame_count = latest_camera_frame
+                frame_bgr = camera_frames[-1]["bgr"].copy()
+                frame_rgb = camera_frames[-1]["rgb"]
 
                 started = time.perf_counter()
                 (
@@ -915,9 +1086,16 @@ class LiveRunner:
                     "confs": self.last_object_conf.copy(),
                     "labels": list(self.last_object_labels),
                 }
+                people_record = {
+                    "boxes_xyxy": self.last_boxes_xyxy.copy(),
+                    "confs": self.last_det_conf.copy(),
+                }
                 self.detection_buffer.append(detection_record)
-                clip_ready = len(self.buffer) >= required_clip_buffer()
+                self.people_buffer.append(people_record)
+                clip_ready = len(camera_frames) >= required_clip_buffer()
                 action_due = clip_ready
+                people_history_ready = len(self.people_buffer) >= required_clip_buffer()
+                object_history_ready = len(self.detection_buffer) >= required_clip_buffer()
 
                 det_age = (
                     None
@@ -925,9 +1103,11 @@ class LiveRunner:
                     else self.frame_count - self.last_detection_frame
                 )
                 message = (
-                    f"buffer {len(self.buffer)}/{TRAINING_SPAN_FRAMES} "
+                    f"camera_buffer {len(camera_frames)}/{TRAINING_SPAN_FRAMES} "
                     f"sampling=linspace span={TRAINING_SPAN_FRAMES} "
-                    f"frames={TRAINING_CLIP_FRAMES}"
+                    f"frames={TRAINING_CLIP_FRAMES} "
+                    f"real_span={capture_info['capture_span_sec']:.1f}s "
+                    f"cam_fps={capture_info['capture_fps']:.1f}"
                 )
                 actors = [
                     {
@@ -964,9 +1144,31 @@ class LiveRunner:
 
                 should_run_action = action_due and len(self.last_boxes_xyxy) > 0
                 if should_run_action:
-                    clip_frames = sample_clip(self.buffer)
-                    clip_detection_records = sample_buffer_items(self.detection_buffer)
-                    crop_center_xy = crop_center_from_boxes(self.last_boxes_xyxy)
+                    clip_frame_records = sample_buffer_items(camera_frames)
+                    clip_frames = [item["rgb"] for item in clip_frame_records]
+                    clip_span_sec = float(
+                        clip_frame_records[-1]["time"] - clip_frame_records[0]["time"]
+                    )
+                    clip_detection_records = (
+                        sample_buffer_items(self.detection_buffer)
+                        if object_history_ready
+                        else []
+                    )
+                    clip_people_records = (
+                        sample_buffer_items(self.people_buffer)
+                        if people_history_ready
+                        else []
+                    )
+                    if self.args.crop_mode == "center":
+                        crop_center_xy = None
+                    elif self.args.crop_mode == "actor_window":
+                        crop_center_xy = crop_center_from_sampled_people(
+                            clip_people_records
+                        )
+                        if crop_center_xy is None:
+                            crop_center_xy = crop_center_from_boxes(self.last_boxes_xyxy)
+                    else:
+                        crop_center_xy = crop_center_from_boxes(self.last_boxes_xyxy)
                     clip, transform = preprocess_clip(
                         clip_frames,
                         MODEL_SHORT_SIDE,
@@ -985,14 +1187,24 @@ class LiveRunner:
                         self.max_actors,
                         self.device,
                     )
-                    object_inputs, packed_objects = pack_temporal_object_tokens(
-                        clip_detection_records,
-                        transform,
-                        MODEL_INPUT_SIZE,
-                        self.actor.num_scene_object_tokens,
-                        self.device,
-                        track_iou_threshold=0.2,
-                    )
+                    if self.args.live_object_tokens and object_history_ready:
+                        object_inputs, packed_objects = pack_temporal_object_tokens(
+                            clip_detection_records,
+                            transform,
+                            MODEL_INPUT_SIZE,
+                            self.actor.num_scene_object_tokens,
+                            self.device,
+                            track_iou_threshold=0.2,
+                        )
+                    else:
+                        object_inputs, packed_objects = pack_temporal_object_tokens(
+                            [],
+                            transform,
+                            MODEL_INPUT_SIZE,
+                            self.actor.num_scene_object_tokens,
+                            self.device,
+                            track_iou_threshold=0.2,
+                        )
                     if valid.any():
                         started = time.perf_counter()
                         logits, presence_logits, object_selection_logits = self.actor(
@@ -1023,9 +1235,17 @@ class LiveRunner:
                             if track is None:
                                 continue
                             action_id = int(action_probs[slot].argmax())
+                            top_indices = np.argsort(-action_probs[slot])[:5]
                             raw_payload = {
                                 "raw_label": ACTION_CLASSES[action_id],
                                 "raw_action_conf": float(action_probs[slot, action_id]),
+                                "raw_top5": [
+                                    {
+                                        "label": ACTION_CLASSES[int(index)],
+                                        "prob": float(action_probs[slot, int(index)]),
+                                    }
+                                    for index in top_indices
+                                ],
                             }
                             if selection_probs is not None:
                                 selected_index = int(selection_probs[slot].argmax())
@@ -1080,9 +1300,14 @@ class LiveRunner:
                             f"sampling=linspace "
                             f"span={TRAINING_SPAN_FRAMES} "
                             f"frames={TRAINING_CLIP_FRAMES} "
-                            f"crop=actor "
+                            f"real_span={clip_span_sec:.1f}s "
+                            f"cam_fps={capture_info['capture_fps']:.1f} "
+                            f"crop={self.args.crop_mode} "
                             f"smooth={ACTION_SMOOTHING_WINDOW} "
                             f"min_obj_samples={MIN_OBJECT_TRACK_SAMPLE_COUNT} "
+                            f"live_objects={int(self.args.live_object_tokens)} "
+                            f"obj_hist={int(object_history_ready)} "
+                            f"people_hist={int(people_history_ready)} "
                             f"frame={self.frame_count}"
                         )
                         packed_object_payload = [
@@ -1123,9 +1348,17 @@ class LiveRunner:
                         last_detector_ms=self.last_detector_ms,
                         last_actor_ms=self.last_actor_ms,
                         det_age_frames=det_age,
+                        capture_mode="async_camera",
+                        capture_fps=capture_info["capture_fps"],
+                        capture_buffer_frames=capture_info["capture_buffer_frames"],
+                        capture_span_sec=capture_info["capture_span_sec"],
+                        latest_camera_frame=capture_info["latest_camera_frame"],
+                        processed_camera_frame=self.frame_count,
+                        object_history_ready=object_history_ready,
+                        people_history_ready=people_history_ready,
                     )
         finally:
-            cap.release()
+            camera.close()
 
 
 class DashboardHandler(BaseHTTPRequestHandler):

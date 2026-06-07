@@ -30,6 +30,24 @@ def parse_args():
     parser.add_argument("--max-objects", type=int, default=None)
     parser.add_argument("--opset", type=int, default=17)
     parser.add_argument("--precision", choices=["fp16", "fp32"], default="fp16")
+    parser.add_argument("--mask-input-dtype", choices=["bool", "int32"], default="bool")
+    parser.add_argument(
+        "--disable-token-pruning",
+        action="store_true",
+        help=(
+            "Export a TensorRT-friendlier actor graph by forcing keep_rate=1.0 "
+            "and keep_rate_merge=1.0. This changes the inference graph and must "
+            "be drift-checked before live use."
+        ),
+    )
+    parser.add_argument(
+        "--trt-safe-attention",
+        action="store_true",
+        help=(
+            "Export attention as explicit matmul/mask/softmax/matmul and avoid "
+            "tensor .any() branches in attention. Must be drift-checked before live use."
+        ),
+    )
     parser.add_argument("--workspace-mib", type=int, default=1024)
     parser.add_argument("--max-aux-streams", type=int, default=0)
     parser.add_argument("--builder-optimization-level", type=int, default=None)
@@ -108,6 +126,7 @@ def make_dummy_inputs(
     num_object_classes,
     scene_object_tokens,
     device,
+    mask_input_dtype="bool",
 ):
     import torch
 
@@ -122,8 +141,9 @@ def make_dummy_inputs(
         dtype=torch.float32,
         device=device,
     )
-    valid = torch.zeros((batch_size, max_actors), dtype=torch.bool, device=device)
-    valid[:, 0] = True
+    mask_dtype = torch.bool if mask_input_dtype == "bool" else torch.int32
+    valid = torch.zeros((batch_size, max_actors), dtype=mask_dtype, device=device)
+    valid[:, 0] = 1
     if not scene_object_tokens:
         return (video, boxes, valid), ["video", "boxes", "valid"]
 
@@ -145,7 +165,7 @@ def make_dummy_inputs(
     )
     object_valid = torch.zeros(
         (batch_size, max_objects),
-        dtype=torch.bool,
+        dtype=mask_dtype,
         device=device,
     )
     if max_objects > 0:
@@ -156,7 +176,7 @@ def make_dummy_inputs(
         )
         object_classes[:, 0] = 1
         object_confs[:, 0] = 0.95
-        object_valid[:, 0] = True
+        object_valid[:, 0] = 1
     return (
         video,
         boxes,
@@ -248,6 +268,7 @@ def export_onnx(model, onnx_out, args, clip_frames, max_actors, max_objects, hpa
         num_object_classes,
         scene_object_tokens,
         device,
+        args.mask_input_dtype,
     )
     with torch.inference_mode():
         outputs = wrapped(*dummy_inputs)
@@ -283,12 +304,15 @@ def export_onnx(model, onnx_out, args, clip_frames, max_actors, max_objects, hpa
 
 
 def build_engine(trtexec, onnx_out, engine_out, args):
+    layer_info_out = Path(str(engine_out) + ".layer_info.json")
     command = [
         trtexec,
         f"--onnx={onnx_out}",
         f"--saveEngine={engine_out}",
         f"--memPoolSize=workspace:{args.workspace_mib}M",
         f"--maxAuxStreams={args.max_aux_streams}",
+        "--profilingVerbosity=detailed",
+        f"--exportLayerInfo={layer_info_out}",
         "--skipInference",
     ]
     if args.precision == "fp16":
@@ -298,7 +322,7 @@ def build_engine(trtexec, onnx_out, engine_out, args):
     if args.builder_optimization_level is not None:
         command.append(f"--builderOptimizationLevel={int(args.builder_optimization_level)}")
     run_command(command)
-    return command
+    return command, layer_info_out
 
 
 def benchmark_engine(trtexec, engine_out, args):
@@ -314,7 +338,21 @@ def benchmark_engine(trtexec, engine_out, args):
     return command
 
 
-def checkpoint_payload(checkpoint_path):
+def export_hparam_overrides(args):
+    overrides = {}
+    if args.disable_token_pruning:
+        overrides.update(
+            {
+                "keep_rate": 1.0,
+                "keep_rate_merge": 1.0,
+            }
+        )
+    if args.trt_safe_attention:
+        overrides["trt_safe_attention"] = 1
+    return overrides
+
+
+def checkpoint_payload(checkpoint_path, hparam_overrides=None):
     from train import _load_checkpoint
 
     checkpoint = _load_checkpoint(checkpoint_path)
@@ -325,6 +363,9 @@ def checkpoint_payload(checkpoint_path):
         raise RuntimeError(f"No hyperparameters found in checkpoint: {checkpoint_path}")
     if not hparams.get("actor_prompt", 0):
         raise RuntimeError("Checkpoint is not an actor-prompt checkpoint.")
+    original_hparams = dict(hparams)
+    if hparam_overrides:
+        hparams.update(hparam_overrides)
     export_hparams = {
         "actor_prompt": int(hparams.get("actor_prompt", 0)),
         "actor_presence_head": int(hparams.get("actor_presence_head", 0)),
@@ -341,9 +382,20 @@ def checkpoint_payload(checkpoint_path):
         "n_frames": int(hparams.get("n_frames", 16)),
         "num_actor_tokens": int(hparams.get("num_actor_tokens", 0)),
         "num_classes": int(hparams.get("num_classes", 31)),
+        "keep_rate": float(hparams.get("keep_rate", 1.0)),
+        "keep_rate_merge": float(hparams.get("keep_rate_merge", 1.0)),
+        "merge_type": str(hparams.get("merge_type", "")),
+        "trt_safe_attention": int(hparams.get("trt_safe_attention", 0)),
     }
     return {
         "hparams": export_hparams,
+        "hparam_overrides": dict(hparam_overrides or {}),
+        "original_hparams": {
+            "keep_rate": float(original_hparams.get("keep_rate", 1.0)),
+            "keep_rate_merge": float(original_hparams.get("keep_rate_merge", 1.0)),
+            "merge_type": str(original_hparams.get("merge_type", "")),
+            "trt_safe_attention": int(original_hparams.get("trt_safe_attention", 0)),
+        },
         "checkpoint_metadata": {
             "epoch": checkpoint.get("epoch"),
             "global_step": checkpoint.get("global_step"),
@@ -354,7 +406,7 @@ def checkpoint_payload(checkpoint_path):
 def internal_inspect(args):
     if not args.internal_json_out:
         raise ValueError("--internal-json-out is required for inspect mode.")
-    payload = checkpoint_payload(args.checkpoint)
+    payload = checkpoint_payload(args.checkpoint, export_hparam_overrides(args))
     Path(args.internal_json_out).write_text(json.dumps(payload) + "\n")
 
 
@@ -371,7 +423,11 @@ def internal_export(args):
         raise ValueError("--max-actors is required for export mode.")
 
     device = torch.device(args.export_device)
-    model, hparams = load_actor_model(args.checkpoint, device)
+    model, hparams = load_actor_model(
+        args.checkpoint,
+        device,
+        hparam_overrides=export_hparam_overrides(args),
+    )
     checkpoint_actors = int(hparams.get("num_actor_tokens", 0))
     if args.max_actors != checkpoint_actors:
         raise ValueError(
@@ -413,6 +469,10 @@ def run_inspect_child(args):
         "--internal-json-out",
         str(inspect_out),
     ]
+    if args.disable_token_pruning:
+        command.append("--disable-token-pruning")
+    if args.trt_safe_attention:
+        command.append("--trt-safe-attention")
     run_command(command)
     payload = json.loads(inspect_out.read_text())
     inspect_out.unlink(missing_ok=True)
@@ -443,7 +503,13 @@ def run_export_child(args, onnx_out, clip_frames, max_actors, max_objects):
         str(max_objects),
         "--opset",
         str(args.opset),
+        "--mask-input-dtype",
+        args.mask_input_dtype,
     ]
+    if args.disable_token_pruning:
+        command.append("--disable-token-pruning")
+    if args.trt_safe_attention:
+        command.append("--trt-safe-attention")
     run_command(command)
     return command
 
@@ -463,6 +529,8 @@ def main():
 
     payload = run_inspect_child(args)
     hparams = payload["hparams"]
+    hparam_overrides = payload.get("hparam_overrides", {})
+    original_hparams = payload.get("original_hparams", {})
     checkpoint_metadata = payload["checkpoint_metadata"]
     (
         onnx_out,
@@ -502,7 +570,7 @@ def main():
     )
     print(f"Wrote ONNX: {onnx_out} ({onnx_out.stat().st_size / 1e6:.1f} MB)", flush=True)
 
-    build_command = build_engine(trtexec, onnx_out, engine_out, args)
+    build_command, layer_info_out = build_engine(trtexec, onnx_out, engine_out, args)
     print(
         f"Wrote engine: {engine_out} ({engine_out.stat().st_size / 1e6:.1f} MB)",
         flush=True,
@@ -520,6 +588,15 @@ def main():
         "engine": str(engine_out),
         "precision": args.precision,
         "no_tf32": bool(args.no_tf32),
+        "disable_token_pruning": bool(args.disable_token_pruning),
+        "hparam_overrides": hparam_overrides,
+        "original_hparams": original_hparams,
+        "export_hparams": {
+            "keep_rate": float(hparams.get("keep_rate", 1.0)),
+            "keep_rate_merge": float(hparams.get("keep_rate_merge", 1.0)),
+            "merge_type": str(hparams.get("merge_type", "")),
+            "trt_safe_attention": int(hparams.get("trt_safe_attention", 0)),
+        },
         "input_shapes": {
             "video": [args.batch_size, clip_frames, 3, args.input_size, args.input_size],
             "boxes": [args.batch_size, max_actors, 4],
@@ -530,8 +607,10 @@ def main():
             "presence": [args.batch_size, max_actors],
         },
         "trtexec": trtexec,
+        "mask_input_dtype": args.mask_input_dtype,
         "export_command": export_command,
         "build_command": build_command,
+        "layer_info": str(layer_info_out),
         "benchmark_command": benchmark_command,
         "elapsed_sec": round(time.time() - started, 3),
     }

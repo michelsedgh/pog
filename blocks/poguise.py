@@ -303,6 +303,7 @@ class KTPAttention(Attention):
         n_key_tokens=1,
         bbox_prior_weight=0.0,
         needs_full_attention=False,
+        trt_safe_attention=False,
     ):
         super(KTPAttention, self).__init__(
             dim, num_heads, qkv_bias, qk_scale, attn_drop, proj_drop, attn_head_dim
@@ -321,6 +322,7 @@ class KTPAttention(Attention):
         self.n_key_tokens = n_key_tokens
         self.bbox_prior_weight = float(bbox_prior_weight)
         self.needs_full_attention = bool(needs_full_attention)
+        self.trt_safe_attention = bool(trt_safe_attention)
 
     def forward_part1(self, x, size=None, key_padding_mask=None):
         B, N, C = x.shape
@@ -349,7 +351,11 @@ class KTPAttention(Attention):
             qkv[2],
         )  # make torchscript happy (cannot use tensor as tuple)
 
-        if self.keep_rate >= 1 and not self.needs_full_attention:
+        if (
+            self.keep_rate >= 1
+            and not self.needs_full_attention
+            and not self.trt_safe_attention
+        ):
             # use flash attention
             dropout_p = self.attn_drop.p if self.training else 0.0
             attn_mask = None
@@ -377,7 +383,9 @@ class KTPAttention(Attention):
             attn = None
         else:
             attn = (q * self.scale) @ k.transpose(-2, -1)
-            if key_padding_mask is not None and key_padding_mask.any():
+            if key_padding_mask is not None and (
+                self.trt_safe_attention or key_padding_mask.any()
+            ):
                 attn = attn.masked_fill(
                     key_padding_mask[:, None, None, :],
                     torch.finfo(attn.dtype).min,
@@ -426,7 +434,9 @@ class KTPAttention(Attention):
             if num_keep_tokens > 0:
                 # class token query enhancement
                 attn_topk = attn.clone()
-                if key_padding_mask is not None and key_padding_mask.any():
+                if key_padding_mask is not None and (
+                    self.trt_safe_attention or key_padding_mask.any()
+                ):
                     attn_topk = attn_topk.masked_fill(
                         key_padding_mask[:, None, :, None],
                         0.0,

@@ -169,6 +169,7 @@ wandb/
 *.pkl
 *.pickle
 *.ckpt
+*.pid
 .vscode
 toyota_smarthome_skeleton_v1.2.zip
 
@@ -188,10 +189,16 @@ checkpoints_smoke/
 exports/
 object_actor_live/exports/
 object_actor_live/logs/
+analysis_outputs/
+live_test_logs/
 toyota_actor_visualizations/
 rf-detr-*.pth
 *.engine
 *.onnx
+metrics-*.csv
+base_actor_val_predictions.csv
+toyota_object_signal_val_detail.csv
+toyota_rfdetr_*.jsonl
 
 # One-off local frame packaging helpers.
 utils/build_toyota_frames_tar.sh
