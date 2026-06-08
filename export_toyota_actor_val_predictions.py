@@ -8,13 +8,11 @@ import torch
 from pytorch_lightning import seed_everything
 
 from datamodule.base_datamod import BaseDataModule
-from datasets.toyotasm import CS_DICT, ToyotaSMDataset
+from datasets.toyota_action_taxonomy import toyota_action_names
+from datasets.toyotasm import ToyotaSMDataset
 from models.poguise import POGUISE
 from modules.heatmap_module import HeatmapModule
 from train import _explicit_cli_overrides, _load_checkpoint, _merged_hparams, build_parser
-
-
-ID_TO_ACTION = {idx - 1: name for name, idx in CS_DICT.items()}
 
 
 def _add_export_args(parser):
@@ -31,6 +29,9 @@ def _move_target(target, device):
 
 
 def _unpack_model_data(data):
+    if len(data) == 4:
+        preds, hm_preds, presence_logits, object_selection_logits = data
+        return preds
     if len(data) == 3:
         preds, hm_preds, presence_logits = data
     else:
@@ -50,6 +51,15 @@ def main():
     hparams.dataset = "toyotasm"
     hparams.dataset_artifact = "toyotasm"
     hparams.limit_val_batches = 1.0
+    id_to_action = {
+        index: action_name
+        for index, action_name in enumerate(
+            toyota_action_names(
+                getattr(hparams, "task_type", "CS"),
+                getattr(hparams, "toyota_action_taxonomy", "toyota_31"),
+            )
+        )
+    }
 
     seed_everything(hparams.seed)
 
@@ -114,9 +124,9 @@ def main():
                         "file_id": file_id,
                         "slot": slot,
                         "label_idx": label_idx,
-                        "label": ID_TO_ACTION.get(label_idx, str(label_idx)),
+                        "label": id_to_action.get(label_idx, str(label_idx)),
                         "pred_idx": pred_idx,
-                        "pred": ID_TO_ACTION.get(pred_idx, str(pred_idx)),
+                        "pred": id_to_action.get(pred_idx, str(pred_idx)),
                         "prob_true": float(probs[sample_idx, slot, label_idx].item()),
                     }
                     for class_idx, value in enumerate(row_logits.tolist()):

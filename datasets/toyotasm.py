@@ -16,7 +16,6 @@ import tempfile
 import zipfile
 from utils.ntu import frame_utils as utils
 from datasets.object_vocab import (
-    ACTION_OBJECT_CONFUSERS,
     DETECTOR_TO_OBJECT,
     NONE_OBJECT_ID,
     NUM_OBJECT_CLASSES,
@@ -31,6 +30,18 @@ from datasets.object_vocab import (
     parse_object_camera_allowlist,
     parse_object_ignore_regions,
 )
+from datasets.toyota_action_taxonomy import (
+    CS_DICT,
+    CV_DICT,
+    TOYOTA_ACTION_TAXONOMIES,
+    normalize_toyota_action_taxonomy,
+    toyota_action_names,
+    toyota_action_object_map,
+    toyota_confuser_action_names,
+    toyota_label_dict,
+    toyota_num_classes,
+    toyota_objectless_action_names,
+)
 
 try:
     import av
@@ -41,62 +52,6 @@ try:
     from mmpose.codecs import UDPHeatmap
 except ImportError:
     UDPHeatmap = None
-
-CS_DICT = {
-    "Cook.Cleandishes": 1,
-    "Cook.Cleanup": 2,
-    "Cook.Cut": 3,
-    "Cook.Stir": 4,
-    "Cook.Usestove": 5,
-    "Cutbread": 6,
-    "Drink.Frombottle": 7,
-    "Drink.Fromcan": 8,
-    "Drink.Fromcup": 9,
-    "Drink.Fromglass": 10,
-    "Eat.Attable": 11,
-    "Eat.Snack": 12,
-    "Enter": 13,
-    "Getup": 14,
-    "Laydown": 15,
-    "Leave": 16,
-    "Makecoffee.Pourgrains": 17,
-    "Makecoffee.Pourwater": 18,
-    "Maketea.Boilwater": 19,
-    "Maketea.Insertteabag": 20,
-    "Pour.Frombottle": 21,
-    "Pour.Fromcan": 22,
-    "Pour.Fromkettle": 23,
-    "Readbook": 24,
-    "Sitdown": 25,
-    "Takepills": 26,
-    "Uselaptop": 27,
-    "Usetablet": 28,
-    "Usetelephone": 29,
-    "Walk": 30,
-    "WatchTV": 31,
-}
-CV_DICT = {
-    "Cutbread": 1,
-    "Drink.Frombottle": 2,
-    "Drink.Fromcan": 3,
-    "Drink.Fromcup": 4,
-    "Drink.Fromglass": 5,
-    "Eat.Attable": 6,
-    "Eat.Snack": 7,
-    "Enter": 8,
-    "Getup": 9,
-    "Leave": 10,
-    "Pour.Frombottle": 11,
-    "Pour.Fromcan": 12,
-    "Readbook": 13,
-    "Sitdown": 14,
-    "Takepills": 15,
-    "Uselaptop": 16,
-    "Usetablet": 17,
-    "Usetelephone": 18,
-    "Walk": 19,
-}
-
 
 class ToyotaSMDataset(Dataset):
     def __init__(
@@ -124,6 +79,24 @@ class ToyotaSMDataset(Dataset):
                 "semantics come from scene object tokens."
             )
         self.task_type = kwargs["task_type"]
+        self.action_taxonomy = normalize_toyota_action_taxonomy(
+            kwargs.get("toyota_action_taxonomy", "toyota_31")
+        )
+        self.action_names = toyota_action_names(
+            self.task_type,
+            self.action_taxonomy,
+        )
+        expected_num_classes = toyota_num_classes(
+            self.task_type,
+            self.action_taxonomy,
+        )
+        configured_num_classes = int(kwargs.get("num_classes", expected_num_classes))
+        if configured_num_classes != expected_num_classes:
+            raise ValueError(
+                "Toyota action taxonomy/num_classes mismatch: "
+                f"{self.action_taxonomy} {self.task_type} expects "
+                f"{expected_num_classes} classes, got {configured_num_classes}."
+            )
         self.n_frames = kwargs["n_frames"]
         self.n_frames_stride = kwargs.get("n_frames_stride", 1)
         self.multi_thread_decode = bool(kwargs.get("multi_thread_decode", 1))
@@ -200,9 +173,19 @@ class ToyotaSMDataset(Dataset):
             raise ValueError(
                 "objectless_hard_negative_min_sampled_object_frames must be >= 0"
             )
+        self.action_object_map = toyota_action_object_map(
+            self.task_type,
+            self.action_taxonomy,
+        )
+        self.objectless_action_names = set(
+            toyota_objectless_action_names(
+                self.task_type,
+                self.action_taxonomy,
+            )
+        )
         self.objectless_hard_negative_object_ids = {
             int(OBJECT_TO_ID[object_name])
-            for object_names in STRONG_ACTION_OBJECTS.values()
+            for object_names in self.action_object_map.values()
             for object_name in object_names
             if object_name in OBJECT_TO_ID
         }
@@ -448,6 +431,16 @@ class ToyotaSMDataset(Dataset):
         parser.add_argument("--uniform_sampling", type=int, default=1)
         parser.add_argument("--backend_video", type=str, default="torch")
         parser.add_argument("--task_type", type=str, default="CS")
+        parser.add_argument(
+            "--toyota_action_taxonomy",
+            type=str,
+            default="toyota_31",
+            choices=TOYOTA_ACTION_TAXONOMIES,
+            help=(
+                "Toyota action label space. product_v1 merges Drink.* into "
+                "Drink, Cook.Cut+Cutbread into Cut, and drops Takepills."
+            ),
+        )
         parser.add_argument(
             "--toyota_frame_source",
             type=str,
@@ -811,9 +804,15 @@ class ToyotaSMDataset(Dataset):
     def _expected_interaction_object_ids(self, action_name):
         return {
             int(OBJECT_TO_ID[object_name])
-            for object_name in STRONG_ACTION_OBJECTS.get(action_name, ())
+            for object_name in self._expected_interaction_object_names(action_name)
             if object_name in OBJECT_TO_ID
         }
+
+    def _expected_interaction_object_names(self, action_name):
+        object_names = STRONG_ACTION_OBJECTS.get(action_name)
+        if object_names is None:
+            object_names = self.action_object_map.get(action_name, ())
+        return object_names
 
     def _expected_interaction_frames(self, file_id, action_name):
         expected_ids = self._expected_interaction_object_ids(action_name)
@@ -859,7 +858,7 @@ class ToyotaSMDataset(Dataset):
         if not (
             self.objectless_hard_negative_sampling
             and self.scene_object_tokens
-            and action_name in OBJECTLESS_ACTIONS
+            and action_name in self.objectless_action_names
             and self.objectless_hard_negative_min_sampled_object_frames > 0
         ):
             return frames_idx
@@ -1035,7 +1034,9 @@ class ToyotaSMDataset(Dataset):
             file_id = self.data_df.iloc[idx].file_id
             n_frames = self._num_frames(file_id)
             video_height, video_width = self._video_size(file_id)
+            row = self.data_df.iloc[idx]
             label = self.y[idx]
+            raw_action_name = str(row.raw_action)
             pose_available = None
             if (
                 self.actor_prompt
@@ -1084,7 +1085,7 @@ class ToyotaSMDataset(Dataset):
                 pose_available=pose_available,
             )
             action_name = (
-                self._action_name_from_label(int(label))
+                raw_action_name
                 if (self.interaction_teacher_enabled or self.scene_object_tokens)
                 else None
             )
@@ -1173,6 +1174,13 @@ class ToyotaSMDataset(Dataset):
                             actor_target,
                             height=frames.shape[2],
                             width=frames.shape[3],
+                            action_names_by_slot={
+                                int(slot): raw_action_name
+                                for slot in torch.nonzero(
+                                    actor_target["valid"],
+                                    as_tuple=False,
+                                ).flatten()
+                            },
                         )
                     )
             if self.n_landmarks:
@@ -1340,7 +1348,11 @@ class ToyotaSMDataset(Dataset):
         label_dict = self._label_dict()
         candidate_labels = [
             int(label_dict[name]) - 1
-            for name in ACTION_OBJECT_CONFUSERS.get(action_name, ())
+            for name in toyota_confuser_action_names(
+                action_name,
+                self.task_type,
+                self.action_taxonomy,
+            )
             if name in label_dict
         ]
         if not candidate_labels:
@@ -1686,10 +1698,9 @@ class ToyotaSMDataset(Dataset):
         return tracks
 
     def _action_name_from_label(self, label):
-        target_id = int(label) + 1
-        for action_name, action_id in self._label_dict().items():
-            if int(action_id) == target_id:
-                return action_name
+        label = int(label)
+        if 0 <= label < len(self.action_names):
+            return self.action_names[label]
         return None
 
     def _interaction_heatmap_from_box(self, box):
@@ -1991,6 +2002,7 @@ class ToyotaSMDataset(Dataset):
         track_to_object_slot,
         height,
         width,
+        action_names_by_slot=None,
     ):
         interaction_cls = torch.full(
             (self.num_actor_tokens,), NONE_OBJECT_ID, dtype=torch.long
@@ -2022,12 +2034,16 @@ class ToyotaSMDataset(Dataset):
             action_label = int(actor_target["actions"][slot])
             if action_label < 0:
                 continue
-            action_name = self._action_name_from_label(action_label)
+            action_name = None
+            if action_names_by_slot is not None:
+                action_name = action_names_by_slot.get(slot)
+            if action_name is None:
+                action_name = self._action_name_from_label(action_label)
             if action_name is None:
                 continue
             positive_ids = [
                 int(OBJECT_TO_ID[object_name])
-                for object_name in STRONG_ACTION_OBJECTS.get(action_name, ())
+                for object_name in self._expected_interaction_object_names(action_name)
                 if object_name in OBJECT_TO_ID
             ]
             if not positive_ids:
@@ -2110,6 +2126,7 @@ class ToyotaSMDataset(Dataset):
         actor_target,
         height,
         width,
+        action_names_by_slot=None,
     ):
         object_tracks = self._object_tracks(object_entries)
         scene_object_target = {}
@@ -2134,6 +2151,7 @@ class ToyotaSMDataset(Dataset):
             track_to_object_slot,
             height,
             width,
+            action_names_by_slot=action_names_by_slot,
         )
         if self.scene_object_tokens:
             scene_object_target = self._augment_scene_object_target(scene_object_target)
@@ -2336,7 +2354,7 @@ class ToyotaSMDataset(Dataset):
         return None
 
     def _label_dict(self):
-        return CS_DICT if self.task_type == "CS" else CV_DICT
+        return toyota_label_dict(self.task_type, self.action_taxonomy)
 
     def _load_split(self):
         if self.set_type == "test":
@@ -2366,8 +2384,8 @@ class ToyotaSMDataset(Dataset):
             data_df = pd.read_csv(split_path)
             data_df.columns = ["file_id"]
             data_df["file_id"] = data_df["file_id"].apply(lambda x: x[:-4])
-        data_df["label"] = data_df.file_id.apply(lambda x: x.split("_")[0])
-        data_df["label"] = data_df.label.map(self._label_dict())
+        data_df["raw_action"] = data_df.file_id.apply(lambda x: x.split("_")[0])
+        data_df["label"] = data_df.raw_action.map(self._label_dict())
         data_df = data_df.dropna(subset=["label"]).copy()
         data_df["label"] = data_df["label"].astype(int)
         return data_df
@@ -2398,8 +2416,8 @@ class ToyotaSMDataset(Dataset):
         rows = []
         label_dict = self._label_dict()
         for file_id in sorted(names):
-            label_name = file_id.split("_")[0]
-            if label_name not in label_dict:
+            raw_action = file_id.split("_")[0]
+            if raw_action not in label_dict:
                 continue
             subject = self._subject_id(file_id)
             if subject is None:
@@ -2407,7 +2425,8 @@ class ToyotaSMDataset(Dataset):
             rows.append(
                 {
                     "file_id": file_id,
-                    "label": label_dict[label_name],
+                    "raw_action": raw_action,
+                    "label": label_dict[raw_action],
                     "subject": subject,
                 }
             )

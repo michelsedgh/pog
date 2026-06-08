@@ -13,6 +13,7 @@ import torch
 from PIL import Image
 
 from datasets.object_vocab import DETECTOR_TO_OBJECT, NONE_OBJECT_ID, OBJECT_CLASSES, OBJECT_TO_ID
+from datasets.toyota_action_taxonomy import toyota_action_names
 from utils.actor_tensorrt import TensorRTActorEngine
 from utils.rfdetr_tensorrt import TensorRTRFDETRNano
 
@@ -26,44 +27,19 @@ ACTION_SMOOTHING_WINDOW = 1
 MIN_OBJECT_TRACK_SAMPLE_COUNT = 2
 
 
-ACTION_CLASSES = [
-    "Cook.Cleandishes",
-    "Cook.Cleanup",
-    "Cook.Cut",
-    "Cook.Stir",
-    "Cook.Usestove",
-    "Cutbread",
-    "Drink.Frombottle",
-    "Drink.Fromcan",
-    "Drink.Fromcup",
-    "Drink.Fromglass",
-    "Eat.Attable",
-    "Eat.Snack",
-    "Enter",
-    "Getup",
-    "Laydown",
-    "Leave",
-    "Makecoffee.Pourgrains",
-    "Makecoffee.Pourwater",
-    "Maketea.Boilwater",
-    "Maketea.Insertteabag",
-    "Pour.Frombottle",
-    "Pour.Fromcan",
-    "Pour.Fromkettle",
-    "Readbook",
-    "Sitdown",
-    "Takepills",
-    "Uselaptop",
-    "Usetablet",
-    "Usetelephone",
-    "Walk",
-    "WatchTV",
-]
+ACTION_CLASSES = toyota_action_names("CS", "toyota_31")
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument("--task-type", type=str, default="CS", choices=["CS", "CV"])
+    parser.add_argument(
+        "--toyota-action-taxonomy",
+        type=str,
+        default="toyota_31",
+        choices=["toyota_31", "product_v1"],
+    )
     parser.add_argument(
         "--actor-engine",
         type=str,
@@ -110,6 +86,11 @@ def parse_args():
     if not 0.0 <= args.object_threshold <= 1.0:
         raise ValueError("--object-threshold must be in [0, 1]")
     return args
+
+
+def configure_action_classes(args):
+    global ACTION_CLASSES
+    ACTION_CLASSES = toyota_action_names(args.task_type, args.toyota_action_taxonomy)
 
 
 def required_clip_buffer():
@@ -714,6 +695,11 @@ def run_actor_smoke(args, actor):
         track_iou_threshold=0.2,
     )
     logits, presence, object_selection = actor(clip, boxes, valid, object_inputs)
+    if logits.shape[-1] != len(ACTION_CLASSES):
+        raise RuntimeError(
+            "Actor output class count does not match dashboard taxonomy: "
+            f"logits={logits.shape[-1]}, labels={len(ACTION_CLASSES)}."
+        )
     probs = torch.softmax(logits[0, 0], dim=-1)
     print(
         "smoke ok:",
@@ -1214,6 +1200,12 @@ class LiveRunner:
                             object_inputs,
                         )
                         self.last_actor_ms = (time.perf_counter() - started) * 1000.0
+                        if logits.shape[-1] != len(ACTION_CLASSES):
+                            raise RuntimeError(
+                                "Actor output class count does not match dashboard "
+                                f"taxonomy: logits={logits.shape[-1]}, "
+                                f"labels={len(ACTION_CLASSES)}."
+                            )
                         action_probs = torch.softmax(logits[0], dim=-1).detach().cpu().numpy()
                         presence_probs = (
                             torch.sigmoid(presence_logits[0]).detach().cpu().numpy()
@@ -1431,6 +1423,7 @@ setInterval(poll, 1000); poll();
 
 def main():
     args = parse_args()
+    configure_action_classes(args)
     if args.smoke:
         actor = load_actor_backend(args)
         run_actor_smoke(args, actor)

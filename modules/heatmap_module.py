@@ -11,17 +11,22 @@ from losses.heatmap_loss import KeypointMSELoss
 from losses.interaction_heatmap_losses import interaction_heatmap_loss
 from losses.poguiseplus_losses import (
     heatmap_frobenius_loss,
+    heatmap_mse_loss,
 )
 import pickle
 from datasets.object_vocab import (
-    GROUPS,
     NUM_OBJECT_CLASSES,
     OBJECT_CLASSES,
     OBJECT_TO_ID,
-    OBJECTLESS_ACTIONS,
-    STRONG_ACTION_OBJECTS,
 )
-from datasets.toyotasm import CS_DICT, CV_DICT
+from datasets.toyota_action_taxonomy import (
+    toyota_action_names,
+    toyota_action_object_map,
+    toyota_action_to_index,
+    toyota_group_action_names,
+    toyota_label_dict,
+    toyota_objectless_action_names,
+)
 
 try:
     from grad_weights.nash_mtl import NashMTL
@@ -34,7 +39,7 @@ except ImportError:
     DeepSpeedCPUAdam = None
 
 
-OBJECT_SELECTION_LOSS_WEIGHT = 0.5
+DEFAULT_AUX_OBJECT_SELECTION_LOSS_WEIGHT = 0.5
 DEPLOY_KEY_ACTIONS = (
     "Uselaptop",
     "Readbook",
@@ -79,8 +84,57 @@ class HeatmapModule(pl.LightningModule):
         self.poguiseplus_heatmap_log_eps = float(
             hparams.get("poguiseplus_heatmap_log_eps", 1e-6)
         )
+        self.poguiseplus_normalized_heatmap_loss = bool(
+            hparams.get("poguiseplus_normalized_heatmap_loss", 0)
+        )
+        self.poguiseplus_heatmap_mse_scale = float(
+            hparams.get("poguiseplus_heatmap_mse_scale", 1000.0)
+        )
+        if self.poguiseplus_heatmap_mse_scale <= 0:
+            raise ValueError("poguiseplus_heatmap_mse_scale must be positive")
+        self.aux_object_selection_loss_weight = float(
+            hparams.get(
+                "aux_object_selection_loss_weight",
+                DEFAULT_AUX_OBJECT_SELECTION_LOSS_WEIGHT,
+            )
+        )
+        if self.aux_object_selection_loss_weight < 0:
+            raise ValueError("aux_object_selection_loss_weight must be >= 0")
+        self.objectless_object_action_suppression_loss_weight = float(
+            hparams.get("objectless_object_action_suppression_loss_weight", 0.0)
+        )
+        if self.objectless_object_action_suppression_loss_weight < 0:
+            raise ValueError(
+                "objectless_object_action_suppression_loss_weight must be >= 0"
+            )
         self.num_classes = hparams.num_classes
         self.dataset_name = hparams.dataset_artifact
+        self.is_toyota = str(self.dataset_name).lower() == "toyotasm"
+        self.task_type = hparams.get("task_type", "CS")
+        self.action_taxonomy = hparams.get("toyota_action_taxonomy", "toyota_31")
+        if self.is_toyota:
+            self.action_names = toyota_action_names(
+                self.task_type,
+                self.action_taxonomy,
+            )
+            if self.num_classes != len(self.action_names):
+                raise ValueError(
+                    "HeatmapModule num_classes does not match Toyota action taxonomy: "
+                    f"{self.action_taxonomy} {self.task_type} expects "
+                    f"{len(self.action_names)}, got {self.num_classes}."
+                )
+            self.action_to_index = toyota_action_to_index(
+                self.task_type,
+                self.action_taxonomy,
+            )
+            self.action_object_map = toyota_action_object_map(
+                self.task_type,
+                self.action_taxonomy,
+            )
+        else:
+            self.action_names = [str(index) for index in range(self.num_classes)]
+            self.action_to_index = {}
+            self.action_object_map = {}
 
         # Create model
         self.lr = hparams.lr
@@ -161,7 +215,7 @@ class HeatmapModule(pl.LightningModule):
         )
         self.hard_negative_object_ids = {
             int(OBJECT_TO_ID[object_name]): object_name
-            for object_names in STRONG_ACTION_OBJECTS.values()
+            for object_names in self.action_object_map.values()
             for object_name in object_names
             if object_name in OBJECT_TO_ID
         }
@@ -362,23 +416,28 @@ class HeatmapModule(pl.LightningModule):
         return params
 
     def _toyota_label_dict(self):
-        return CS_DICT if self.model.hparams.get("task_type", "CS") == "CS" else CV_DICT
+        return toyota_label_dict(self.task_type, self.action_taxonomy)
 
     def _build_group_indices(self):
-        label_dict = self._toyota_label_dict()
+        if not self.is_toyota:
+            return {}
+        action_to_index = self.action_to_index
         groups = {}
-        for group_name, action_names in GROUPS.items():
+        for group_name, action_names in toyota_group_action_names(
+            self.task_type,
+            self.action_taxonomy,
+        ).items():
             indices = [
-                int(label_dict[action_name]) - 1
+                int(action_to_index[action_name])
                 for action_name in action_names
-                if action_name in label_dict
+                if action_name in action_to_index
             ]
             if indices:
                 groups[group_name] = torch.tensor(indices, dtype=torch.long)
         object_action_indices = [
-            int(label_dict[action_name]) - 1
-            for action_name in STRONG_ACTION_OBJECTS
-            if action_name in label_dict
+            int(action_to_index[action_name])
+            for action_name in self.action_object_map
+            if action_name in action_to_index
         ]
         if object_action_indices:
             groups["object_mapped"] = torch.tensor(
@@ -386,23 +445,24 @@ class HeatmapModule(pl.LightningModule):
                 dtype=torch.long,
             )
         objectless_indices = [
-            int(label_dict[action_name]) - 1
-            for action_name in OBJECTLESS_ACTIONS
-            if action_name in label_dict
+            int(action_to_index[action_name])
+            for action_name in toyota_objectless_action_names(
+                self.task_type,
+                self.action_taxonomy,
+            )
+            if action_name in action_to_index
         ]
         if objectless_indices:
             groups["objectless"] = torch.tensor(objectless_indices, dtype=torch.long)
         return groups
 
     def _interaction_audit_action_indices(self):
-        label_dict = self._toyota_label_dict()
+        if not self.is_toyota:
+            return []
         indices = []
-        for action_name, action_id in sorted(
-            label_dict.items(),
-            key=lambda item: item[1],
-        ):
+        for action_idx, action_name in enumerate(self.action_names):
             metric_name = action_name.replace(".", "_")
-            indices.append((metric_name, int(action_id) - 1))
+            indices.append((metric_name, int(action_idx)))
         return indices
 
     def _pose_heatmap_pred(self, hm_preds):
@@ -1143,7 +1203,8 @@ class HeatmapModule(pl.LightningModule):
         ):
             if loss.numel() != 2:
                 raise RuntimeError(
-                    f"Nash-MTL expects two tasks [action, heatmap], got {loss.numel()}"
+                    "Nash-MTL expects two tasks [main_deploy, grounding_aux], "
+                    f"got {loss.numel()}"
                 )
             _, extra_outputs = self.grad_weight.backward(
                 losses=loss,
@@ -1161,6 +1222,22 @@ class HeatmapModule(pl.LightningModule):
                 )
                 self.log(
                     "train_nash_weight_heatmap",
+                    weights[1].detach(),
+                    on_step=True,
+                    on_epoch=True,
+                    logger=True,
+                    sync_dist=True,
+                )
+                self.log(
+                    "train_nash_weight_main_deploy",
+                    weights[0].detach(),
+                    on_step=True,
+                    on_epoch=True,
+                    logger=True,
+                    sync_dist=True,
+                )
+                self.log(
+                    "train_nash_weight_grounding_aux",
                     weights[1].detach(),
                     on_step=True,
                     on_epoch=True,
@@ -1211,12 +1288,12 @@ class HeatmapModule(pl.LightningModule):
             sync_dist=True,
         )
 
-        loss_action_task = loss_action
+        loss_main_task = loss_action
         if presence_logits is not None:
             loss_presence = F.binary_cross_entropy_with_logits(
                 presence_logits, valid.float()
             )
-            loss_action_task = loss_action_task + loss_presence * self.model.hparams.get(
+            loss_main_task = loss_main_task + loss_presence * self.model.hparams.get(
                 "presence_loss_weight", 0.05
             )
             self.log(
@@ -1229,7 +1306,21 @@ class HeatmapModule(pl.LightningModule):
                 sync_dist=True,
             )
 
-        object_aux_terms = []
+        loss_hard_objectless = self._objectless_object_action_suppression_loss(
+            stage,
+            preds,
+            actions,
+            valid,
+            target,
+        )
+        if loss_hard_objectless is not None:
+            loss_main_task = (
+                loss_main_task
+                + loss_hard_objectless
+                * self.objectless_object_action_suppression_loss_weight
+            )
+
+        grounding_aux_terms = []
         loss_object_selection = self._object_selection_loss(
             object_selection_logits,
             target,
@@ -1238,10 +1329,10 @@ class HeatmapModule(pl.LightningModule):
         )
         if (
             loss_object_selection is not None
-            and OBJECT_SELECTION_LOSS_WEIGHT > 0
+            and self.aux_object_selection_loss_weight > 0
         ):
-            object_aux_terms.append(
-                loss_object_selection * OBJECT_SELECTION_LOSS_WEIGHT
+            grounding_aux_terms.append(
+                loss_object_selection * self.aux_object_selection_loss_weight
             )
 
         self._log_object_counterfactual_eval(
@@ -1254,11 +1345,9 @@ class HeatmapModule(pl.LightningModule):
             object_inputs,
             stage,
         )
-        if object_aux_terms:
-            loss_action_task = loss_action_task + torch.stack(object_aux_terms).sum()
-
         loss_kp = None
         loss_pose_frobenius = None
+        loss_pose_heatmap_optimized = None
         if self.model.hparams.n_landmarks > 0:
             labels_kp = target["heatmap"]
             kp_vis = target["kp_vis"]
@@ -1281,6 +1370,29 @@ class HeatmapModule(pl.LightningModule):
                 labels_kp.to(device=pose_hm_preds.device, dtype=pose_hm_preds.dtype),
                 mask=kp_vis.to(device=pose_hm_preds.device),
             )
+            if self.poguiseplus_normalized_heatmap_loss:
+                loss_pose_heatmap_optimized = (
+                    heatmap_mse_loss(
+                        pose_hm_preds,
+                        labels_kp.to(
+                            device=pose_hm_preds.device,
+                            dtype=pose_hm_preds.dtype,
+                        ),
+                        mask=kp_vis.to(device=pose_hm_preds.device),
+                    )
+                    * self.poguiseplus_heatmap_mse_scale
+                )
+                self.log(
+                    f"{stage}_loss_pose_heatmap_mse_scaled",
+                    loss_pose_heatmap_optimized,
+                    on_step=stage == "train",
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                    sync_dist=True,
+                )
+            else:
+                loss_pose_heatmap_optimized = loss_pose_frobenius
             self.log(
                 f"{stage}_loss_pose_heatmap_frobenius",
                 loss_pose_frobenius,
@@ -1300,6 +1412,7 @@ class HeatmapModule(pl.LightningModule):
 
         loss_interaction_frobenius = None
         loss_interaction_raw_frobenius = None
+        loss_interaction_heatmap_optimized = None
         if self.actor_interaction_heatmaps:
             interaction_heatmap = self._interaction_heatmap_pred(hm_preds)
             if (
@@ -1358,6 +1471,26 @@ class HeatmapModule(pl.LightningModule):
                     valid=heatmap_valid,
                 )
                 loss_interaction_frobenius = loss_interaction_raw_frobenius
+                if self.poguiseplus_normalized_heatmap_loss:
+                    loss_interaction_heatmap_optimized = (
+                        heatmap_mse_loss(
+                            interaction_heatmap,
+                            target_heatmap,
+                            valid=heatmap_valid,
+                        )
+                        * self.poguiseplus_heatmap_mse_scale
+                    )
+                    self.log(
+                        f"{stage}_loss_interaction_heatmap_mse_scaled",
+                        loss_interaction_heatmap_optimized,
+                        on_step=stage == "train",
+                        on_epoch=True,
+                        prog_bar=False,
+                        logger=True,
+                        sync_dist=True,
+                    )
+                else:
+                    loss_interaction_heatmap_optimized = loss_interaction_frobenius
                 self.log(
                     f"{stage}_loss_interaction_heatmap",
                     loss_interaction_heatmap,
@@ -1398,14 +1531,25 @@ class HeatmapModule(pl.LightningModule):
             if loss_pose_frobenius is None and loss_interaction_frobenius is None:
                 raise RuntimeError(
                     "Actor PO-GUISE+ loss requires pose or interaction heatmaps"
-            )
+                )
             heatmap_terms = []
-            if loss_pose_frobenius is not None:
+            heatmap_report_terms = []
+            if loss_pose_heatmap_optimized is not None:
                 heatmap_terms.append(
+                    loss_pose_heatmap_optimized
+                    * self.poguiseplus_pose_heatmap_weight
+                )
+            if loss_pose_frobenius is not None:
+                heatmap_report_terms.append(
                     loss_pose_frobenius * self.poguiseplus_pose_heatmap_weight
                 )
-            if loss_interaction_frobenius is not None:
+            if loss_interaction_heatmap_optimized is not None:
                 heatmap_terms.append(
+                    loss_interaction_heatmap_optimized
+                    * self.poguiseplus_interaction_heatmap_weight
+                )
+            if loss_interaction_frobenius is not None:
+                heatmap_report_terms.append(
                     loss_interaction_frobenius
                     * self.poguiseplus_interaction_heatmap_weight
                 )
@@ -1413,8 +1557,18 @@ class HeatmapModule(pl.LightningModule):
             loss_heatmap_task = torch.log(
                 loss_heatmap_raw + self.poguiseplus_heatmap_log_eps
             )
+            loss_heatmap_report = torch.stack(heatmap_report_terms).sum()
             self.log(
                 f"{stage}_loss_heatmap_frobenius",
+                loss_heatmap_report,
+                on_step=stage == "train",
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+            self.log(
+                f"{stage}_loss_heatmap_optimized",
                 loss_heatmap_raw,
                 on_step=stage == "train",
                 on_epoch=True,
@@ -1431,15 +1585,38 @@ class HeatmapModule(pl.LightningModule):
                 logger=True,
                 sync_dist=True,
             )
-            loss_aux_task = loss_heatmap_task * self.poguiseplus_heatmap_loss_weight
+            grounding_aux_terms.append(
+                loss_heatmap_task * self.poguiseplus_heatmap_loss_weight
+            )
+            loss_aux_task = torch.stack(grounding_aux_terms).sum()
+            self.log(
+                f"{stage}_loss_main_deploy",
+                loss_main_task,
+                on_step=stage == "train",
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+            self.log(
+                f"{stage}_loss_grounding_aux",
+                loss_aux_task,
+                on_step=stage == "train",
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
             if stage == "train" and self.model.hparams.grad_weights:
-                loss = torch.stack([loss_action_task, loss_aux_task])
+                loss = torch.stack([loss_main_task, loss_aux_task])
             elif self.model.hparams.get("kp_only", False):
-                loss = loss_action_task * 1e-6 + loss_aux_task
+                loss = loss_main_task * 1e-6 + loss_aux_task
             else:
-                loss = loss_action_task + loss_aux_task
+                loss = loss_main_task + loss_aux_task
         else:
-            loss = loss_action_task
+            loss = loss_main_task
+            if grounding_aux_terms:
+                loss = loss + torch.stack(grounding_aux_terms).sum()
             if loss_kp is not None:
                 kp_loss_weight = float(self.model.hparams.kp_loss_weight)
                 if self.model.hparams.get("kp_only", False):
@@ -1549,6 +1726,59 @@ class HeatmapModule(pl.LightningModule):
         objectless = self._labels_in_indices(actions, self.objectless_action_indices)
         return valid & objectless & sample_has_hard_object[:, None]
 
+    def _objectless_object_action_suppression_loss(
+        self,
+        stage,
+        full_preds,
+        actions,
+        valid,
+        target,
+    ):
+        if self.objectless_object_action_suppression_loss_weight <= 0:
+            return None
+        hard_mask = self._objectless_hard_negative_mask(
+            full_preds,
+            actions,
+            valid,
+            target,
+        )
+        object_action_indices = self.group_indices.get("object_mapped")
+        if (
+            hard_mask is None
+            or object_action_indices is None
+            or int(object_action_indices.numel()) == 0
+        ):
+            return None
+        if not hard_mask.any():
+            return None
+
+        object_action_indices = object_action_indices.to(
+            device=full_preds.device,
+            dtype=torch.long,
+        )
+        probs = full_preds[hard_mask].float().softmax(dim=-1)
+        object_action_prob = probs[:, object_action_indices].sum(dim=-1).clamp(
+            0.0,
+            1.0 - 1e-6,
+        )
+        loss = -torch.log1p(-object_action_prob).mean()
+        count = int(object_action_prob.numel())
+        self.log(
+            f"{stage}_loss_objectless_object_action_suppression",
+            loss,
+            on_step=stage == "train",
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+        )
+        self._log_scalar(
+            f"{stage}_objectless_with_object_visible_object_action_prob",
+            object_action_prob.detach().mean(),
+            count,
+        )
+        return loss
+
     def _log_objectless_hard_negative_metrics(
         self,
         stage,
@@ -1621,10 +1851,9 @@ class HeatmapModule(pl.LightningModule):
             )
 
     def _action_index(self, action_name):
-        label_dict = self._toyota_label_dict()
-        if action_name not in label_dict:
+        if action_name not in self.action_to_index:
             return None
-        return int(label_dict[action_name]) - 1
+        return int(self.action_to_index[action_name])
 
     def _object_residual_diagnostic_masks(
         self,

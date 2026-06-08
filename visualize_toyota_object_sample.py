@@ -10,7 +10,12 @@ import torch
 from PIL import Image, ImageDraw
 
 from datasets.object_vocab import NONE_OBJECT_ID, OBJECT_CLASSES
-from datasets.toyotasm import CS_DICT, ToyotaSMDataset
+from datasets.toyota_action_taxonomy import (
+    TOYOTA_ACTION_TAXONOMIES,
+    toyota_action_names,
+    toyota_num_classes,
+)
+from datasets.toyotasm import ToyotaSMDataset
 
 
 MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
@@ -43,6 +48,12 @@ def build_parser():
     parser.add_argument("--n_frames", type=int, default=16)
     parser.add_argument("--n_landmarks", type=int, default=13)
     parser.add_argument("--num_actor_tokens", type=int, default=8)
+    parser.add_argument("--num_classes", type=int, default=None)
+    parser.add_argument(
+        "--toyota_action_taxonomy",
+        default="toyota_31",
+        choices=TOYOTA_ACTION_TAXONOMIES,
+    )
     parser.add_argument("--object_conf_threshold", type=float, default=0.25)
     parser.add_argument("--object_camera_allowlist", default=None)
     parser.add_argument("--object_ignore_regions", default=None)
@@ -77,9 +88,13 @@ def dataset_kwargs(args):
         "data_dir": args.data_dir,
         "set_type": "train",
         "task_type": "CS",
+        "toyota_action_taxonomy": args.toyota_action_taxonomy,
         "n_frames": args.n_frames,
         "n_frames_stride": 1,
         "n_landmarks": args.n_landmarks,
+        "num_classes": args.num_classes
+        if args.num_classes is not None
+        else toyota_num_classes("CS", args.toyota_action_taxonomy),
         "heatmap_agg": 1,
         "jitter_scales_min": 256,
         "jitter_scales_max": 320,
@@ -116,10 +131,10 @@ def dataset_kwargs(args):
 
 
 def action_name(label):
-    action_id = int(label) + 1
-    for name, idx in CS_DICT.items():
-        if int(idx) == action_id:
-            return name
+    names = toyota_action_names("CS", getattr(action_name, "taxonomy", "toyota_31"))
+    label = int(label)
+    if 0 <= label < len(names):
+        return names[label]
     return f"class_{int(label)}"
 
 
@@ -213,6 +228,7 @@ def build_contact_sheet(paths, output_path, cols):
 
 def main():
     args = build_parser().parse_args()
+    action_name.taxonomy = args.toyota_action_taxonomy
     try:
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)

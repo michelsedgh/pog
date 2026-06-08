@@ -9,72 +9,56 @@ import os
 import os.path
 import pickle
 
-from datasets.object_vocab import OBJECT_TO_ID, STRONG_ACTION_OBJECTS
+from datasets.object_vocab import OBJECT_TO_ID
+from datasets.toyota_action_taxonomy import (
+    toyota_action_object_map,
+    toyota_action_to_index,
+)
 
 
-TOYOTA_CS_ACTION_TO_INDEX = {
-    "Cook.Cleandishes": 0,
-    "Cook.Cleanup": 1,
-    "Cook.Cut": 2,
-    "Cook.Stir": 3,
-    "Cook.Usestove": 4,
-    "Cutbread": 5,
-    "Drink.Frombottle": 6,
-    "Drink.Fromcan": 7,
-    "Drink.Fromcup": 8,
-    "Drink.Fromglass": 9,
-    "Eat.Attable": 10,
-    "Eat.Snack": 11,
-    "Enter": 12,
-    "Getup": 13,
-    "Laydown": 14,
-    "Leave": 15,
-    "Makecoffee.Pourgrains": 16,
-    "Makecoffee.Pourwater": 17,
-    "Maketea.Boilwater": 18,
-    "Maketea.Insertteabag": 19,
-    "Pour.Frombottle": 20,
-    "Pour.Fromcan": 21,
-    "Pour.Fromkettle": 22,
-    "Readbook": 23,
-    "Sitdown": 24,
-    "Takepills": 25,
-    "Uselaptop": 26,
-    "Usetablet": 27,
-    "Usetelephone": 28,
-    "Walk": 29,
-    "WatchTV": 30,
-}
-
-
-def _toyota_object_residual_action_indices(num_classes):
-    if int(num_classes) != len(TOYOTA_CS_ACTION_TO_INDEX):
+def _toyota_object_residual_action_indices(
+    num_classes,
+    task_type="CS",
+    action_taxonomy="toyota_31",
+):
+    action_to_index = toyota_action_to_index(task_type, action_taxonomy)
+    if int(num_classes) != len(action_to_index):
         raise ValueError(
-            "Toyota object-logit residuals require the 31-class Toyota action "
-            f"space, got num_classes={num_classes}."
+            "Toyota object-logit residuals require num_classes to match the "
+            f"{action_taxonomy} {task_type} action space: "
+            f"expected {len(action_to_index)}, got {num_classes}."
         )
     indices = []
-    for action_name in sorted(STRONG_ACTION_OBJECTS):
-        if action_name not in TOYOTA_CS_ACTION_TO_INDEX:
+    for action_name in sorted(toyota_action_object_map(task_type, action_taxonomy)):
+        if action_name not in action_to_index:
             raise ValueError(f"Missing Toyota action index for {action_name}")
-        index = int(TOYOTA_CS_ACTION_TO_INDEX[action_name])
+        index = int(action_to_index[action_name])
         indices.append(index)
     if not indices:
         raise ValueError("No Toyota object-action indices available for residual head")
     return sorted(set(indices))
 
 
-def _toyota_object_residual_action_indices_by_object(num_classes):
-    if int(num_classes) != len(TOYOTA_CS_ACTION_TO_INDEX):
+def _toyota_object_residual_action_indices_by_object(
+    num_classes,
+    task_type="CS",
+    action_taxonomy="toyota_31",
+):
+    action_to_index = toyota_action_to_index(task_type, action_taxonomy)
+    if int(num_classes) != len(action_to_index):
         raise ValueError(
-            "Toyota object-logit residuals require the 31-class Toyota action "
-            f"space, got num_classes={num_classes}."
+            "Toyota object-logit residuals require num_classes to match the "
+            f"{action_taxonomy} {task_type} action space: "
+            f"expected {len(action_to_index)}, got {num_classes}."
         )
     indices_by_object = {}
-    for action_name, object_names in STRONG_ACTION_OBJECTS.items():
-        if action_name not in TOYOTA_CS_ACTION_TO_INDEX:
+    for action_name, object_names in toyota_action_object_map(
+        task_type,
+        action_taxonomy,
+    ).items():
+        if action_name not in action_to_index:
             raise ValueError(f"Missing Toyota action index for {action_name}")
-        action_index = int(TOYOTA_CS_ACTION_TO_INDEX[action_name])
+        action_index = int(action_to_index[action_name])
         for object_name in object_names:
             if object_name not in OBJECT_TO_ID:
                 raise ValueError(f"Missing Toyota object index for {object_name}")
@@ -517,11 +501,18 @@ class POGUISE(pl.LightningModule):
                 else None
             )
             object_residual_action_indices = _toyota_object_residual_action_indices(
-                self.hparams.num_classes
+                self.hparams.num_classes,
+                task_type=self.hparams.get("task_type", "CS"),
+                action_taxonomy=self.hparams.get("toyota_action_taxonomy", "toyota_31"),
             )
             object_residual_action_indices_by_object = (
                 _toyota_object_residual_action_indices_by_object(
-                    self.hparams.num_classes
+                    self.hparams.num_classes,
+                    task_type=self.hparams.get("task_type", "CS"),
+                    action_taxonomy=self.hparams.get(
+                        "toyota_action_taxonomy",
+                        "toyota_31",
+                    ),
                 )
             )
             self.object_action_residual = (

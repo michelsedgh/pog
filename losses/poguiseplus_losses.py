@@ -3,11 +3,7 @@ import torch
 
 def _active_heatmap_items(sq_error, pred_heatmap, valid=None, mask=None):
     leading_shape = pred_heatmap.shape[:-2]
-    active = torch.ones(
-        pred_heatmap.shape[0],
-        dtype=torch.bool,
-        device=pred_heatmap.device,
-    )
+    weights = torch.ones_like(sq_error)
 
     if mask is not None:
         mask = mask.to(device=pred_heatmap.device, dtype=sq_error.dtype)
@@ -15,9 +11,8 @@ def _active_heatmap_items(sq_error, pred_heatmap, valid=None, mask=None):
             raise RuntimeError(
                 "heatmap mask shape mismatch: "
                 f"{tuple(mask.shape)} vs {tuple(sq_error.shape)}"
-            )
-        sq_error = sq_error * mask
-        active = active & (mask.flatten(1).sum(dim=1) > 0)
+        )
+        weights = weights * mask
 
     if valid is not None:
         valid = valid.to(device=pred_heatmap.device, dtype=torch.bool)
@@ -25,11 +20,12 @@ def _active_heatmap_items(sq_error, pred_heatmap, valid=None, mask=None):
             raise RuntimeError(
                 "heatmap valid mask shape mismatch: "
                 f"{tuple(valid.shape)} vs {tuple(leading_shape)}"
-            )
-        sq_error = sq_error * valid[(...,) + (None, None)].to(dtype=sq_error.dtype)
-        active = active & valid.flatten(1).any(dim=1)
+        )
+        weights = weights * valid[(...,) + (None, None)].to(dtype=sq_error.dtype)
 
-    return sq_error, active
+    sq_error = sq_error * weights
+    active = weights.flatten(1).sum(dim=1) > 0
+    return sq_error, active, weights
 
 
 def heatmap_frobenius_loss(pred_heatmap, target_heatmap, valid=None, mask=None):
@@ -40,7 +36,7 @@ def heatmap_frobenius_loss(pred_heatmap, target_heatmap, valid=None, mask=None):
         )
 
     sq_error = (pred_heatmap - target_heatmap).float().pow(2)
-    sq_error, active = _active_heatmap_items(
+    sq_error, active, _weights = _active_heatmap_items(
         sq_error,
         pred_heatmap,
         valid=valid,
@@ -51,6 +47,29 @@ def heatmap_frobenius_loss(pred_heatmap, target_heatmap, valid=None, mask=None):
         return pred_heatmap.sum() * 0.0
 
     per_sample = sq_error.flatten(1).sum(dim=1)
+    return per_sample[active].mean()
+
+
+def heatmap_mse_loss(pred_heatmap, target_heatmap, valid=None, mask=None):
+    if pred_heatmap.shape != target_heatmap.shape:
+        raise RuntimeError(
+            "heatmap target/prediction shape mismatch: "
+            f"{tuple(target_heatmap.shape)} vs {tuple(pred_heatmap.shape)}"
+        )
+
+    sq_error = (pred_heatmap - target_heatmap).float().pow(2)
+    sq_error, active, weights = _active_heatmap_items(
+        sq_error,
+        pred_heatmap,
+        valid=valid,
+        mask=mask,
+    )
+
+    if not active.any():
+        return pred_heatmap.sum() * 0.0
+
+    denom = weights.flatten(1).sum(dim=1).clamp_min(1.0)
+    per_sample = sq_error.flatten(1).sum(dim=1) / denom
     return per_sample[active].mean()
 
 

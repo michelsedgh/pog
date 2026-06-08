@@ -438,6 +438,14 @@ def build_parser():
         "--poguiseplus_interaction_heatmap_weight", type=float, default=1.0
     )
     parser.add_argument("--poguiseplus_heatmap_log_eps", type=float, default=1e-6)
+    parser.add_argument("--poguiseplus_normalized_heatmap_loss", type=int, default=0)
+    parser.add_argument("--poguiseplus_heatmap_mse_scale", type=float, default=1000.0)
+    parser.add_argument("--aux_object_selection_loss_weight", type=float, default=0.5)
+    parser.add_argument(
+        "--objectless_object_action_suppression_loss_weight",
+        type=float,
+        default=0.0,
+    )
     parser.add_argument("--deepspeed_optim", type=int, default=0)
     parser.add_argument("--kp_only", type=int, default=0)
 
