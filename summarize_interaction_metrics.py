@@ -822,10 +822,16 @@ def print_row(title, row):
         f"pose_fro {metric(row, 'val_loss_pose_heatmap_frobenius'):.4f}, "
         f"interaction_fro {metric(row, 'val_loss_interaction_heatmap_frobenius'):.4f}"
     )
+    nash_main = metric(row, "train_nash_weight_main_deploy")
+    if pd.isna(nash_main):
+        nash_main = metric(row, "train_nash_weight_action")
+    nash_aux = metric(row, "train_nash_weight_grounding_aux")
+    if pd.isna(nash_aux):
+        nash_aux = metric(row, "train_nash_weight_heatmap")
     print(
         "nash weights: "
-        f"action {metric(row, 'train_nash_weight_action'):.4f}, "
-        f"heatmap {metric(row, 'train_nash_weight_heatmap'):.4f}"
+        f"main_deploy {nash_main:.4f}, "
+        f"grounding_aux {nash_aux:.4f}"
     )
 
     print("\nACTION GROUPS:")

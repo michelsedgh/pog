@@ -1554,9 +1554,13 @@ class HeatmapModule(pl.LightningModule):
                     * self.poguiseplus_interaction_heatmap_weight
                 )
             loss_heatmap_raw = torch.stack(heatmap_terms).sum()
-            loss_heatmap_task = torch.log(
-                loss_heatmap_raw + self.poguiseplus_heatmap_log_eps
-            )
+            if self.poguiseplus_normalized_heatmap_loss:
+                # Nash-MTL is more stable when task losses stay non-negative.
+                loss_heatmap_task = torch.log1p(loss_heatmap_raw)
+            else:
+                loss_heatmap_task = torch.log(
+                    loss_heatmap_raw + self.poguiseplus_heatmap_log_eps
+                )
             loss_heatmap_report = torch.stack(heatmap_report_terms).sum()
             self.log(
                 f"{stage}_loss_heatmap_frobenius",
