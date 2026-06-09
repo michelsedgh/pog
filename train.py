@@ -286,6 +286,10 @@ def _adapt_actor_conditioned_head_checkpoint(module, checkpoint):
         adapted = True
     state_dict.pop(legacy_w, None)
     state_dict.pop(legacy_b, None)
+    state_dict.pop("model.actor_head.none_object_context", None)
+    for key in list(state_dict):
+        if key.startswith("model.actor_head.gate."):
+            state_dict.pop(key)
     residual_keys = [
         key
         for key in list(state_dict)

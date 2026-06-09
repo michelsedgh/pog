@@ -709,7 +709,7 @@ def print_decision(epoch_df):
         )
     if pd.notna(object_gate_mean):
         print(
-            "object action gate: "
+            "object action mass: "
             f"mean {fmt(object_gate_mean)}, max {fmt(object_gate_max)}"
         )
     if pd.notna(deploy_laptop_to_book):
@@ -826,7 +826,7 @@ def print_row(title, row):
         )
     if pd.notna(metric(row, "val_object_action_gate_mean")):
         print(
-            "object action gate: "
+            "object action mass: "
             f"mean {metric(row, 'val_object_action_gate_mean'):.4f}, "
             f"max {metric(row, 'val_object_action_gate_max'):.4f}"
         )

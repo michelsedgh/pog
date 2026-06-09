@@ -171,7 +171,6 @@ class ActorObjectConditionedActionHead(nn.Module):
     def __init__(self, dim, num_classes, hidden_dim=512):
         super().__init__()
         self.num_classes = int(num_classes)
-        self.none_object_context = nn.Parameter(torch.zeros(1, 1, dim))
         self.actor_norm = nn.LayerNorm(dim)
         self.object_norm = nn.LayerNorm(dim)
         fusion_dim = dim * 3 + 3
@@ -181,17 +180,9 @@ class ActorObjectConditionedActionHead(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim, dim),
         )
-        self.gate = nn.Sequential(
-            nn.LayerNorm(fusion_dim),
-            nn.Linear(fusion_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, 1),
-        )
         self.action_head = nn.Linear(dim, self.num_classes)
         nn.init.zeros_(self.fusion[-1].weight)
         nn.init.zeros_(self.fusion[-1].bias)
-        nn.init.zeros_(self.gate[-1].weight)
-        nn.init.zeros_(self.gate[-1].bias)
 
     def _selector_features(self, probs):
         none_prob = probs[..., :1]
@@ -254,19 +245,15 @@ class ActorObjectConditionedActionHead(nn.Module):
             (object_selection_logits[..., :1], object_logits),
             dim=-1,
         )
-        probs = selection_logits.softmax(dim=-1)
+        probs = selection_logits.softmax(dim=-1).detach()
+        object_mass = 1.0 - probs[..., :1]
         object_probs = probs[..., 1:]
-        none_context = self.none_object_context.to(
-            device=actor_tokens.device,
-            dtype=actor_tokens.dtype,
-        )
-        object_context = (
-            probs[..., :1].to(dtype=actor_tokens.dtype) * none_context
-            + torch.einsum(
-                "bkm,bmd->bkd",
-                object_probs.to(dtype=object_tokens.dtype),
-                object_tokens,
-            )
+        safe_object_mass = object_mass.clamp_min(torch.finfo(probs.dtype).tiny)
+        conditional_object_probs = object_probs / safe_object_mass
+        object_context = torch.einsum(
+            "bkm,bmd->bkd",
+            conditional_object_probs.to(dtype=object_tokens.dtype),
+            object_tokens,
         )
 
         actor_norm = self.actor_norm(actor_tokens)
@@ -281,7 +268,7 @@ class ActorObjectConditionedActionHead(nn.Module):
             ),
             dim=-1,
         )
-        gate = torch.sigmoid(self.gate(fusion_input))
+        gate = object_mass.to(dtype=actor_tokens.dtype)
         fused_actor = actor_tokens + gate * self.fusion(fusion_input)
         final_logits = self.action_head(fused_actor)
         object_delta_logits = final_logits - base_logits
