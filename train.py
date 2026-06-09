@@ -160,16 +160,6 @@ def _initialize_actor_prompt_from_checkpoint(module, checkpoint):
         if (
             hasattr(model, "actor_head")
             and hasattr(model, "head")
-            and hasattr(model.actor_head, "action_head")
-            and model.actor_head.action_head.weight.shape == model.head.weight.shape
-            and not _checkpoint_has_key(checkpoint, "model.actor_head.action_head.weight")
-        ):
-            model.actor_head.action_head.weight.copy_(model.head.weight)
-            model.actor_head.action_head.bias.copy_(model.head.bias)
-            initialized.append("actor_head.action_head")
-        elif (
-            hasattr(model, "actor_head")
-            and hasattr(model, "head")
             and hasattr(model.actor_head, "weight")
             and model.actor_head.weight.shape == model.head.weight.shape
             and not _checkpoint_has_key(checkpoint, "model.actor_head.weight")
@@ -259,36 +249,32 @@ def _initialize_actor_prompt_from_checkpoint(module, checkpoint):
         )
 
 
-def _adapt_actor_conditioned_head_checkpoint(module, checkpoint):
+def _adapt_actor_action_head_checkpoint(module, checkpoint):
     if checkpoint is None:
         return
     state_dict = checkpoint.get("state_dict", {})
     model = module.model
     actor_head = getattr(model, "actor_head", None)
-    action_head = getattr(actor_head, "action_head", None)
-    if action_head is None:
+    if actor_head is None or not hasattr(actor_head, "weight"):
         return
-    legacy_w = "model.actor_head.weight"
-    legacy_b = "model.actor_head.bias"
-    new_w = "model.actor_head.action_head.weight"
-    new_b = "model.actor_head.action_head.bias"
+    linear_w = "model.actor_head.weight"
+    linear_b = "model.actor_head.bias"
+    conditioned_w = "model.actor_head.action_head.weight"
+    conditioned_b = "model.actor_head.action_head.bias"
     adapted = False
     if (
-        new_w not in state_dict
-        and new_b not in state_dict
-        and legacy_w in state_dict
-        and legacy_b in state_dict
-        and tuple(state_dict[legacy_w].shape) == tuple(action_head.weight.shape)
-        and tuple(state_dict[legacy_b].shape) == tuple(action_head.bias.shape)
+        linear_w not in state_dict
+        and linear_b not in state_dict
+        and conditioned_w in state_dict
+        and conditioned_b in state_dict
+        and tuple(state_dict[conditioned_w].shape) == tuple(actor_head.weight.shape)
+        and tuple(state_dict[conditioned_b].shape) == tuple(actor_head.bias.shape)
     ):
-        state_dict[new_w] = state_dict[legacy_w]
-        state_dict[new_b] = state_dict[legacy_b]
+        state_dict[linear_w] = state_dict[conditioned_w]
+        state_dict[linear_b] = state_dict[conditioned_b]
         adapted = True
-    state_dict.pop(legacy_w, None)
-    state_dict.pop(legacy_b, None)
-    state_dict.pop("model.actor_head.none_object_context", None)
     for key in list(state_dict):
-        if key.startswith("model.actor_head.gate."):
+        if key.startswith("model.actor_head.") and key not in {linear_w, linear_b}:
             state_dict.pop(key)
     residual_keys = [
         key
@@ -298,12 +284,29 @@ def _adapt_actor_conditioned_head_checkpoint(module, checkpoint):
     for key in residual_keys:
         state_dict.pop(key)
     if adapted:
-        print("Adapted legacy actor_head weights into object-conditioned action head.")
+        print("Adapted object-conditioned actor_head.action_head weights into actor_head.")
     if residual_keys:
         print(
             "Discarded legacy object_action_residual weights; "
-            "using object-conditioned action head."
+            "using transformer-context actor action head."
         )
+
+
+def _validate_active_actor_action_path(module):
+    model = module.model
+    if not getattr(model, "actor_prompt", False):
+        return
+    actor_head = getattr(model, "actor_head", None)
+    if not isinstance(actor_head, torch.nn.Linear):
+        raise RuntimeError(
+            "Actor action path must be a plain nn.Linear over actor tokens. "
+            "Object detections should affect action logits through transformer "
+            "object tokens, not through a late object-conditioned action head."
+        )
+    if getattr(model, "actor_object_conditioned_action", False):
+        raise RuntimeError("actor_object_conditioned_action must be disabled.")
+    if hasattr(actor_head, "action_head"):
+        raise RuntimeError("Legacy actor_head.action_head is still active.")
 
 
 def _adapt_heatmap_final_layer_checkpoint(module, checkpoint):
@@ -391,7 +394,7 @@ def _validate_no_deprecated_object_path(checkpoint):
         raise ValueError(
             "Deprecated object specialist checkpoint detected. The active "
             "actor-object path uses actor interaction heatmaps, scene object "
-            "tokens, object selection, and an object-conditioned action head. "
+            "tokens, object selection, and a plain actor-token action head. "
             f"First deprecated keys: {preview}"
         )
 
@@ -535,9 +538,10 @@ def main():
     seed_everything(hparams.seed)
     dataset = _dataset_class(hparams.dataset)
     module = HeatmapModule(model=POGUISE, **vars(hparams))
+    _validate_active_actor_action_path(module)
 
     if checkpoint is not None:
-        _adapt_actor_conditioned_head_checkpoint(module, checkpoint)
+        _adapt_actor_action_head_checkpoint(module, checkpoint)
         _adapt_heatmap_final_layer_checkpoint(module, checkpoint)
         strict = (
             bool(hparams.strict_load)

@@ -1,6 +1,6 @@
 # Actor TensorRT Runbook
 
-This runbook documents the current actor TensorRT path for the object-fused
+This runbook documents the current actor TensorRT path for the object-token
 PO-GUISE actor checkpoint.
 
 ## Known-good actor engine

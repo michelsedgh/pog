@@ -570,7 +570,7 @@ class TorchActorBackend:
         self.scene_object_tokens = bool(self.hparams.get("scene_object_tokens", 0))
         self.actor_object_logit_residual = False
         self.actor_object_conditioned_action = bool(
-            getattr(self.model, "actor_object_conditioned_action", self.scene_object_tokens)
+            getattr(self.model, "actor_object_conditioned_action", False)
         )
         self.num_scene_object_tokens = (
             int(self.hparams.get("num_scene_object_tokens", 0))
@@ -580,11 +580,11 @@ class TorchActorBackend:
         if self.clip_frames != TRAINING_CLIP_FRAMES:
             raise RuntimeError(
                 f"Checkpoint n_frames={self.clip_frames}; live inference is fixed to "
-                f"{TRAINING_CLIP_FRAMES} frames to match the trained object-fused model."
+                f"{TRAINING_CLIP_FRAMES} frames to match the trained object-token model."
             )
         if not self.scene_object_tokens:
             raise RuntimeError(
-                "This dashboard is fixed to the object-fused checkpoints and requires "
+                "This dashboard is fixed to object-token checkpoints and requires "
                 "scene_object_tokens=1."
             )
         if self.num_scene_object_tokens <= 0:
@@ -637,7 +637,7 @@ class TensorRTLiveActorBackend:
         self.scene_object_tokens = bool(self.engine.scene_object_tokens)
         self.actor_object_logit_residual = bool(self.engine.actor_object_logit_residual)
         self.actor_object_conditioned_action = bool(
-            getattr(self.engine, "actor_object_conditioned_action", self.scene_object_tokens)
+            getattr(self.engine, "actor_object_conditioned_action", False)
         )
         self.num_scene_object_tokens = int(self.engine.num_scene_object_tokens)
         if self.clip_frames != TRAINING_CLIP_FRAMES:
@@ -652,7 +652,7 @@ class TensorRTLiveActorBackend:
             )
         if not self.scene_object_tokens:
             raise RuntimeError(
-                "This dashboard is fixed to object-fused checkpoints and requires "
+                "This dashboard is fixed to object-token checkpoints and requires "
                 "a TensorRT engine with object token inputs."
             )
         if self.num_scene_object_tokens <= 0:

@@ -83,7 +83,7 @@ class TensorRTActorEngine:
         self.actor_object_conditioned_action = bool(
             self.metadata.get(
                 "actor_object_conditioned_action",
-                self.scene_object_tokens and not self.actor_object_logit_residual,
+                False,
             )
         )
         expected_inputs = base_inputs | (object_inputs if self.scene_object_tokens else set())

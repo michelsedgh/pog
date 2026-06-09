@@ -181,9 +181,6 @@ drop. Use all of these:
 - `val_object_selection_true_prob`
 - `val_objectless_with_object_visible_acc`
 - `val_objectless_with_object_visible_object_action_pred_rate`
-- `val_object_residual_changed_pred_rate`
-- `val_object_residual_fix_rate`
-- `val_object_residual_hurt_rate`
 - `val_object_counterfactual_selected_logit_drop`
 - live/saved probe sweeps for laptop/book/phone cases
 
@@ -192,9 +189,8 @@ runs. It is validation-only and does not affect training gradients. It rewards
 macro F1, macro accuracy, object-mapped accuracy, objectless accuracy,
 objectless-with-object-visible accuracy, and key action accuracy for
 `Uselaptop`, `Readbook`, `Walk`, `Getup`, `Sitdown`, and `Laydown`. It penalizes
-objectless-with-object-visible predictions that become object actions, residual
-changes that hurt a correct base prediction, `Uselaptop` to `Readbook` residual
-drift, and any key action below a 0.60 accuracy floor.
+objectless-with-object-visible predictions that become object actions and any
+key action below a 0.60 accuracy floor.
 
 `val_object_counterfactual_selected_logit_drop` is validation-only supporting
 evidence. It must not be used as a trainable loss or as the only checkpoint

@@ -225,11 +225,6 @@ class HeatmapModule(pl.LightningModule):
             "preds": [],
             "labels": [],
             "hard_objectless": [],
-            "residual_changed": [],
-            "residual_fixed": [],
-            "residual_hurt": [],
-            "residual_base_laptop": [],
-            "residual_base_laptop_final_readbook": [],
         }
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
@@ -1050,6 +1045,76 @@ class HeatmapModule(pl.LightningModule):
         )
         return None
 
+    def _log_selected_object_action_diagnostics(
+        self,
+        stage,
+        full_preds,
+        actions,
+        valid,
+        target,
+        object_selection_logits,
+    ):
+        if stage == "train" or not self.scene_object_tokens:
+            return
+        if object_selection_logits is None:
+            return
+        if "object_classes" not in target or "object_valid" not in target:
+            return
+
+        object_valid = target["object_valid"].to(
+            device=object_selection_logits.device,
+            dtype=torch.bool,
+        )
+        object_classes = target["object_classes"].to(
+            device=object_selection_logits.device,
+            dtype=torch.long,
+        )
+        valid = valid.to(device=object_selection_logits.device, dtype=torch.bool)
+        pred_labels = full_preds.to(device=object_selection_logits.device).argmax(dim=-1)
+
+        object_logits = object_selection_logits[..., 1:].masked_fill(
+            ~object_valid[:, None, :],
+            torch.finfo(object_selection_logits.dtype).min,
+        )
+        selection_logits = torch.cat(
+            (object_selection_logits[..., :1], object_logits),
+            dim=-1,
+        )
+        selected_indices = selection_logits.argmax(dim=-1)
+        selected_valid = valid & (selected_indices > 0)
+        if not selected_valid.any():
+            return
+
+        selected_slots = (selected_indices - 1).clamp_min(0)
+        selected_classes = object_classes.gather(1, selected_slots)
+        tracked_objects = {
+            "laptop": ("Uselaptop", "Readbook", "WatchTV"),
+            "book": ("Readbook", "Uselaptop"),
+            "phone": ("Usetelephone", "WatchTV"),
+            "tv_monitor": ("WatchTV", "Uselaptop", "Readbook"),
+        }
+        for object_name, action_names in tracked_objects.items():
+            object_id = OBJECT_TO_ID.get(object_name)
+            if object_id is None:
+                continue
+            object_mask = selected_valid & (selected_classes == int(object_id))
+            if not object_mask.any():
+                continue
+            count = int(object_mask.sum().item())
+            self._log_count(
+                f"{stage}_selected_{object_name}_count",
+                object_mask.float().sum(),
+            )
+            for action_name in action_names:
+                action_idx = self._action_index(action_name)
+                if action_idx is None:
+                    continue
+                self._log_scalar(
+                    f"{stage}_selected_{object_name}_pred_{action_name}_rate",
+                    (pred_labels[object_mask] == int(action_idx)).float().mean(),
+                    count,
+                )
+
     def _append_nash_mtl_params(self, params):
         if not (
             self.model.hparams.grad_weights
@@ -1262,12 +1327,6 @@ class HeatmapModule(pl.LightningModule):
             presence_logits,
             object_selection_logits,
         ) = self._unpack_model_data(data)
-        self._log_object_residual_diagnostics(
-            stage,
-            preds,
-            actions,
-            valid,
-        )
 
         valid_preds = preds[valid]
         valid_labels = actions[valid]
@@ -1338,6 +1397,14 @@ class HeatmapModule(pl.LightningModule):
             target,
             object_inputs,
             stage,
+        )
+        self._log_selected_object_action_diagnostics(
+            stage,
+            preds,
+            actions,
+            valid,
+            target,
+            object_selection_logits,
         )
         loss_kp = None
         loss_pose_frobenius = None
@@ -1853,125 +1920,6 @@ class HeatmapModule(pl.LightningModule):
             return None
         return int(self.action_to_index[action_name])
 
-    def _object_residual_diagnostic_masks(
-        self,
-        final_logits,
-        actions,
-        valid,
-    ):
-        if not self.scene_object_tokens:
-            return None
-        base_logits = getattr(self.model, "last_actor_action_logits", None)
-        residual_logits = getattr(self.model, "last_object_residual_logits", None)
-        if base_logits is None or residual_logits is None:
-            return None
-        base_logits = base_logits.to(device=final_logits.device)
-        residual_logits = residual_logits.to(device=final_logits.device)
-        valid = valid.to(device=final_logits.device, dtype=torch.bool)
-        actions = actions.to(device=final_logits.device, dtype=torch.long)
-        if not valid.any():
-            return None
-
-        base_pred = base_logits.argmax(dim=-1)
-        final_pred = final_logits.argmax(dim=-1)
-        base_correct = base_pred == actions
-        final_correct = final_pred == actions
-        changed = base_pred != final_pred
-        fixed = changed & (~base_correct) & final_correct
-        hurt = changed & base_correct & (~final_correct)
-        laptop_idx = self._action_index("Uselaptop")
-        readbook_idx = self._action_index("Readbook")
-        base_laptop = torch.zeros_like(valid, dtype=torch.bool)
-        base_laptop_final_readbook = torch.zeros_like(valid, dtype=torch.bool)
-        if laptop_idx is not None and readbook_idx is not None:
-            base_laptop = valid & (base_pred == laptop_idx)
-            base_laptop_final_readbook = (
-                base_laptop
-                & (final_pred == readbook_idx)
-            )
-        return {
-            "residual_logits": residual_logits,
-            "changed": changed,
-            "fixed": fixed,
-            "hurt": hurt,
-            "base_laptop": base_laptop,
-            "base_laptop_final_readbook": base_laptop_final_readbook,
-        }
-
-    def _log_object_residual_diagnostics(
-        self,
-        stage,
-        final_logits,
-        actions,
-        valid,
-    ):
-        masks = self._object_residual_diagnostic_masks(final_logits, actions, valid)
-        if masks is None:
-            return
-        residual_logits = masks["residual_logits"]
-        valid = valid.to(device=final_logits.device, dtype=torch.bool)
-        count = int(valid.sum().item())
-
-        self._log_scalar(
-            f"{stage}_object_residual_abs_mean",
-            residual_logits[valid].float().abs().mean(),
-            count,
-        )
-        self._log_scalar(
-            f"{stage}_object_residual_abs_max",
-            residual_logits[valid].float().abs().amax(),
-            count,
-        )
-        gate = getattr(self.model, "last_object_action_gate", None)
-        if gate is not None:
-            gate = gate.to(device=final_logits.device)
-            self._log_scalar(
-                f"{stage}_object_action_gate_mean",
-                gate[valid].float().mean(),
-                count,
-            )
-            self._log_scalar(
-                f"{stage}_object_action_gate_max",
-                gate[valid].float().amax(),
-                count,
-            )
-        self._log_scalar(
-            f"{stage}_object_residual_changed_pred_rate",
-            masks["changed"][valid].float().mean(),
-            count,
-        )
-        self._log_scalar(
-            f"{stage}_object_residual_fix_rate",
-            masks["fixed"][valid].float().mean(),
-            count,
-        )
-        self._log_scalar(
-            f"{stage}_object_residual_hurt_rate",
-            masks["hurt"][valid].float().mean(),
-            count,
-        )
-
-        base_laptop = masks["base_laptop"]
-        if base_laptop.any():
-            self._log_scalar(
-                f"{stage}_object_residual_base_Uselaptop_final_Readbook_rate",
-                masks["base_laptop_final_readbook"][base_laptop].float().mean(),
-                int(base_laptop.sum().item()),
-            )
-        readbook_idx = self._action_index("Readbook")
-        laptop_idx = self._action_index("Uselaptop")
-        if readbook_idx is not None and laptop_idx is not None:
-            base_logits = getattr(self.model, "last_actor_action_logits", None)
-            base_pred = base_logits.to(device=final_logits.device).argmax(dim=-1)
-            final_pred = final_logits.argmax(dim=-1)
-            readbook_base = valid & (base_pred == readbook_idx)
-            if readbook_base.any():
-                self._log_scalar(
-                    f"{stage}_object_residual_base_Readbook_final_Uselaptop_rate",
-                    (final_pred[readbook_base] == laptop_idx).float().mean(),
-                    int(readbook_base.sum().item()),
-                )
-
     def _logger_run_name(self):
         logger = getattr(self.trainer, "logger", None)
         if logger is None:
@@ -2392,36 +2340,6 @@ class HeatmapModule(pl.LightningModule):
             else None
         )
 
-        residual_hurt = self._flatten_gathered_validation_tensor(
-            gathered_outputs,
-            "residual_hurt",
-        )
-        residual_hurt_rate = (
-            residual_hurt.float().mean()
-            if residual_hurt is not None and residual_hurt.numel() > 0
-            else None
-        )
-        residual_base_laptop = self._flatten_gathered_validation_tensor(
-            gathered_outputs,
-            "residual_base_laptop",
-        )
-        residual_laptop_to_readbook = self._flatten_gathered_validation_tensor(
-            gathered_outputs,
-            "residual_base_laptop_final_readbook",
-        )
-        laptop_to_readbook_rate = None
-        if (
-            residual_base_laptop is not None
-            and residual_laptop_to_readbook is not None
-            and residual_base_laptop.numel() > 0
-        ):
-            residual_base_laptop = residual_base_laptop.bool()
-            residual_laptop_to_readbook = residual_laptop_to_readbook.bool()
-            if residual_base_laptop.any():
-                laptop_to_readbook_rate = (
-                    residual_laptop_to_readbook[residual_base_laptop].float().mean()
-                )
-
         deploy_score = self._weighted_deploy_score(
             components=[
                 (macro_f1, 0.25),
@@ -2433,8 +2351,6 @@ class HeatmapModule(pl.LightningModule):
             ],
             penalties=[
                 (hard_object_action_rate, 0.20),
-                (residual_hurt_rate, 0.20),
-                (laptop_to_readbook_rate, 0.20),
                 (key_action_floor_deficit, 0.15),
             ],
         )
@@ -2453,8 +2369,6 @@ class HeatmapModule(pl.LightningModule):
                 "val_deploy_objectless_with_object_visible_object_action_pred_rate",
                 hard_object_action_rate,
             ),
-            ("val_deploy_residual_hurt_rate", residual_hurt_rate),
-            ("val_deploy_laptop_to_readbook_rate", laptop_to_readbook_rate),
         ):
             if value is None:
                 continue
@@ -2617,26 +2531,6 @@ class HeatmapModule(pl.LightningModule):
                 self.validation_step_outputs["hard_objectless"].append(
                     hard_mask[valid_mask].detach()
                 )
-            residual_masks = self._object_residual_diagnostic_masks(
-                full_preds,
-                target["actions"].long(),
-                target["valid"].bool(),
-            )
-            if residual_masks is not None:
-                valid_mask = target["valid"].bool().to(device=full_preds.device)
-                for output_key, mask_key in (
-                    ("residual_changed", "changed"),
-                    ("residual_fixed", "fixed"),
-                    ("residual_hurt", "hurt"),
-                    ("residual_base_laptop", "base_laptop"),
-                    (
-                        "residual_base_laptop_final_readbook",
-                        "base_laptop_final_readbook",
-                    ),
-                ):
-                    self.validation_step_outputs[output_key].append(
-                        residual_masks[mask_key][valid_mask].detach()
-                    )
             self.log(
                 "val_loss",
                 loss,

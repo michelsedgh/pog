@@ -17,8 +17,6 @@ CORE_COLUMNS = [
     "val_deploy_key_action_min",
     "val_deploy_objectless_with_object_visible_acc",
     "val_deploy_objectless_with_object_visible_object_action_pred_rate",
-    "val_deploy_residual_hurt_rate",
-    "val_deploy_laptop_to_readbook_rate",
     "val_actor_all_slot_acc",
     "val_actor_slot_consistency",
     "val_actor_pair_acc",
@@ -70,13 +68,10 @@ CORE_COLUMNS = [
     "val_objectless_with_book_visible_count",
     "val_objectless_with_phone_visible_acc",
     "val_objectless_with_phone_visible_count",
-    "val_object_action_gate_mean",
-    "val_object_action_gate_max",
-    "val_object_residual_changed_pred_rate",
-    "val_object_residual_fix_rate",
-    "val_object_residual_hurt_rate",
-    "val_object_residual_base_Uselaptop_final_Readbook_rate",
-    "val_object_residual_base_Readbook_final_Uselaptop_rate",
+    "val_selected_laptop_count",
+    "val_selected_laptop_pred_Uselaptop_rate",
+    "val_selected_laptop_pred_Readbook_rate",
+    "val_selected_laptop_pred_WatchTV_rate",
 ]
 
 GROUPS = [
@@ -597,7 +592,6 @@ def print_best_epochs(epoch_df):
         "val_object_selection_true_prob",
         "val_objectless_with_object_visible_acc",
         "val_objectless_with_laptop_visible_acc",
-        "val_object_residual_fix_rate",
         "val_object_counterfactual_selected_logit_drop",
     ]
     rows = []
@@ -655,17 +649,10 @@ def print_decision(epoch_df):
         latest,
         "val_objectless_with_object_visible_object_action_pred_rate",
     )
-    residual_changed = metric(latest, "val_object_residual_changed_pred_rate")
-    residual_fix = metric(latest, "val_object_residual_fix_rate")
-    residual_hurt = metric(latest, "val_object_residual_hurt_rate")
-    object_gate_mean = metric(latest, "val_object_action_gate_mean")
-    object_gate_max = metric(latest, "val_object_action_gate_max")
-    laptop_to_book = metric(
-        latest,
-        "val_object_residual_base_Uselaptop_final_Readbook_rate",
-    )
-    deploy_laptop_to_book = metric(latest, "val_deploy_laptop_to_readbook_rate")
-
+    selected_laptop_count = metric(latest, "val_selected_laptop_count")
+    selected_laptop_use = metric(latest, "val_selected_laptop_pred_Uselaptop_rate")
+    selected_laptop_read = metric(latest, "val_selected_laptop_pred_Readbook_rate")
+    selected_laptop_tv = metric(latest, "val_selected_laptop_pred_WatchTV_rate")
     print("\nDECISION:\n")
     print(f"latest epoch: {latest_epoch}")
     if pd.notna(deploy_score):
@@ -701,19 +688,14 @@ def print_decision(epoch_df):
             f"acc {fmt(hard_objectless)}, count {fmt(hard_objectless_count, 0)}, "
             f"object_action_pred_rate {fmt(hard_object_action_rate)}"
         )
-    if pd.notna(residual_changed):
+    if pd.notna(selected_laptop_count):
         print(
-            "object action delta: "
-            f"changed {fmt(residual_changed)}, fix {fmt(residual_fix)}, "
-            f"hurt {fmt(residual_hurt)}, laptop_to_book {fmt(laptop_to_book)}"
+            "selected laptop actions: "
+            f"count {fmt(selected_laptop_count, 0)}, "
+            f"Uselaptop {fmt(selected_laptop_use)}, "
+            f"Readbook {fmt(selected_laptop_read)}, "
+            f"WatchTV {fmt(selected_laptop_tv)}"
         )
-    if pd.notna(object_gate_mean):
-        print(
-            "object action mass: "
-            f"mean {fmt(object_gate_mean)}, max {fmt(object_gate_max)}"
-        )
-    if pd.notna(deploy_laptop_to_book):
-        print(f"deploy laptop_to_book penalty signal: {fmt(deploy_laptop_to_book)}")
     if (
         pd.notna(actor_all_slot)
         or pd.notna(actor_pair)
@@ -815,20 +797,13 @@ def print_row(title, row):
             "object_action_pred_rate "
             f"{metric(row, 'val_objectless_with_object_visible_object_action_pred_rate'):.4f}"
         )
-    if pd.notna(metric(row, "val_object_residual_changed_pred_rate")):
+    if pd.notna(metric(row, "val_selected_laptop_count")):
         print(
-            "object action delta: "
-            f"changed {metric(row, 'val_object_residual_changed_pred_rate'):.4f}, "
-            f"fix {metric(row, 'val_object_residual_fix_rate'):.4f}, "
-            f"hurt {metric(row, 'val_object_residual_hurt_rate'):.4f}, "
-            "laptop_to_book "
-            f"{metric(row, 'val_object_residual_base_Uselaptop_final_Readbook_rate'):.4f}"
-        )
-    if pd.notna(metric(row, "val_object_action_gate_mean")):
-        print(
-            "object action mass: "
-            f"mean {metric(row, 'val_object_action_gate_mean'):.4f}, "
-            f"max {metric(row, 'val_object_action_gate_max'):.4f}"
+            "selected laptop actions: "
+            f"count {metric(row, 'val_selected_laptop_count'):.0f}, "
+            f"Uselaptop {metric(row, 'val_selected_laptop_pred_Uselaptop_rate'):.4f}, "
+            f"Readbook {metric(row, 'val_selected_laptop_pred_Readbook_rate'):.4f}, "
+            f"WatchTV {metric(row, 'val_selected_laptop_pred_WatchTV_rate'):.4f}"
         )
     print(
         "poguise+ heatmap loss: "

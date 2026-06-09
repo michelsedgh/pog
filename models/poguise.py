@@ -167,116 +167,6 @@ class ActorObjectSelectionHead(nn.Module):
         return torch.cat([none_logits, object_logits], dim=-1)
 
 
-class ActorObjectConditionedActionHead(nn.Module):
-    def __init__(self, dim, num_classes, hidden_dim=512):
-        super().__init__()
-        self.num_classes = int(num_classes)
-        self.actor_norm = nn.LayerNorm(dim)
-        self.object_norm = nn.LayerNorm(dim)
-        fusion_dim = dim * 3 + 3
-        self.fusion = nn.Sequential(
-            nn.LayerNorm(fusion_dim),
-            nn.Linear(fusion_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, dim),
-        )
-        self.action_head = nn.Linear(dim, self.num_classes)
-        nn.init.zeros_(self.fusion[-1].weight)
-        nn.init.zeros_(self.fusion[-1].bias)
-
-    def _selector_features(self, probs):
-        none_prob = probs[..., :1]
-        object_probs = probs[..., 1:]
-        if object_probs.shape[-1] > 0:
-            top_object_prob = object_probs.amax(dim=-1, keepdim=True)
-        else:
-            top_object_prob = torch.zeros_like(none_prob)
-        safe_probs = probs.clamp_min(torch.finfo(probs.dtype).tiny)
-        entropy = -(probs * safe_probs.log()).sum(dim=-1, keepdim=True)
-        if probs.shape[-1] > 1:
-            entropy = entropy / torch.log(
-                torch.tensor(
-                    float(probs.shape[-1]),
-                    device=probs.device,
-                    dtype=probs.dtype,
-                )
-            )
-        return torch.cat((none_prob, top_object_prob, entropy), dim=-1)
-
-    def forward(
-        self,
-        actor_tokens,
-        object_tokens=None,
-        object_selection_logits=None,
-        object_valid=None,
-        return_parts=False,
-    ):
-        base_logits = self.action_head(actor_tokens)
-        if object_tokens is None or object_selection_logits is None:
-            if return_parts:
-                zeros = torch.zeros_like(base_logits)
-                return base_logits, base_logits, zeros, None
-            return base_logits
-        if actor_tokens.ndim != 3 or object_tokens.ndim != 3:
-            raise ValueError("actor_tokens and object_tokens must be rank-3 tensors")
-        expected = (actor_tokens.shape[0], actor_tokens.shape[1], object_tokens.shape[1] + 1)
-        if object_selection_logits.shape != expected:
-            raise ValueError(
-                "object_selection_logits must have shape "
-                f"{expected}, got {tuple(object_selection_logits.shape)}"
-            )
-        if object_valid is None:
-            raise ValueError("object_valid is required for object-conditioned actions")
-        if object_valid.shape != object_tokens.shape[:2]:
-            raise ValueError(
-                "object_valid must have shape "
-                f"{tuple(object_tokens.shape[:2])}, got {tuple(object_valid.shape)}"
-            )
-
-        object_valid = object_valid.to(
-            device=object_selection_logits.device,
-            dtype=torch.bool,
-        )
-        object_logits = object_selection_logits[..., 1:].masked_fill(
-            ~object_valid[:, None, :],
-            torch.finfo(object_selection_logits.dtype).min,
-        )
-        selection_logits = torch.cat(
-            (object_selection_logits[..., :1], object_logits),
-            dim=-1,
-        )
-        probs = selection_logits.softmax(dim=-1).detach()
-        object_mass = 1.0 - probs[..., :1]
-        object_probs = probs[..., 1:]
-        safe_object_mass = object_mass.clamp_min(torch.finfo(probs.dtype).tiny)
-        conditional_object_probs = object_probs / safe_object_mass
-        object_context = torch.einsum(
-            "bkm,bmd->bkd",
-            conditional_object_probs.to(dtype=object_tokens.dtype),
-            object_tokens,
-        )
-
-        actor_norm = self.actor_norm(actor_tokens)
-        object_norm = self.object_norm(object_context)
-        selector_features = self._selector_features(probs).to(dtype=actor_tokens.dtype)
-        fusion_input = torch.cat(
-            (
-                actor_norm,
-                object_norm,
-                actor_norm * object_norm,
-                selector_features,
-            ),
-            dim=-1,
-        )
-        gate = object_mass.to(dtype=actor_tokens.dtype)
-        fused_actor = actor_tokens + gate * self.fusion(fusion_input)
-        final_logits = self.action_head(fused_actor)
-        object_delta_logits = final_logits - base_logits
-        if return_parts:
-            return final_logits, base_logits, object_delta_logits, gate
-        return final_logits
-
-
 class POGUISE(pl.LightningModule):
     def __init__(self, net_size="t", pretrained=None, **kwargs):
         super().__init__()
@@ -288,7 +178,7 @@ class POGUISE(pl.LightningModule):
         )
         self.scene_object_tokens = bool(self.hparams.get("scene_object_tokens", 0))
         self.actor_object_logit_residual = False
-        self.actor_object_conditioned_action = self.scene_object_tokens
+        self.actor_object_conditioned_action = False
         if self.scene_object_tokens and not self.actor_prompt:
             raise ValueError("scene_object_tokens requires actor_prompt")
         if self.actor_interaction_heatmaps and not self.actor_prompt:
@@ -410,13 +300,9 @@ class POGUISE(pl.LightningModule):
         self.net.head = nn.Identity(self.net.num_features, self.net.num_features)
         self.head = nn.Linear(self.net.num_features, self.hparams.num_classes)
         if self.actor_prompt:
-            self.actor_head = (
-                ActorObjectConditionedActionHead(
-                    self.net.num_features,
-                    self.hparams.num_classes,
-                )
-                if self.scene_object_tokens
-                else nn.Linear(self.net.num_features, self.hparams.num_classes)
+            self.actor_head = nn.Linear(
+                self.net.num_features,
+                self.hparams.num_classes,
             )
             self.presence_head = (
                 nn.Linear(self.net.num_features, 1)
@@ -613,29 +499,8 @@ class POGUISE(pl.LightningModule):
             if self.hparams.ret_feat:
                 return x_actor
             self.last_actor_action_logits = None
-            self.last_object_residual_logits = None
-            self.last_object_action_gate = None
-            if self.scene_object_tokens:
-                if object_selection_logits is None or object_valid is None:
-                    raise RuntimeError("scene_object_tokens requires object outputs")
-                (
-                    action_logits,
-                    base_action_logits,
-                    object_delta_logits,
-                    object_action_gate,
-                ) = self.actor_head(
-                    x_actor,
-                    x_object,
-                    object_selection_logits,
-                    object_valid.to(device=x_actor.device, dtype=torch.bool),
-                    return_parts=True,
-                )
-                self.last_actor_action_logits = base_action_logits
-                self.last_object_residual_logits = object_delta_logits
-                self.last_object_action_gate = object_action_gate
-            else:
-                action_logits = self.actor_head(x_actor)
-                self.last_actor_action_logits = action_logits
+            action_logits = self.actor_head(x_actor)
+            self.last_actor_action_logits = action_logits
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
                 if object_selection_logits is not None:
