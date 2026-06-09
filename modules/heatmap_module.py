@@ -249,7 +249,6 @@ class HeatmapModule(pl.LightningModule):
                 "model.actor_head",
                 "model.presence_head",
                 "model.object_selection_head",
-                "model.object_action_residual",
             ]
             if self.model.hparams.get("use_register_tokens", 0):
                 allowed_missing.append("model.net.register_tokens")
@@ -378,11 +377,6 @@ class HeatmapModule(pl.LightningModule):
             and getattr(self.model, "object_selection_head", None) is not None
         ):
             params += list(self.model.object_selection_head.parameters())
-        if (
-            self.scene_object_tokens
-            and getattr(self.model, "object_action_residual", None) is not None
-        ):
-            params += list(self.model.object_action_residual.parameters())
         for name, param in self.model.net.named_parameters():
             if self.scene_object_tokens and self._object_prompt_param_name(name):
                 params.append(param)
@@ -1928,6 +1922,19 @@ class HeatmapModule(pl.LightningModule):
             residual_logits[valid].float().abs().amax(),
             count,
         )
+        gate = getattr(self.model, "last_object_action_gate", None)
+        if gate is not None:
+            gate = gate.to(device=final_logits.device)
+            self._log_scalar(
+                f"{stage}_object_action_gate_mean",
+                gate[valid].float().mean(),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_object_action_gate_max",
+                gate[valid].float().amax(),
+                count,
+            )
         self._log_scalar(
             f"{stage}_object_residual_changed_pred_rate",
             masks["changed"][valid].float().mean(),

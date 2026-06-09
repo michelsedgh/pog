@@ -9,68 +9,6 @@ import os
 import os.path
 import pickle
 
-from datasets.object_vocab import OBJECT_TO_ID
-from datasets.toyota_action_taxonomy import (
-    toyota_action_object_map,
-    toyota_action_to_index,
-)
-
-
-def _toyota_object_residual_action_indices(
-    num_classes,
-    task_type="CS",
-    action_taxonomy="toyota_31",
-):
-    action_to_index = toyota_action_to_index(task_type, action_taxonomy)
-    if int(num_classes) != len(action_to_index):
-        raise ValueError(
-            "Toyota object-logit residuals require num_classes to match the "
-            f"{action_taxonomy} {task_type} action space: "
-            f"expected {len(action_to_index)}, got {num_classes}."
-        )
-    indices = []
-    for action_name in sorted(toyota_action_object_map(task_type, action_taxonomy)):
-        if action_name not in action_to_index:
-            raise ValueError(f"Missing Toyota action index for {action_name}")
-        index = int(action_to_index[action_name])
-        indices.append(index)
-    if not indices:
-        raise ValueError("No Toyota object-action indices available for residual head")
-    return sorted(set(indices))
-
-
-def _toyota_object_residual_action_indices_by_object(
-    num_classes,
-    task_type="CS",
-    action_taxonomy="toyota_31",
-):
-    action_to_index = toyota_action_to_index(task_type, action_taxonomy)
-    if int(num_classes) != len(action_to_index):
-        raise ValueError(
-            "Toyota object-logit residuals require num_classes to match the "
-            f"{action_taxonomy} {task_type} action space: "
-            f"expected {len(action_to_index)}, got {num_classes}."
-        )
-    indices_by_object = {}
-    for action_name, object_names in toyota_action_object_map(
-        task_type,
-        action_taxonomy,
-    ).items():
-        if action_name not in action_to_index:
-            raise ValueError(f"Missing Toyota action index for {action_name}")
-        action_index = int(action_to_index[action_name])
-        for object_name in object_names:
-            if object_name not in OBJECT_TO_ID:
-                raise ValueError(f"Missing Toyota object index for {object_name}")
-            object_id = int(OBJECT_TO_ID[object_name])
-            indices_by_object.setdefault(object_id, set()).add(action_index)
-    if not indices_by_object:
-        raise ValueError("No Toyota object/action compatibility entries available")
-    return {
-        object_id: sorted(action_indices)
-        for object_id, action_indices in indices_by_object.items()
-    }
-
 
 def load_state_dict(
     model, state_dict, prefix="", ignore_missing="relative_position_index"
@@ -229,132 +167,127 @@ class ActorObjectSelectionHead(nn.Module):
         return torch.cat([none_logits, object_logits], dim=-1)
 
 
-class ActorObjectActionResidual(nn.Module):
-    def __init__(
-        self,
-        dim,
-        num_classes,
-        allowed_action_indices,
-        object_action_indices,
-        num_object_classes,
-        hidden_dim=512,
-    ):
+class ActorObjectConditionedActionHead(nn.Module):
+    def __init__(self, dim, num_classes, hidden_dim=512):
         super().__init__()
         self.num_classes = int(num_classes)
-        self.num_object_classes = int(num_object_classes)
+        self.none_object_context = nn.Parameter(torch.zeros(1, 1, dim))
         self.actor_norm = nn.LayerNorm(dim)
         self.object_norm = nn.LayerNorm(dim)
-        self.residual = nn.Sequential(
-            nn.LayerNorm(dim * 3),
-            nn.Linear(dim * 3, hidden_dim),
+        fusion_dim = dim * 3 + 3
+        self.fusion = nn.Sequential(
+            nn.LayerNorm(fusion_dim),
+            nn.Linear(fusion_dim, hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, self.num_classes),
+            nn.Linear(hidden_dim, dim),
         )
-        final = self.residual[-1]
-        nn.init.zeros_(final.weight)
-        nn.init.zeros_(final.bias)
-        mask = torch.zeros(self.num_classes, dtype=torch.float32)
-        for index in allowed_action_indices:
-            if 0 <= int(index) < self.num_classes:
-                mask[int(index)] = 1.0
-        self.register_buffer(
-            "allowed_action_mask",
-            mask.view(1, 1, self.num_classes),
-            persistent=False,
+        self.gate = nn.Sequential(
+            nn.LayerNorm(fusion_dim),
+            nn.Linear(fusion_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1),
         )
-        object_action_mask = torch.zeros(
-            self.num_object_classes,
-            self.num_classes,
-            dtype=torch.float32,
-        )
-        for object_id, action_indices in object_action_indices.items():
-            if not (0 <= int(object_id) < self.num_object_classes):
-                continue
-            for action_index in action_indices:
-                if 0 <= int(action_index) < self.num_classes:
-                    object_action_mask[int(object_id), int(action_index)] = 1.0
-        self.register_buffer(
-            "object_action_mask",
-            object_action_mask,
-            persistent=False,
-        )
+        self.action_head = nn.Linear(dim, self.num_classes)
+        nn.init.zeros_(self.fusion[-1].weight)
+        nn.init.zeros_(self.fusion[-1].bias)
+        nn.init.zeros_(self.gate[-1].weight)
+        nn.init.zeros_(self.gate[-1].bias)
+
+    def _selector_features(self, probs):
+        none_prob = probs[..., :1]
+        object_probs = probs[..., 1:]
+        if object_probs.shape[-1] > 0:
+            top_object_prob = object_probs.amax(dim=-1, keepdim=True)
+        else:
+            top_object_prob = torch.zeros_like(none_prob)
+        safe_probs = probs.clamp_min(torch.finfo(probs.dtype).tiny)
+        entropy = -(probs * safe_probs.log()).sum(dim=-1, keepdim=True)
+        if probs.shape[-1] > 1:
+            entropy = entropy / torch.log(
+                torch.tensor(
+                    float(probs.shape[-1]),
+                    device=probs.device,
+                    dtype=probs.dtype,
+                )
+            )
+        return torch.cat((none_prob, top_object_prob, entropy), dim=-1)
 
     def forward(
         self,
         actor_tokens,
-        object_tokens,
-        object_selection_logits,
-        object_classes,
-        object_valid,
+        object_tokens=None,
+        object_selection_logits=None,
+        object_valid=None,
+        return_parts=False,
     ):
+        base_logits = self.action_head(actor_tokens)
+        if object_tokens is None or object_selection_logits is None:
+            if return_parts:
+                zeros = torch.zeros_like(base_logits)
+                return base_logits, base_logits, zeros, None
+            return base_logits
         if actor_tokens.ndim != 3 or object_tokens.ndim != 3:
             raise ValueError("actor_tokens and object_tokens must be rank-3 tensors")
-        if object_selection_logits.ndim != 3:
-            raise ValueError("object_selection_logits must be rank-3")
         expected = (actor_tokens.shape[0], actor_tokens.shape[1], object_tokens.shape[1] + 1)
         if object_selection_logits.shape != expected:
             raise ValueError(
                 "object_selection_logits must have shape "
                 f"{expected}, got {tuple(object_selection_logits.shape)}"
             )
-        if object_classes.shape != object_tokens.shape[:2]:
-            raise ValueError(
-                "object_classes must have shape "
-                f"{tuple(object_tokens.shape[:2])}, got {tuple(object_classes.shape)}"
-            )
+        if object_valid is None:
+            raise ValueError("object_valid is required for object-conditioned actions")
         if object_valid.shape != object_tokens.shape[:2]:
             raise ValueError(
                 "object_valid must have shape "
                 f"{tuple(object_tokens.shape[:2])}, got {tuple(object_valid.shape)}"
             )
 
-        # Index 0 is NONE. Excluding it keeps the object residual small when the
-        # selector believes this actor should use no object.
-        object_probs = object_selection_logits.softmax(dim=-1)[..., 1:]
-        object_valid = object_valid.to(device=object_probs.device, dtype=torch.bool)
-        object_probs = object_probs * object_valid[:, None, :].to(dtype=object_probs.dtype)
-        object_context = torch.einsum("bkm,bmd->bkd", object_probs, object_tokens)
-        actor_norm = self.actor_norm(actor_tokens)
-        object_norm = self.object_norm(object_context)
-        residual_logits = self.residual(
-            torch.cat(
-                (
-                    actor_norm,
-                    object_norm,
-                    actor_norm * object_norm,
-                ),
-                dim=-1,
+        object_valid = object_valid.to(
+            device=object_selection_logits.device,
+            dtype=torch.bool,
+        )
+        object_logits = object_selection_logits[..., 1:].masked_fill(
+            ~object_valid[:, None, :],
+            torch.finfo(object_selection_logits.dtype).min,
+        )
+        selection_logits = torch.cat(
+            (object_selection_logits[..., :1], object_logits),
+            dim=-1,
+        )
+        probs = selection_logits.softmax(dim=-1)
+        object_probs = probs[..., 1:]
+        none_context = self.none_object_context.to(
+            device=actor_tokens.device,
+            dtype=actor_tokens.dtype,
+        )
+        object_context = (
+            probs[..., :1].to(dtype=actor_tokens.dtype) * none_context
+            + torch.einsum(
+                "bkm,bmd->bkd",
+                object_probs.to(dtype=object_tokens.dtype),
+                object_tokens,
             )
         )
-        mask = self.allowed_action_mask.to(
-            device=residual_logits.device,
-            dtype=residual_logits.dtype,
+
+        actor_norm = self.actor_norm(actor_tokens)
+        object_norm = self.object_norm(object_context)
+        selector_features = self._selector_features(probs).to(dtype=actor_tokens.dtype)
+        fusion_input = torch.cat(
+            (
+                actor_norm,
+                object_norm,
+                actor_norm * object_norm,
+                selector_features,
+            ),
+            dim=-1,
         )
-        object_classes = object_classes.to(device=residual_logits.device, dtype=torch.long)
-        valid_class = (
-            object_valid
-            & (object_classes >= 0)
-            & (object_classes < self.num_object_classes)
-        )
-        safe_classes = torch.where(
-            valid_class,
-            object_classes,
-            torch.zeros_like(object_classes),
-        )
-        slot_action_mask = self.object_action_mask.to(
-            device=residual_logits.device,
-            dtype=residual_logits.dtype,
-        )[safe_classes]
-        slot_action_mask = slot_action_mask * valid_class[:, :, None].to(
-            dtype=residual_logits.dtype,
-        )
-        compatibility_mask = torch.einsum(
-            "bkm,bmc->bkc",
-            object_probs.to(dtype=residual_logits.dtype),
-            slot_action_mask,
-        )
-        residual_logits = residual_logits * mask * compatibility_mask
-        return residual_logits.to(dtype=actor_tokens.dtype)
+        gate = torch.sigmoid(self.gate(fusion_input))
+        fused_actor = actor_tokens + gate * self.fusion(fusion_input)
+        final_logits = self.action_head(fused_actor)
+        object_delta_logits = final_logits - base_logits
+        if return_parts:
+            return final_logits, base_logits, object_delta_logits, gate
+        return final_logits
 
 
 class POGUISE(pl.LightningModule):
@@ -367,7 +300,8 @@ class POGUISE(pl.LightningModule):
             self.hparams.get("actor_interaction_heatmaps", 0)
         )
         self.scene_object_tokens = bool(self.hparams.get("scene_object_tokens", 0))
-        self.actor_object_logit_residual = self.scene_object_tokens
+        self.actor_object_logit_residual = False
+        self.actor_object_conditioned_action = self.scene_object_tokens
         if self.scene_object_tokens and not self.actor_prompt:
             raise ValueError("scene_object_tokens requires actor_prompt")
         if self.actor_interaction_heatmaps and not self.actor_prompt:
@@ -489,7 +423,14 @@ class POGUISE(pl.LightningModule):
         self.net.head = nn.Identity(self.net.num_features, self.net.num_features)
         self.head = nn.Linear(self.net.num_features, self.hparams.num_classes)
         if self.actor_prompt:
-            self.actor_head = nn.Linear(self.net.num_features, self.hparams.num_classes)
+            self.actor_head = (
+                ActorObjectConditionedActionHead(
+                    self.net.num_features,
+                    self.hparams.num_classes,
+                )
+                if self.scene_object_tokens
+                else nn.Linear(self.net.num_features, self.hparams.num_classes)
+            )
             self.presence_head = (
                 nn.Linear(self.net.num_features, 1)
                 if self.hparams.get("actor_presence_head", 0)
@@ -497,32 +438,6 @@ class POGUISE(pl.LightningModule):
             )
             self.object_selection_head = (
                 ActorObjectSelectionHead(self.net.num_features)
-                if self.scene_object_tokens
-                else None
-            )
-            object_residual_action_indices = _toyota_object_residual_action_indices(
-                self.hparams.num_classes,
-                task_type=self.hparams.get("task_type", "CS"),
-                action_taxonomy=self.hparams.get("toyota_action_taxonomy", "toyota_31"),
-            )
-            object_residual_action_indices_by_object = (
-                _toyota_object_residual_action_indices_by_object(
-                    self.hparams.num_classes,
-                    task_type=self.hparams.get("task_type", "CS"),
-                    action_taxonomy=self.hparams.get(
-                        "toyota_action_taxonomy",
-                        "toyota_31",
-                    ),
-                )
-            )
-            self.object_action_residual = (
-                ActorObjectActionResidual(
-                    self.net.num_features,
-                    self.hparams.num_classes,
-                    object_residual_action_indices,
-                    object_residual_action_indices_by_object,
-                    self.hparams.get("num_object_classes", 19),
-                )
                 if self.scene_object_tokens
                 else None
             )
@@ -582,9 +497,6 @@ class POGUISE(pl.LightningModule):
             if self.object_selection_head is not None:
                 for param in self.object_selection_head.parameters():
                     param.requires_grad = True
-            if getattr(self, "object_action_residual", None) is not None:
-                for param in self.object_action_residual.parameters():
-                    param.requires_grad = True
         interaction_unfreeze_last_blocks = int(
             self.hparams.get("interaction_unfreeze_last_blocks", 0) or 0
         )
@@ -633,9 +545,6 @@ class POGUISE(pl.LightningModule):
                         param.requires_grad = True
                 if self.object_selection_head is not None:
                     for param in self.object_selection_head.parameters():
-                        param.requires_grad = True
-                if getattr(self, "object_action_residual", None) is not None:
-                    for param in self.object_action_residual.parameters():
                         param.requires_grad = True
 
     def _freeze_stages(self):
@@ -716,27 +625,30 @@ class POGUISE(pl.LightningModule):
                 )
             if self.hparams.ret_feat:
                 return x_actor
-            action_logits = self.actor_head(x_actor)
-            self.last_actor_action_logits = action_logits
+            self.last_actor_action_logits = None
             self.last_object_residual_logits = None
-            if getattr(self, "object_action_residual", None) is not None:
-                if object_selection_logits is None:
-                    raise RuntimeError(
-                        "scene_object_tokens requires object_selection_logits"
-                    )
-                if object_classes is None or object_valid is None:
-                    raise RuntimeError(
-                        "scene_object_tokens requires object classes and valid mask"
-                    )
-                object_residual_logits = self.object_action_residual(
+            self.last_object_action_gate = None
+            if self.scene_object_tokens:
+                if object_selection_logits is None or object_valid is None:
+                    raise RuntimeError("scene_object_tokens requires object outputs")
+                (
+                    action_logits,
+                    base_action_logits,
+                    object_delta_logits,
+                    object_action_gate,
+                ) = self.actor_head(
                     x_actor,
                     x_object,
                     object_selection_logits,
-                    object_classes.to(device=x_actor.device, dtype=torch.long),
                     object_valid.to(device=x_actor.device, dtype=torch.bool),
+                    return_parts=True,
                 )
-                self.last_object_residual_logits = object_residual_logits
-                action_logits = action_logits + object_residual_logits
+                self.last_actor_action_logits = base_action_logits
+                self.last_object_residual_logits = object_delta_logits
+                self.last_object_action_gate = object_action_gate
+            else:
+                action_logits = self.actor_head(x_actor)
+                self.last_actor_action_logits = action_logits
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
                 if object_selection_logits is not None:

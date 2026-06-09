@@ -70,6 +70,8 @@ CORE_COLUMNS = [
     "val_objectless_with_book_visible_count",
     "val_objectless_with_phone_visible_acc",
     "val_objectless_with_phone_visible_count",
+    "val_object_action_gate_mean",
+    "val_object_action_gate_max",
     "val_object_residual_changed_pred_rate",
     "val_object_residual_fix_rate",
     "val_object_residual_hurt_rate",
@@ -656,6 +658,8 @@ def print_decision(epoch_df):
     residual_changed = metric(latest, "val_object_residual_changed_pred_rate")
     residual_fix = metric(latest, "val_object_residual_fix_rate")
     residual_hurt = metric(latest, "val_object_residual_hurt_rate")
+    object_gate_mean = metric(latest, "val_object_action_gate_mean")
+    object_gate_max = metric(latest, "val_object_action_gate_max")
     laptop_to_book = metric(
         latest,
         "val_object_residual_base_Uselaptop_final_Readbook_rate",
@@ -699,9 +703,14 @@ def print_decision(epoch_df):
         )
     if pd.notna(residual_changed):
         print(
-            "object residual: "
+            "object action delta: "
             f"changed {fmt(residual_changed)}, fix {fmt(residual_fix)}, "
             f"hurt {fmt(residual_hurt)}, laptop_to_book {fmt(laptop_to_book)}"
+        )
+    if pd.notna(object_gate_mean):
+        print(
+            "object action gate: "
+            f"mean {fmt(object_gate_mean)}, max {fmt(object_gate_max)}"
         )
     if pd.notna(deploy_laptop_to_book):
         print(f"deploy laptop_to_book penalty signal: {fmt(deploy_laptop_to_book)}")
@@ -808,12 +817,18 @@ def print_row(title, row):
         )
     if pd.notna(metric(row, "val_object_residual_changed_pred_rate")):
         print(
-            "object residual: "
+            "object action delta: "
             f"changed {metric(row, 'val_object_residual_changed_pred_rate'):.4f}, "
             f"fix {metric(row, 'val_object_residual_fix_rate'):.4f}, "
             f"hurt {metric(row, 'val_object_residual_hurt_rate'):.4f}, "
             "laptop_to_book "
             f"{metric(row, 'val_object_residual_base_Uselaptop_final_Readbook_rate'):.4f}"
+        )
+    if pd.notna(metric(row, "val_object_action_gate_mean")):
+        print(
+            "object action gate: "
+            f"mean {metric(row, 'val_object_action_gate_mean'):.4f}, "
+            f"max {metric(row, 'val_object_action_gate_max'):.4f}"
         )
     print(
         "poguise+ heatmap loss: "

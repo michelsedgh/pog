@@ -568,7 +568,10 @@ class TorchActorBackend:
         self.input_size = MODEL_INPUT_SIZE
         self.backend_name = "pytorch"
         self.scene_object_tokens = bool(self.hparams.get("scene_object_tokens", 0))
-        self.actor_object_logit_residual = self.scene_object_tokens
+        self.actor_object_logit_residual = False
+        self.actor_object_conditioned_action = bool(
+            getattr(self.model, "actor_object_conditioned_action", self.scene_object_tokens)
+        )
         self.num_scene_object_tokens = (
             int(self.hparams.get("num_scene_object_tokens", 0))
             if self.scene_object_tokens
@@ -632,7 +635,10 @@ class TensorRTLiveActorBackend:
         self.input_size = int(self.engine.input_size)
         self.backend_name = "tensorrt"
         self.scene_object_tokens = bool(self.engine.scene_object_tokens)
-        self.actor_object_logit_residual = self.scene_object_tokens
+        self.actor_object_logit_residual = bool(self.engine.actor_object_logit_residual)
+        self.actor_object_conditioned_action = bool(
+            getattr(self.engine, "actor_object_conditioned_action", self.scene_object_tokens)
+        )
         self.num_scene_object_tokens = int(self.engine.num_scene_object_tokens)
         if self.clip_frames != TRAINING_CLIP_FRAMES:
             raise RuntimeError(
@@ -710,6 +716,9 @@ def run_actor_smoke(args, actor):
             "device": str(actor.device),
             "scene_object_tokens": bool(actor.scene_object_tokens),
             "actor_object_logit_residual": bool(actor.actor_object_logit_residual),
+            "actor_object_conditioned_action": bool(
+                actor.actor_object_conditioned_action
+            ),
             "num_scene_object_tokens": int(actor.num_scene_object_tokens),
             "clip_frames": TRAINING_CLIP_FRAMES,
             "span_frames": TRAINING_SPAN_FRAMES,
@@ -740,6 +749,8 @@ class DashboardState:
             "actor_backend": None,
             "actor_device": None,
             "scene_object_tokens": None,
+            "actor_object_logit_residual": None,
+            "actor_object_conditioned_action": None,
             "num_scene_object_tokens": None,
             "detector_backend": None,
             "last_detector_ms": None,
@@ -924,6 +935,9 @@ class LiveRunner:
             actor_device=str(self.actor.device),
             scene_object_tokens=bool(self.actor.scene_object_tokens),
             actor_object_logit_residual=bool(self.actor.actor_object_logit_residual),
+            actor_object_conditioned_action=bool(
+                self.actor.actor_object_conditioned_action
+            ),
             num_scene_object_tokens=int(self.actor.num_scene_object_tokens),
             detector_backend=self.detector_backend_name,
             crop_mode=self.args.crop_mode,

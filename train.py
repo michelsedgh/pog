@@ -160,6 +160,17 @@ def _initialize_actor_prompt_from_checkpoint(module, checkpoint):
         if (
             hasattr(model, "actor_head")
             and hasattr(model, "head")
+            and hasattr(model.actor_head, "action_head")
+            and model.actor_head.action_head.weight.shape == model.head.weight.shape
+            and not _checkpoint_has_key(checkpoint, "model.actor_head.action_head.weight")
+        ):
+            model.actor_head.action_head.weight.copy_(model.head.weight)
+            model.actor_head.action_head.bias.copy_(model.head.bias)
+            initialized.append("actor_head.action_head")
+        elif (
+            hasattr(model, "actor_head")
+            and hasattr(model, "head")
+            and hasattr(model.actor_head, "weight")
             and model.actor_head.weight.shape == model.head.weight.shape
             and not _checkpoint_has_key(checkpoint, "model.actor_head.weight")
         ):
@@ -248,6 +259,49 @@ def _initialize_actor_prompt_from_checkpoint(module, checkpoint):
         )
 
 
+def _adapt_actor_conditioned_head_checkpoint(module, checkpoint):
+    if checkpoint is None:
+        return
+    state_dict = checkpoint.get("state_dict", {})
+    model = module.model
+    actor_head = getattr(model, "actor_head", None)
+    action_head = getattr(actor_head, "action_head", None)
+    if action_head is None:
+        return
+    legacy_w = "model.actor_head.weight"
+    legacy_b = "model.actor_head.bias"
+    new_w = "model.actor_head.action_head.weight"
+    new_b = "model.actor_head.action_head.bias"
+    adapted = False
+    if (
+        new_w not in state_dict
+        and new_b not in state_dict
+        and legacy_w in state_dict
+        and legacy_b in state_dict
+        and tuple(state_dict[legacy_w].shape) == tuple(action_head.weight.shape)
+        and tuple(state_dict[legacy_b].shape) == tuple(action_head.bias.shape)
+    ):
+        state_dict[new_w] = state_dict[legacy_w]
+        state_dict[new_b] = state_dict[legacy_b]
+        adapted = True
+    state_dict.pop(legacy_w, None)
+    state_dict.pop(legacy_b, None)
+    residual_keys = [
+        key
+        for key in list(state_dict)
+        if key.startswith("model.object_action_residual.")
+    ]
+    for key in residual_keys:
+        state_dict.pop(key)
+    if adapted:
+        print("Adapted legacy actor_head weights into object-conditioned action head.")
+    if residual_keys:
+        print(
+            "Discarded legacy object_action_residual weights; "
+            "using object-conditioned action head."
+        )
+
+
 def _adapt_heatmap_final_layer_checkpoint(module, checkpoint):
     if checkpoint is None:
         return
@@ -331,9 +385,9 @@ def _validate_no_deprecated_object_path(checkpoint):
     if deprecated:
         preview = ", ".join(deprecated[:12])
         raise ValueError(
-            "Deprecated object specialist/residual checkpoint detected. The active "
+            "Deprecated object specialist checkpoint detected. The active "
             "actor-object path uses actor interaction heatmaps, scene object "
-            "tokens, object selection, and masked object-logit residuals. "
+            "tokens, object selection, and an object-conditioned action head. "
             f"First deprecated keys: {preview}"
         )
 
@@ -479,6 +533,7 @@ def main():
     module = HeatmapModule(model=POGUISE, **vars(hparams))
 
     if checkpoint is not None:
+        _adapt_actor_conditioned_head_checkpoint(module, checkpoint)
         _adapt_heatmap_final_layer_checkpoint(module, checkpoint)
         strict = (
             bool(hparams.strict_load)

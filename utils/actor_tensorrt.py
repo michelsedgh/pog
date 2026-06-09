@@ -77,6 +77,15 @@ class TensorRTActorEngine:
         }
         input_set = set(self.input_names)
         self.scene_object_tokens = object_inputs.issubset(input_set)
+        self.actor_object_logit_residual = bool(
+            self.metadata.get("actor_object_logit_residual", False)
+        )
+        self.actor_object_conditioned_action = bool(
+            self.metadata.get(
+                "actor_object_conditioned_action",
+                self.scene_object_tokens and not self.actor_object_logit_residual,
+            )
+        )
         expected_inputs = base_inputs | (object_inputs if self.scene_object_tokens else set())
         expected_outputs = {"logits", "presence"} | (
             {"object_selection"} if self.scene_object_tokens else set()
