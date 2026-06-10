@@ -299,6 +299,7 @@ ACTION_OBJECT_CONFUSERS = {
     "Uselaptop": ("Readbook", "Usetelephone", "WatchTV"),
     "Readbook": ("Uselaptop", "Usetelephone", "WatchTV"),
     "Usetelephone": ("Uselaptop", "Readbook", "WatchTV"),
+    "WatchTV": ("Uselaptop", "Readbook", "Usetelephone"),
     "Drink.Fromcup": ("Drink.Frombottle", "Drink.Fromglass", "Drink.Fromcan"),
     "Drink.Frombottle": ("Drink.Fromcup", "Drink.Fromglass", "Drink.Fromcan"),
     "Pour.Frombottle": ("Drink.Frombottle", "Drink.Fromcup", "Drink.Fromglass"),

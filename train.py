@@ -382,7 +382,6 @@ def _validate_no_deprecated_object_path(checkpoint):
             needle in key
             for needle in (
                 "object_interaction",
-                "object_relation",
                 "specialist",
                 "object_action_fusion",
             )
@@ -400,7 +399,8 @@ def _validate_no_deprecated_object_path(checkpoint):
         raise ValueError(
             "Deprecated object specialist checkpoint detected. The active "
             "actor-object path uses actor interaction heatmaps, scene object "
-            "tokens, object selection, and a plain actor-token action head. "
+            "tokens, object selection, a relation block, and one actor-token "
+            "action head. "
             f"First deprecated keys: {preview}"
         )
 
@@ -508,12 +508,14 @@ def build_parser():
     parser.add_argument("--poguiseplus_normalized_heatmap_loss", type=int, default=0)
     parser.add_argument("--poguiseplus_heatmap_mse_scale", type=float, default=1000.0)
     parser.add_argument("--aux_object_selection_loss_weight", type=float, default=0.5)
+    parser.add_argument("--motion_aux_loss_weight", type=float, default=0.25)
+    parser.add_argument("--object_relevance_loss_weight", type=float, default=0.25)
     parser.add_argument(
         "--objectless_object_action_suppression_loss_weight",
         type=float,
         default=0.0,
     )
-    parser.add_argument("--object_action_confuser_loss_weight", type=float, default=0.0)
+    parser.add_argument("--object_action_confuser_loss_weight", type=float, default=0.25)
     parser.add_argument("--object_action_confuser_margin", type=float, default=0.5)
     parser.add_argument("--deepspeed_optim", type=int, default=0)
     parser.add_argument("--kp_only", type=int, default=0)

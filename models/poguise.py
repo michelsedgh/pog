@@ -167,71 +167,206 @@ class ActorObjectSelectionHead(nn.Module):
         return torch.cat([none_logits, object_logits], dim=-1)
 
 
-class ActorObjectRelationBlock(nn.Module):
-    def __init__(self, dim, hidden_dim=512):
+class ActorObjectRelationLayer(nn.Module):
+    def __init__(self, dim, num_heads=8, hidden_dim=None):
         super().__init__()
+        if dim % int(num_heads) != 0:
+            raise ValueError("dim must be divisible by num_heads")
+        hidden_dim = int(hidden_dim or dim * 4)
+        self.num_heads = int(num_heads)
+        self.head_dim = dim // self.num_heads
+        self.scale = self.head_dim ** -0.5
         self.actor_norm = nn.LayerNorm(dim)
         self.object_norm = nn.LayerNorm(dim)
-        self.fusion = nn.Sequential(
-            nn.Linear(dim * 2, hidden_dim),
+        self.query = nn.Linear(dim, dim)
+        self.key = nn.Linear(dim, dim)
+        self.value = nn.Linear(dim, dim)
+        self.out = nn.Linear(dim, dim)
+        self.ffn = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, dim),
         )
-        self.relation_scale = nn.Parameter(torch.ones(()))
-        nn.init.zeros_(self.fusion[-1].weight)
-        nn.init.zeros_(self.fusion[-1].bias)
-
-    def _teacher_object_weights(
-        self,
-        object_tokens,
-        teacher_indices,
-        teacher_valid,
-    ):
-        if teacher_indices.ndim != 2:
-            raise ValueError("teacher_indices must have shape [batch, actors]")
-        if teacher_indices.shape[0] != object_tokens.shape[0]:
-            raise ValueError("teacher_indices batch size must match object_tokens")
-        if teacher_valid.shape != teacher_indices.shape:
-            raise ValueError(
-                "teacher_valid must have the same shape as teacher_indices"
-            )
-        batch, _, _ = object_tokens.shape
-        num_actors = teacher_indices.shape[1]
-        num_objects = object_tokens.shape[1]
-        weights = object_tokens.new_zeros((batch, num_actors, num_objects))
-        teacher_indices = teacher_indices.to(
-            device=object_tokens.device,
-            dtype=torch.long,
+        self.geometry_bias = nn.Sequential(
+            nn.Linear(7, 64),
+            nn.GELU(),
+            nn.Linear(64, self.num_heads),
         )
-        teacher_valid = teacher_valid.to(device=object_tokens.device, dtype=torch.bool)
-        selected = teacher_valid & (teacher_indices > 0)
-        if selected.any():
-            rows, actor_slots = torch.nonzero(selected, as_tuple=True)
-            object_slots = (teacher_indices[selected] - 1).clamp(0, num_objects - 1)
-            weights[rows, actor_slots, object_slots] = 1.0
-        return weights
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+        nn.init.zeros_(self.ffn[-1].weight)
+        nn.init.zeros_(self.ffn[-1].bias)
+        nn.init.zeros_(self.geometry_bias[-1].weight)
+        nn.init.zeros_(self.geometry_bias[-1].bias)
 
-    def _predicted_object_weights(
+    def _box_geometry_bias(
         self,
-        object_selection_logits,
-        object_valid,
+        actor_boxes,
+        object_boxes,
+        object_confs,
+        batch,
+        num_actors,
+        num_objects,
+        device,
         dtype,
     ):
+        if actor_boxes is None or object_boxes is None:
+            return torch.zeros(
+                batch,
+                self.num_heads,
+                num_actors,
+                num_objects,
+                device=device,
+                dtype=dtype,
+            )
+
+        actor_boxes = actor_boxes.to(device=device, dtype=dtype)
+        object_boxes = object_boxes.to(device=device, dtype=dtype)
+        actor_xy1 = actor_boxes[..., :2]
+        actor_xy2 = actor_boxes[..., 2:].clamp_min(actor_xy1 + 1e-4)
+        object_xy1 = object_boxes[..., :2]
+        object_xy2 = object_boxes[..., 2:].clamp_min(object_xy1 + 1e-4)
+
+        actor_ctr = (actor_xy1 + actor_xy2) * 0.5
+        object_ctr = (object_xy1 + object_xy2) * 0.5
+        actor_size = (actor_xy2 - actor_xy1).clamp_min(1e-4)
+        object_size = (object_xy2 - object_xy1).clamp_min(1e-4)
+
+        delta = object_ctr[:, None, :, :] - actor_ctr[:, :, None, :]
+        normalized_delta = delta / actor_size[:, :, None, :]
+        size_ratio = torch.log(object_size[:, None, :, :] / actor_size[:, :, None, :])
+        actor_area = actor_size[..., 0] * actor_size[..., 1]
+        object_area = object_size[..., 0] * object_size[..., 1]
+        area_ratio = torch.log(object_area[:, None, :] / actor_area[:, :, None])
+
+        inter_xy1 = torch.maximum(actor_xy1[:, :, None, :], object_xy1[:, None, :, :])
+        inter_xy2 = torch.minimum(actor_xy2[:, :, None, :], object_xy2[:, None, :, :])
+        inter_size = (inter_xy2 - inter_xy1).clamp_min(0.0)
+        inter_area = inter_size[..., 0] * inter_size[..., 1]
+        union_area = (
+            actor_area[:, :, None] + object_area[:, None, :] - inter_area
+        ).clamp_min(1e-6)
+        iou = inter_area / union_area
+
+        if object_confs is None:
+            conf = torch.ones(batch, num_objects, device=device, dtype=dtype)
+        else:
+            conf = object_confs.to(device=device, dtype=dtype).clamp(0.0, 1.0)
+        conf = conf[:, None, :].expand(-1, num_actors, -1)
+
+        features = torch.stack(
+            (
+                normalized_delta[..., 0],
+                normalized_delta[..., 1],
+                size_ratio[..., 0],
+                size_ratio[..., 1],
+                area_ratio,
+                iou,
+                conf,
+            ),
+            dim=-1,
+        )
+        bias = self.geometry_bias(features.float()).to(dtype=dtype)
+        return bias.permute(0, 3, 1, 2).contiguous()
+
+    def forward(
+        self,
+        actor_tokens,
+        object_tokens,
+        object_valid,
+        object_prior,
+        actor_boxes=None,
+        object_boxes=None,
+        object_confs=None,
+    ):
+        batch, num_actors, dim = actor_tokens.shape
+        num_objects = object_tokens.shape[1]
+        if object_prior.shape != (batch, num_actors, num_objects):
+            raise ValueError(
+                "object_prior must have shape "
+                f"{(batch, num_actors, num_objects)}, got {tuple(object_prior.shape)}"
+            )
+
+        q = self.query(self.actor_norm(actor_tokens))
+        k = self.key(self.object_norm(object_tokens))
+        v = self.value(self.object_norm(object_tokens))
+        q = q.view(batch, num_actors, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(batch, num_objects, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(batch, num_objects, self.num_heads, self.head_dim).transpose(1, 2)
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        prior = object_prior.to(device=scores.device, dtype=scores.dtype).clamp_min(1e-6)
+        scores = scores + prior[:, None, :, :].log()
+        scores = scores + self._box_geometry_bias(
+            actor_boxes,
+            object_boxes,
+            object_confs,
+            batch,
+            num_actors,
+            num_objects,
+            scores.device,
+            scores.dtype,
+        )
+
+        object_valid = object_valid.to(device=scores.device, dtype=torch.bool)
+        mask = object_valid[:, None, None, :]
+        scores = scores.masked_fill(~mask, torch.finfo(scores.dtype).min)
+        has_object = object_valid.any(dim=-1)
+        scores = torch.where(
+            has_object[:, None, None, None],
+            scores,
+            torch.zeros_like(scores),
+        )
+        attn = scores.float().softmax(dim=-1).to(dtype=scores.dtype)
+        attn = attn * mask.to(dtype=attn.dtype)
+
+        context = torch.matmul(attn, v)
+        context = context.transpose(1, 2).reshape(batch, num_actors, dim)
+        actor_tokens = actor_tokens + self.out(context)
+        actor_tokens = actor_tokens + self.ffn(actor_tokens)
+        return actor_tokens
+
+
+class ActorObjectRelationBlock(nn.Module):
+    def __init__(
+        self,
+        dim,
+        hidden_dim=512,
+        num_layers=2,
+        num_heads=8,
+        relevance_gate_init=-2.0,
+    ):
+        super().__init__()
+        self.object_norm = nn.LayerNorm(dim)
+        self.actor_norm = nn.LayerNorm(dim)
+        self.layers = nn.ModuleList(
+            [
+                ActorObjectRelationLayer(dim, num_heads=num_heads, hidden_dim=hidden_dim)
+                for _ in range(int(num_layers))
+            ]
+        )
+        self.relevance_head = nn.Sequential(
+            nn.LayerNorm(dim * 3 + 3),
+            nn.Linear(dim * 3 + 3, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        self.relation_scale = nn.Parameter(torch.ones(()))
+        nn.init.zeros_(self.relevance_head[-1].weight)
+        nn.init.constant_(self.relevance_head[-1].bias, float(relevance_gate_init))
+
+    def _selection_distribution(self, object_selection_logits, object_valid, dtype):
         if object_selection_logits is None:
             raise ValueError(
                 "object_selection_logits is required for actor-object relation"
             )
         if object_selection_logits.ndim != 3:
             raise ValueError("object_selection_logits must be rank-3")
-        if object_selection_logits.shape[0] != object_valid.shape[0]:
-            raise ValueError(
-                "object_selection_logits batch size must match object_valid"
-            )
         if object_selection_logits.shape[-1] != object_valid.shape[1] + 1:
             raise ValueError(
                 "object_selection_logits last dimension must be num_objects + 1"
             )
-
         object_logits = object_selection_logits[..., 1:].masked_fill(
             ~object_valid[:, None, :],
             torch.finfo(object_selection_logits.dtype).min,
@@ -240,11 +375,22 @@ class ActorObjectRelationBlock(nn.Module):
             (object_selection_logits[..., :1], object_logits),
             dim=-1,
         )
-        # The selector has its own supervised objective. The action loss should
-        # consume its object distribution, not rewrite the selector into an
-        # action shortcut.
-        probs = selection_logits.float().softmax(dim=-1).to(dtype=dtype).detach()
-        return probs[..., 1:]
+        # The action stack must use the same selector distribution at train and
+        # inference time. The selector itself is trained by its own supervised
+        # loss, so the action loss consumes a detached distribution here.
+        return selection_logits.float().softmax(dim=-1).to(dtype=dtype).detach()
+
+    def _selector_features(self, selection_probs):
+        none_prob = selection_probs[..., :1]
+        object_probs = selection_probs[..., 1:]
+        object_mass = object_probs.sum(dim=-1, keepdim=True)
+        top_object_prob = object_probs.amax(dim=-1, keepdim=True)
+        entropy = -(selection_probs.clamp_min(1e-6).log() * selection_probs).sum(
+            dim=-1,
+            keepdim=True,
+        )
+        entropy = entropy / selection_probs.shape[-1]
+        return torch.cat((1.0 - none_prob, top_object_prob, entropy), dim=-1), object_mass
 
     def forward(
         self,
@@ -252,8 +398,9 @@ class ActorObjectRelationBlock(nn.Module):
         object_tokens,
         object_valid,
         object_selection_logits,
-        teacher_indices=None,
-        teacher_valid=None,
+        actor_boxes=None,
+        object_boxes=None,
+        object_confs=None,
     ):
         if actor_tokens.ndim != 3 or object_tokens.ndim != 3:
             raise ValueError("actor_tokens and object_tokens must be rank-3 tensors")
@@ -262,8 +409,6 @@ class ActorObjectRelationBlock(nn.Module):
                 "object_valid must have shape "
                 f"{tuple(object_tokens.shape[:2])}, got {tuple(object_valid.shape)}"
             )
-
-        object_valid = object_valid.to(device=actor_tokens.device, dtype=torch.bool)
         if (
             object_selection_logits is not None
             and object_selection_logits.shape[:2] != actor_tokens.shape[:2]
@@ -271,47 +416,51 @@ class ActorObjectRelationBlock(nn.Module):
             raise ValueError(
                 "object_selection_logits must have shape [batch, actors, objects+1]"
             )
-        if (
-            teacher_indices is not None
-            and teacher_indices.shape != actor_tokens.shape[:2]
-        ):
-            raise ValueError("teacher_indices must have shape [batch, actors]")
-        if teacher_indices is not None or teacher_valid is not None:
-            if teacher_indices is None or teacher_valid is None:
-                raise ValueError(
-                    "teacher_indices and teacher_valid must be provided together"
-                )
-            object_weights = self._teacher_object_weights(
-                object_tokens,
-                teacher_indices,
-                teacher_valid,
-            )
-        else:
-            object_weights = self._predicted_object_weights(
-                object_selection_logits,
-                object_valid,
-                actor_tokens.dtype,
-            )
-        object_weights = object_weights * object_valid[:, None, :].to(
-            dtype=object_weights.dtype
+
+        object_valid = object_valid.to(device=actor_tokens.device, dtype=torch.bool)
+        selection_probs = self._selection_distribution(
+            object_selection_logits,
+            object_valid,
+            actor_tokens.dtype,
         )
-        object_mass = object_weights.sum(dim=-1, keepdim=True)
+        selector_features, object_mass = self._selector_features(selection_probs)
+        object_probs = selection_probs[..., 1:] * object_valid[:, None, :].to(
+            dtype=selection_probs.dtype
+        )
+        conditional_object_probs = object_probs / object_mass.clamp_min(1e-6)
         object_context = torch.einsum(
             "bkm,bmd->bkd",
-            object_weights,
+            conditional_object_probs,
             object_tokens,
         )
-        relation_delta = self.fusion(
-            torch.cat(
-                (
-                    self.actor_norm(actor_tokens),
-                    self.object_norm(object_context),
-                ),
-                dim=-1,
+
+        relation_actor = actor_tokens
+        for layer in self.layers:
+            relation_actor = layer(
+                relation_actor,
+                object_tokens,
+                object_valid,
+                conditional_object_probs,
+                actor_boxes=actor_boxes,
+                object_boxes=object_boxes,
+                object_confs=object_confs,
             )
+        relation_delta = relation_actor - actor_tokens
+
+        relevance_input = torch.cat(
+            (
+                self.actor_norm(actor_tokens),
+                self.object_norm(object_context),
+                self.actor_norm(actor_tokens) * self.object_norm(object_context),
+                selector_features.to(dtype=actor_tokens.dtype),
+            ),
+            dim=-1,
         )
-        relation_delta = relation_delta * object_mass.to(dtype=relation_delta.dtype)
-        return actor_tokens + self.relation_scale * relation_delta
+        relevance_logits = self.relevance_head(relevance_input).squeeze(-1)
+        relevance_gate = torch.sigmoid(relevance_logits).unsqueeze(-1)
+        final_gate = relevance_gate * object_mass.to(dtype=actor_tokens.dtype)
+        fused_actor = actor_tokens + self.relation_scale * final_gate * relation_delta
+        return fused_actor, relevance_logits, object_mass.squeeze(-1)
 
 
 class POGUISE(pl.LightningModule):
@@ -451,6 +600,11 @@ class POGUISE(pl.LightningModule):
                 self.net.num_features,
                 self.hparams.num_classes,
             )
+            self.actor_motion_head = (
+                nn.Linear(self.net.num_features, self.hparams.num_classes)
+                if float(self.hparams.get("motion_aux_loss_weight", 0.25)) > 0.0
+                else None
+            )
             self.presence_head = (
                 nn.Linear(self.net.num_features, 1)
                 if self.hparams.get("actor_presence_head", 0)
@@ -462,7 +616,21 @@ class POGUISE(pl.LightningModule):
                 else None
             )
             self.actor_object_relation = (
-                ActorObjectRelationBlock(self.net.num_features)
+                ActorObjectRelationBlock(
+                    self.net.num_features,
+                    hidden_dim=int(
+                        self.hparams.get("actor_object_relation_hidden_dim", 512)
+                    ),
+                    num_layers=int(
+                        self.hparams.get("actor_object_relation_layers", 2)
+                    ),
+                    num_heads=int(
+                        self.hparams.get("actor_object_relation_heads", 8)
+                    ),
+                    relevance_gate_init=float(
+                        self.hparams.get("actor_object_relevance_gate_init", -2.0)
+                    ),
+                )
                 if self.scene_object_tokens
                 else None
             )
@@ -504,6 +672,9 @@ class POGUISE(pl.LightningModule):
             if self.actor_prompt:
                 for param in self.actor_head.parameters():
                     param.requires_grad = False
+                if self.actor_motion_head is not None:
+                    for param in self.actor_motion_head.parameters():
+                        param.requires_grad = False
                 if self.presence_head is not None:
                     for param in self.presence_head.parameters():
                         param.requires_grad = False
@@ -558,6 +729,9 @@ class POGUISE(pl.LightningModule):
             if not interaction_warmup_freeze_actor_path:
                 for param in self.actor_head.parameters():
                     param.requires_grad = True
+                if self.actor_motion_head is not None:
+                    for param in self.actor_motion_head.parameters():
+                        param.requires_grad = True
                 if hasattr(self.net, "actor_token"):
                     self.net.actor_token.requires_grad = True
                 if hasattr(self.net, "actor_slot_embed"):
@@ -657,21 +831,30 @@ class POGUISE(pl.LightningModule):
                     object_valid.to(device=x_actor.device, dtype=torch.bool),
                 )
             self.last_actor_object_relation_delta = None
+            self.last_actor_object_relevance_logits = None
+            self.last_actor_object_relation_mass = None
+            self.last_actor_motion_logits = None
+            if self.actor_motion_head is not None:
+                self.last_actor_motion_logits = self.actor_motion_head(x_actor)
             action_actor = x_actor
             if self.actor_object_relation is not None:
                 if object_valid is None:
                     raise ValueError(
                         "object_valid is required when scene_object_tokens is enabled"
                     )
-                action_actor = self.actor_object_relation(
+                relation_output = self.actor_object_relation(
                     x_actor,
                     x_object,
                     object_valid.to(device=x_actor.device, dtype=torch.bool),
                     object_selection_logits,
-                    teacher_indices=interaction_object_index,
-                    teacher_valid=interaction_object_index_valid,
+                    actor_boxes=boxes,
+                    object_boxes=object_boxes,
+                    object_confs=object_confs,
                 )
+                action_actor, relevance_logits, relation_mass = relation_output
                 self.last_actor_object_relation_delta = action_actor - x_actor
+                self.last_actor_object_relevance_logits = relevance_logits
+                self.last_actor_object_relation_mass = relation_mass
             if self.hparams.ret_feat:
                 return action_actor
             self.last_actor_action_logits = None
@@ -752,6 +935,18 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--scene_object_tokens", type=int, default=0)
         parser.add_argument("--num_scene_object_tokens", type=int, default=32)
         parser.add_argument("--num_object_classes", type=int, default=19)
+        parser.add_argument("--actor_object_relation_layers", type=int, default=2)
+        parser.add_argument("--actor_object_relation_heads", type=int, default=8)
+        parser.add_argument(
+            "--actor_object_relation_hidden_dim",
+            type=int,
+            default=512,
+        )
+        parser.add_argument(
+            "--actor_object_relevance_gate_init",
+            type=float,
+            default=-2.0,
+        )
         parser.add_argument("--trt_safe_attention", type=int, default=0)
         parser.add_argument("--interaction_unfreeze_last_blocks", type=int, default=0)
         parser.add_argument("--ret_feat", type=int, default=0)

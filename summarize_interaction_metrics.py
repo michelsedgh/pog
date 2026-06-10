@@ -17,6 +17,10 @@ CORE_COLUMNS = [
     "val_deploy_key_action_min",
     "val_deploy_objectless_with_object_visible_acc",
     "val_deploy_objectless_with_object_visible_object_action_pred_rate",
+    "val_deploy_selected_laptop_uselaptop_acc",
+    "val_deploy_selected_laptop_uselaptop_count",
+    "val_deploy_selected_laptop_uselaptop_coverage",
+    "val_deploy_selected_laptop_uselaptop_u_minus_read_margin",
     "val_actor_all_slot_acc",
     "val_actor_slot_consistency",
     "val_actor_pair_acc",
@@ -39,6 +43,11 @@ CORE_COLUMNS = [
     "val_loss_objectless_object_action_suppression",
     "val_loss_object_action_confuser",
     "val_object_action_confuser_violation_rate",
+    "val_loss_motion_aux",
+    "val_motion_aux_acc",
+    "val_loss_object_relevance",
+    "val_object_relevance_acc",
+    "val_object_relevance_pos_rate",
     "train_nash_weight_action",
     "train_nash_weight_heatmap",
     "train_nash_weight_main_deploy",
@@ -74,9 +83,14 @@ CORE_COLUMNS = [
     "val_selected_laptop_pred_Uselaptop_rate",
     "val_selected_laptop_pred_Readbook_rate",
     "val_selected_laptop_pred_WatchTV_rate",
+    "val_selected_laptop_Uselaptop_minus_confuser_logit_margin",
+    "val_selected_laptop_Uselaptop_minus_confuser_prob_margin",
+    "val_selected_laptop_Uselaptop_minus_Readbook_logit_margin",
     "val_actor_object_relation_delta_abs_mean",
     "val_actor_object_relation_delta_l2_mean",
     "val_actor_object_relation_scale",
+    "val_actor_object_relevance_mean",
+    "val_actor_object_relation_mass_mean",
 ]
 
 GROUPS = [
@@ -656,13 +670,43 @@ def print_decision(epoch_df):
     )
     confuser_loss = metric(latest, "val_loss_object_action_confuser")
     confuser_violation = metric(latest, "val_object_action_confuser_violation_rate")
+    motion_aux_loss = metric(latest, "val_loss_motion_aux")
+    motion_aux_acc = metric(latest, "val_motion_aux_acc")
+    relevance_loss = metric(latest, "val_loss_object_relevance")
+    relevance_acc = metric(latest, "val_object_relevance_acc")
     selected_laptop_count = metric(latest, "val_selected_laptop_count")
     selected_laptop_use = metric(latest, "val_selected_laptop_pred_Uselaptop_rate")
     selected_laptop_read = metric(latest, "val_selected_laptop_pred_Readbook_rate")
     selected_laptop_tv = metric(latest, "val_selected_laptop_pred_WatchTV_rate")
+    selected_laptop_margin = metric(
+        latest,
+        "val_selected_laptop_Uselaptop_minus_confuser_logit_margin",
+    )
+    selected_laptop_read_margin = metric(
+        latest,
+        "val_selected_laptop_Uselaptop_minus_Readbook_logit_margin",
+    )
+    deploy_laptop_use_acc = metric(
+        latest,
+        "val_deploy_selected_laptop_uselaptop_acc",
+    )
+    deploy_laptop_use_count = metric(
+        latest,
+        "val_deploy_selected_laptop_uselaptop_count",
+    )
+    deploy_laptop_use_coverage = metric(
+        latest,
+        "val_deploy_selected_laptop_uselaptop_coverage",
+    )
+    deploy_laptop_use_margin = metric(
+        latest,
+        "val_deploy_selected_laptop_uselaptop_u_minus_read_margin",
+    )
     relation_abs = metric(latest, "val_actor_object_relation_delta_abs_mean")
     relation_l2 = metric(latest, "val_actor_object_relation_delta_l2_mean")
     relation_scale = metric(latest, "val_actor_object_relation_scale")
+    relation_relevance = metric(latest, "val_actor_object_relevance_mean")
+    relation_mass = metric(latest, "val_actor_object_relation_mass_mean")
     print("\nDECISION:\n")
     print(f"latest epoch: {latest_epoch}")
     if pd.notna(deploy_score):
@@ -703,20 +747,38 @@ def print_decision(epoch_df):
             "object-action confuser: "
             f"loss {fmt(confuser_loss)}, violation_rate {fmt(confuser_violation)}"
         )
+    if pd.notna(motion_aux_loss) or pd.notna(relevance_loss):
+        print(
+            "aux safeguards: "
+            f"motion_loss {fmt(motion_aux_loss)}, motion_acc {fmt(motion_aux_acc)}, "
+            f"relevance_loss {fmt(relevance_loss)}, relevance_acc {fmt(relevance_acc)}"
+        )
     if pd.notna(selected_laptop_count):
         print(
             "selected laptop actions: "
             f"count {fmt(selected_laptop_count, 0)}, "
             f"Uselaptop {fmt(selected_laptop_use)}, "
             f"Readbook {fmt(selected_laptop_read)}, "
-            f"WatchTV {fmt(selected_laptop_tv)}"
+            f"WatchTV {fmt(selected_laptop_tv)}, "
+            f"margin_vs_confuser {fmt(selected_laptop_margin)}, "
+            f"u_minus_read {fmt(selected_laptop_read_margin)}"
+        )
+    if pd.notna(deploy_laptop_use_acc):
+        print(
+            "deploy selected-laptop/Uselaptop slice: "
+            f"acc {fmt(deploy_laptop_use_acc)}, "
+            f"count {fmt(deploy_laptop_use_count, 0)}, "
+            f"coverage {fmt(deploy_laptop_use_coverage)}, "
+            f"u_minus_read {fmt(deploy_laptop_use_margin)}"
         )
     if pd.notna(relation_abs):
         print(
             "actor-object relation: "
             f"delta_abs {fmt(relation_abs)}, "
             f"delta_l2 {fmt(relation_l2)}, "
-            f"scale {fmt(relation_scale)}"
+            f"scale {fmt(relation_scale)}, "
+            f"relevance {fmt(relation_relevance)}, "
+            f"mass {fmt(relation_mass)}"
         )
     if (
         pd.notna(actor_all_slot)
@@ -825,20 +887,46 @@ def print_row(title, row):
             f"loss {metric(row, 'val_loss_object_action_confuser'):.4f}, "
             f"violation_rate {metric(row, 'val_object_action_confuser_violation_rate'):.4f}"
         )
+    if pd.notna(metric(row, "val_loss_motion_aux")) or pd.notna(
+        metric(row, "val_loss_object_relevance")
+    ):
+        print(
+            "aux safeguards: "
+            f"motion_loss {metric(row, 'val_loss_motion_aux'):.4f}, "
+            f"motion_acc {metric(row, 'val_motion_aux_acc'):.4f}, "
+            f"relevance_loss {metric(row, 'val_loss_object_relevance'):.4f}, "
+            f"relevance_acc {metric(row, 'val_object_relevance_acc'):.4f}"
+        )
     if pd.notna(metric(row, "val_selected_laptop_count")):
         print(
             "selected laptop actions: "
             f"count {metric(row, 'val_selected_laptop_count'):.0f}, "
             f"Uselaptop {metric(row, 'val_selected_laptop_pred_Uselaptop_rate'):.4f}, "
             f"Readbook {metric(row, 'val_selected_laptop_pred_Readbook_rate'):.4f}, "
-            f"WatchTV {metric(row, 'val_selected_laptop_pred_WatchTV_rate'):.4f}"
+            f"WatchTV {metric(row, 'val_selected_laptop_pred_WatchTV_rate'):.4f}, "
+            "margin_vs_confuser "
+            f"{metric(row, 'val_selected_laptop_Uselaptop_minus_confuser_logit_margin'):.4f}, "
+            "u_minus_read "
+            f"{metric(row, 'val_selected_laptop_Uselaptop_minus_Readbook_logit_margin'):.4f}"
+        )
+    if pd.notna(metric(row, "val_deploy_selected_laptop_uselaptop_acc")):
+        print(
+            "deploy selected-laptop/Uselaptop slice: "
+            f"acc {metric(row, 'val_deploy_selected_laptop_uselaptop_acc'):.4f}, "
+            f"count {metric(row, 'val_deploy_selected_laptop_uselaptop_count'):.0f}, "
+            "coverage "
+            f"{metric(row, 'val_deploy_selected_laptop_uselaptop_coverage'):.4f}, "
+            "u_minus_read "
+            f"{metric(row, 'val_deploy_selected_laptop_uselaptop_u_minus_read_margin'):.4f}"
         )
     if pd.notna(metric(row, "val_actor_object_relation_delta_abs_mean")):
         print(
             "actor-object relation: "
             f"delta_abs {metric(row, 'val_actor_object_relation_delta_abs_mean'):.4f}, "
             f"delta_l2 {metric(row, 'val_actor_object_relation_delta_l2_mean'):.4f}, "
-            f"scale {metric(row, 'val_actor_object_relation_scale'):.4f}"
+            f"scale {metric(row, 'val_actor_object_relation_scale'):.4f}, "
+            f"relevance {metric(row, 'val_actor_object_relevance_mean'):.4f}, "
+            f"mass {metric(row, 'val_actor_object_relation_mass_mean'):.4f}"
         )
     print(
         "poguise+ heatmap loss: "
