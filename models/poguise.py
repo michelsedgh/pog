@@ -167,6 +167,79 @@ class ActorObjectSelectionHead(nn.Module):
         return torch.cat([none_logits, object_logits], dim=-1)
 
 
+class ActorObjectRelationBlock(nn.Module):
+    def __init__(self, dim, num_heads=8):
+        super().__init__()
+        if dim % num_heads != 0:
+            raise ValueError(f"dim={dim} must be divisible by num_heads={num_heads}")
+        self.num_heads = int(num_heads)
+        self.head_dim = dim // self.num_heads
+        self.actor_norm = nn.LayerNorm(dim)
+        self.object_norm = nn.LayerNorm(dim)
+        self.query = nn.Linear(dim, dim)
+        self.key = nn.Linear(dim, dim)
+        self.value = nn.Linear(dim, dim)
+        self.out = nn.Linear(dim, dim)
+        self.relation_scale = nn.Parameter(torch.ones(()))
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+
+    def forward(self, actor_tokens, object_tokens, object_valid):
+        if actor_tokens.ndim != 3 or object_tokens.ndim != 3:
+            raise ValueError("actor_tokens and object_tokens must be rank-3 tensors")
+        if object_valid.shape != object_tokens.shape[:2]:
+            raise ValueError(
+                "object_valid must have shape "
+                f"{tuple(object_tokens.shape[:2])}, got {tuple(object_valid.shape)}"
+            )
+
+        object_valid = object_valid.to(device=actor_tokens.device, dtype=torch.bool)
+        bsz, num_actors, _ = actor_tokens.shape
+        num_objects = object_tokens.shape[1]
+        object_tokens = self.object_norm(object_tokens)
+        query = self.query(self.actor_norm(actor_tokens)).reshape(
+            bsz,
+            num_actors,
+            self.num_heads,
+            self.head_dim,
+        ).transpose(1, 2)
+        key = self.key(object_tokens).reshape(
+            bsz,
+            num_objects,
+            self.num_heads,
+            self.head_dim,
+        ).transpose(1, 2)
+        value = self.value(object_tokens).reshape(
+            bsz,
+            num_objects,
+            self.num_heads,
+            self.head_dim,
+        ).transpose(1, 2)
+        scores = torch.matmul(query, key.transpose(-2, -1)) * (self.head_dim ** -0.5)
+        scores = scores.masked_fill(
+            ~object_valid[:, None, None, :],
+            torch.finfo(scores.dtype).min,
+        )
+        has_object = object_valid.any(dim=1, keepdim=True)
+        scores = torch.where(
+            has_object[:, None, :, None],
+            scores,
+            torch.zeros_like(scores),
+        )
+        attn = scores.softmax(dim=-1)
+        attn = attn * object_valid[:, None, None, :].to(dtype=attn.dtype)
+        object_context = torch.matmul(attn, value).transpose(1, 2).reshape(
+            bsz,
+            num_actors,
+            self.num_heads * self.head_dim,
+        )
+        relation_delta = self.out(object_context)
+        relation_delta = relation_delta * has_object.unsqueeze(-1).to(
+            dtype=relation_delta.dtype
+        )
+        return actor_tokens + self.relation_scale * relation_delta
+
+
 class POGUISE(pl.LightningModule):
     def __init__(self, net_size="t", pretrained=None, **kwargs):
         super().__init__()
@@ -314,6 +387,11 @@ class POGUISE(pl.LightningModule):
                 if self.scene_object_tokens
                 else None
             )
+            self.actor_object_relation = (
+                ActorObjectRelationBlock(self.net.num_features)
+                if self.scene_object_tokens
+                else None
+            )
         if self.hparams.get("linear_probe", 0):
             self._freeze_backbone()
             self.head = Classifier(
@@ -370,6 +448,9 @@ class POGUISE(pl.LightningModule):
             if self.object_selection_head is not None:
                 for param in self.object_selection_head.parameters():
                     param.requires_grad = True
+            if self.actor_object_relation is not None:
+                for param in self.actor_object_relation.parameters():
+                    param.requires_grad = True
         interaction_unfreeze_last_blocks = int(
             self.hparams.get("interaction_unfreeze_last_blocks", 0) or 0
         )
@@ -418,6 +499,9 @@ class POGUISE(pl.LightningModule):
                         param.requires_grad = True
                 if self.object_selection_head is not None:
                     for param in self.object_selection_head.parameters():
+                        param.requires_grad = True
+                if self.actor_object_relation is not None:
+                    for param in self.actor_object_relation.parameters():
                         param.requires_grad = True
 
     def _freeze_stages(self):
@@ -496,10 +580,23 @@ class POGUISE(pl.LightningModule):
                     x_object,
                     object_valid.to(device=x_actor.device, dtype=torch.bool),
                 )
+            self.last_actor_object_relation_delta = None
+            action_actor = x_actor
+            if self.actor_object_relation is not None:
+                if object_valid is None:
+                    raise ValueError(
+                        "object_valid is required when scene_object_tokens is enabled"
+                    )
+                action_actor = self.actor_object_relation(
+                    x_actor,
+                    x_object,
+                    object_valid.to(device=x_actor.device, dtype=torch.bool),
+                )
+                self.last_actor_object_relation_delta = action_actor - x_actor
             if self.hparams.ret_feat:
-                return x_actor
+                return action_actor
             self.last_actor_action_logits = None
-            action_logits = self.actor_head(x_actor)
+            action_logits = self.actor_head(action_actor)
             self.last_actor_action_logits = action_logits
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)

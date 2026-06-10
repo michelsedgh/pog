@@ -307,6 +307,12 @@ def _validate_active_actor_action_path(module):
         raise RuntimeError("actor_object_conditioned_action must be disabled.")
     if hasattr(actor_head, "action_head"):
         raise RuntimeError("Legacy actor_head.action_head is still active.")
+    if getattr(model, "scene_object_tokens", False):
+        relation = getattr(model, "actor_object_relation", None)
+        if relation is None:
+            raise RuntimeError(
+                "scene_object_tokens requires the actor-object relation block."
+            )
 
 
 def _adapt_heatmap_final_layer_checkpoint(module, checkpoint):

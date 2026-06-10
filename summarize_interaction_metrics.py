@@ -72,6 +72,9 @@ CORE_COLUMNS = [
     "val_selected_laptop_pred_Uselaptop_rate",
     "val_selected_laptop_pred_Readbook_rate",
     "val_selected_laptop_pred_WatchTV_rate",
+    "val_actor_object_relation_delta_abs_mean",
+    "val_actor_object_relation_delta_l2_mean",
+    "val_actor_object_relation_scale",
 ]
 
 GROUPS = [
@@ -653,6 +656,9 @@ def print_decision(epoch_df):
     selected_laptop_use = metric(latest, "val_selected_laptop_pred_Uselaptop_rate")
     selected_laptop_read = metric(latest, "val_selected_laptop_pred_Readbook_rate")
     selected_laptop_tv = metric(latest, "val_selected_laptop_pred_WatchTV_rate")
+    relation_abs = metric(latest, "val_actor_object_relation_delta_abs_mean")
+    relation_l2 = metric(latest, "val_actor_object_relation_delta_l2_mean")
+    relation_scale = metric(latest, "val_actor_object_relation_scale")
     print("\nDECISION:\n")
     print(f"latest epoch: {latest_epoch}")
     if pd.notna(deploy_score):
@@ -695,6 +701,13 @@ def print_decision(epoch_df):
             f"Uselaptop {fmt(selected_laptop_use)}, "
             f"Readbook {fmt(selected_laptop_read)}, "
             f"WatchTV {fmt(selected_laptop_tv)}"
+        )
+    if pd.notna(relation_abs):
+        print(
+            "actor-object relation: "
+            f"delta_abs {fmt(relation_abs)}, "
+            f"delta_l2 {fmt(relation_l2)}, "
+            f"scale {fmt(relation_scale)}"
         )
     if (
         pd.notna(actor_all_slot)
@@ -804,6 +817,13 @@ def print_row(title, row):
             f"Uselaptop {metric(row, 'val_selected_laptop_pred_Uselaptop_rate'):.4f}, "
             f"Readbook {metric(row, 'val_selected_laptop_pred_Readbook_rate'):.4f}, "
             f"WatchTV {metric(row, 'val_selected_laptop_pred_WatchTV_rate'):.4f}"
+        )
+    if pd.notna(metric(row, "val_actor_object_relation_delta_abs_mean")):
+        print(
+            "actor-object relation: "
+            f"delta_abs {metric(row, 'val_actor_object_relation_delta_abs_mean'):.4f}, "
+            f"delta_l2 {metric(row, 'val_actor_object_relation_delta_l2_mean'):.4f}, "
+            f"scale {metric(row, 'val_actor_object_relation_scale'):.4f}"
         )
     print(
         "poguise+ heatmap loss: "

@@ -1115,6 +1115,40 @@ class HeatmapModule(pl.LightningModule):
                     count,
                 )
 
+    def _log_actor_object_relation_diagnostics(self, stage, valid):
+        if stage == "train" or not self.scene_object_tokens:
+            return
+        relation_delta = getattr(
+            self.model,
+            "last_actor_object_relation_delta",
+            None,
+        )
+        if relation_delta is None:
+            return
+        valid = valid.to(device=relation_delta.device, dtype=torch.bool)
+        if not valid.any():
+            return
+        valid_delta = relation_delta[valid].float()
+        count = int(valid_delta.shape[0])
+        self._log_scalar(
+            f"{stage}_actor_object_relation_delta_abs_mean",
+            valid_delta.abs().mean(),
+            count,
+        )
+        self._log_scalar(
+            f"{stage}_actor_object_relation_delta_l2_mean",
+            valid_delta.norm(dim=-1).mean(),
+            count,
+        )
+        relation = getattr(self.model, "actor_object_relation", None)
+        relation_scale = getattr(relation, "relation_scale", None)
+        if relation_scale is not None:
+            self._log_scalar(
+                f"{stage}_actor_object_relation_scale",
+                relation_scale.detach().float(),
+                count,
+            )
+
     def _append_nash_mtl_params(self, params):
         if not (
             self.model.hparams.grad_weights
@@ -1327,6 +1361,7 @@ class HeatmapModule(pl.LightningModule):
             presence_logits,
             object_selection_logits,
         ) = self._unpack_model_data(data)
+        self._log_actor_object_relation_diagnostics(stage, valid)
 
         valid_preds = preds[valid]
         valid_labels = actions[valid]

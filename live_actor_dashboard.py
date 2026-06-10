@@ -572,6 +572,9 @@ class TorchActorBackend:
         self.actor_object_conditioned_action = bool(
             getattr(self.model, "actor_object_conditioned_action", False)
         )
+        self.actor_object_relation = bool(
+            getattr(self.model, "actor_object_relation", None) is not None
+        )
         self.num_scene_object_tokens = (
             int(self.hparams.get("num_scene_object_tokens", 0))
             if self.scene_object_tokens
@@ -638,6 +641,9 @@ class TensorRTLiveActorBackend:
         self.actor_object_logit_residual = bool(self.engine.actor_object_logit_residual)
         self.actor_object_conditioned_action = bool(
             getattr(self.engine, "actor_object_conditioned_action", False)
+        )
+        self.actor_object_relation = bool(
+            getattr(self.engine, "actor_object_relation", self.scene_object_tokens)
         )
         self.num_scene_object_tokens = int(self.engine.num_scene_object_tokens)
         if self.clip_frames != TRAINING_CLIP_FRAMES:
@@ -719,6 +725,7 @@ def run_actor_smoke(args, actor):
             "actor_object_conditioned_action": bool(
                 actor.actor_object_conditioned_action
             ),
+            "actor_object_relation": bool(actor.actor_object_relation),
             "num_scene_object_tokens": int(actor.num_scene_object_tokens),
             "clip_frames": TRAINING_CLIP_FRAMES,
             "span_frames": TRAINING_SPAN_FRAMES,
@@ -751,6 +758,7 @@ class DashboardState:
             "scene_object_tokens": None,
             "actor_object_logit_residual": None,
             "actor_object_conditioned_action": None,
+            "actor_object_relation": None,
             "num_scene_object_tokens": None,
             "detector_backend": None,
             "last_detector_ms": None,
@@ -938,6 +946,7 @@ class LiveRunner:
             actor_object_conditioned_action=bool(
                 self.actor.actor_object_conditioned_action
             ),
+            actor_object_relation=bool(self.actor.actor_object_relation),
             num_scene_object_tokens=int(self.actor.num_scene_object_tokens),
             detector_backend=self.detector_backend_name,
             crop_mode=self.args.crop_mode,

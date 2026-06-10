@@ -333,7 +333,15 @@ class ActorStageExport(torch.nn.Module):
                 x_object,
                 object_valid.to(device=x_actor.device, dtype=torch.bool),
             )
-        action_logits = self.actor_model.actor_head(x_actor)
+        action_actor = x_actor
+        actor_object_relation = getattr(self.actor_model, "actor_object_relation", None)
+        if actor_object_relation is not None:
+            action_actor = actor_object_relation(
+                x_actor,
+                x_object,
+                object_valid.to(device=x_actor.device, dtype=torch.bool),
+            )
+        action_logits = self.actor_model.actor_head(action_actor)
         presence = self.actor_model.presence_head(x_actor).squeeze(-1)
         if object_selection_logits is None:
             return action_logits, presence
