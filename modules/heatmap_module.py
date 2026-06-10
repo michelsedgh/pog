@@ -244,6 +244,7 @@ class HeatmapModule(pl.LightningModule):
                 "model.actor_head",
                 "model.presence_head",
                 "model.object_selection_head",
+                "model.actor_object_relation",
             ]
             if self.model.hparams.get("use_register_tokens", 0):
                 allowed_missing.append("model.net.register_tokens")
@@ -372,6 +373,11 @@ class HeatmapModule(pl.LightningModule):
             and getattr(self.model, "object_selection_head", None) is not None
         ):
             params += list(self.model.object_selection_head.parameters())
+        if (
+            self.scene_object_tokens
+            and getattr(self.model, "actor_object_relation", None) is not None
+        ):
+            params += list(self.model.actor_object_relation.parameters())
         for name, param in self.model.net.named_parameters():
             if self.scene_object_tokens and self._object_prompt_param_name(name):
                 params.append(param)
