@@ -168,23 +168,93 @@ class ActorObjectSelectionHead(nn.Module):
 
 
 class ActorObjectRelationBlock(nn.Module):
-    def __init__(self, dim, num_heads=8):
+    def __init__(self, dim, hidden_dim=512):
         super().__init__()
-        if dim % num_heads != 0:
-            raise ValueError(f"dim={dim} must be divisible by num_heads={num_heads}")
-        self.num_heads = int(num_heads)
-        self.head_dim = dim // self.num_heads
         self.actor_norm = nn.LayerNorm(dim)
         self.object_norm = nn.LayerNorm(dim)
-        self.query = nn.Linear(dim, dim)
-        self.key = nn.Linear(dim, dim)
-        self.value = nn.Linear(dim, dim)
-        self.out = nn.Linear(dim, dim)
+        self.fusion = nn.Sequential(
+            nn.Linear(dim * 2, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, dim),
+        )
         self.relation_scale = nn.Parameter(torch.ones(()))
-        nn.init.zeros_(self.out.weight)
-        nn.init.zeros_(self.out.bias)
+        nn.init.zeros_(self.fusion[-1].weight)
+        nn.init.zeros_(self.fusion[-1].bias)
 
-    def forward(self, actor_tokens, object_tokens, object_valid):
+    def _teacher_object_weights(
+        self,
+        object_tokens,
+        teacher_indices,
+        teacher_valid,
+    ):
+        if teacher_indices.ndim != 2:
+            raise ValueError("teacher_indices must have shape [batch, actors]")
+        if teacher_indices.shape[0] != object_tokens.shape[0]:
+            raise ValueError("teacher_indices batch size must match object_tokens")
+        if teacher_valid.shape != teacher_indices.shape:
+            raise ValueError(
+                "teacher_valid must have the same shape as teacher_indices"
+            )
+        batch, _, _ = object_tokens.shape
+        num_actors = teacher_indices.shape[1]
+        num_objects = object_tokens.shape[1]
+        weights = object_tokens.new_zeros((batch, num_actors, num_objects))
+        teacher_indices = teacher_indices.to(
+            device=object_tokens.device,
+            dtype=torch.long,
+        )
+        teacher_valid = teacher_valid.to(device=object_tokens.device, dtype=torch.bool)
+        selected = teacher_valid & (teacher_indices > 0)
+        if selected.any():
+            rows, actor_slots = torch.nonzero(selected, as_tuple=True)
+            object_slots = (teacher_indices[selected] - 1).clamp(0, num_objects - 1)
+            weights[rows, actor_slots, object_slots] = 1.0
+        return weights
+
+    def _predicted_object_weights(
+        self,
+        object_selection_logits,
+        object_valid,
+        dtype,
+    ):
+        if object_selection_logits is None:
+            raise ValueError(
+                "object_selection_logits is required for actor-object relation"
+            )
+        if object_selection_logits.ndim != 3:
+            raise ValueError("object_selection_logits must be rank-3")
+        if object_selection_logits.shape[0] != object_valid.shape[0]:
+            raise ValueError(
+                "object_selection_logits batch size must match object_valid"
+            )
+        if object_selection_logits.shape[-1] != object_valid.shape[1] + 1:
+            raise ValueError(
+                "object_selection_logits last dimension must be num_objects + 1"
+            )
+
+        object_logits = object_selection_logits[..., 1:].masked_fill(
+            ~object_valid[:, None, :],
+            torch.finfo(object_selection_logits.dtype).min,
+        )
+        selection_logits = torch.cat(
+            (object_selection_logits[..., :1], object_logits),
+            dim=-1,
+        )
+        # The selector has its own supervised objective. The action loss should
+        # consume its object distribution, not rewrite the selector into an
+        # action shortcut.
+        probs = selection_logits.float().softmax(dim=-1).to(dtype=dtype).detach()
+        return probs[..., 1:]
+
+    def forward(
+        self,
+        actor_tokens,
+        object_tokens,
+        object_valid,
+        object_selection_logits,
+        teacher_indices=None,
+        teacher_valid=None,
+    ):
         if actor_tokens.ndim != 3 or object_tokens.ndim != 3:
             raise ValueError("actor_tokens and object_tokens must be rank-3 tensors")
         if object_valid.shape != object_tokens.shape[:2]:
@@ -194,49 +264,53 @@ class ActorObjectRelationBlock(nn.Module):
             )
 
         object_valid = object_valid.to(device=actor_tokens.device, dtype=torch.bool)
-        bsz, num_actors, _ = actor_tokens.shape
-        num_objects = object_tokens.shape[1]
-        object_tokens = self.object_norm(object_tokens)
-        query = self.query(self.actor_norm(actor_tokens)).reshape(
-            bsz,
-            num_actors,
-            self.num_heads,
-            self.head_dim,
-        ).transpose(1, 2)
-        key = self.key(object_tokens).reshape(
-            bsz,
-            num_objects,
-            self.num_heads,
-            self.head_dim,
-        ).transpose(1, 2)
-        value = self.value(object_tokens).reshape(
-            bsz,
-            num_objects,
-            self.num_heads,
-            self.head_dim,
-        ).transpose(1, 2)
-        scores = torch.matmul(query, key.transpose(-2, -1)) * (self.head_dim ** -0.5)
-        scores = scores.masked_fill(
-            ~object_valid[:, None, None, :],
-            torch.finfo(scores.dtype).min,
+        if (
+            object_selection_logits is not None
+            and object_selection_logits.shape[:2] != actor_tokens.shape[:2]
+        ):
+            raise ValueError(
+                "object_selection_logits must have shape [batch, actors, objects+1]"
+            )
+        if (
+            teacher_indices is not None
+            and teacher_indices.shape != actor_tokens.shape[:2]
+        ):
+            raise ValueError("teacher_indices must have shape [batch, actors]")
+        if teacher_indices is not None or teacher_valid is not None:
+            if teacher_indices is None or teacher_valid is None:
+                raise ValueError(
+                    "teacher_indices and teacher_valid must be provided together"
+                )
+            object_weights = self._teacher_object_weights(
+                object_tokens,
+                teacher_indices,
+                teacher_valid,
+            )
+        else:
+            object_weights = self._predicted_object_weights(
+                object_selection_logits,
+                object_valid,
+                actor_tokens.dtype,
+            )
+        object_weights = object_weights * object_valid[:, None, :].to(
+            dtype=object_weights.dtype
         )
-        has_object = object_valid.any(dim=1, keepdim=True)
-        scores = torch.where(
-            has_object[:, None, :, None],
-            scores,
-            torch.zeros_like(scores),
+        object_mass = object_weights.sum(dim=-1, keepdim=True)
+        object_context = torch.einsum(
+            "bkm,bmd->bkd",
+            object_weights,
+            object_tokens,
         )
-        attn = scores.softmax(dim=-1)
-        attn = attn * object_valid[:, None, None, :].to(dtype=attn.dtype)
-        object_context = torch.matmul(attn, value).transpose(1, 2).reshape(
-            bsz,
-            num_actors,
-            self.num_heads * self.head_dim,
+        relation_delta = self.fusion(
+            torch.cat(
+                (
+                    self.actor_norm(actor_tokens),
+                    self.object_norm(object_context),
+                ),
+                dim=-1,
+            )
         )
-        relation_delta = self.out(object_context)
-        relation_delta = relation_delta * has_object.unsqueeze(-1).to(
-            dtype=relation_delta.dtype
-        )
+        relation_delta = relation_delta * object_mass.to(dtype=relation_delta.dtype)
         return actor_tokens + self.relation_scale * relation_delta
 
 
@@ -528,6 +602,8 @@ class POGUISE(pl.LightningModule):
         object_classes=None,
         object_confs=None,
         object_valid=None,
+        interaction_object_index=None,
+        interaction_object_index_valid=None,
     ):
         # convert to b c t h w
         x = x.permute(0, 2, 1, 3, 4)
@@ -591,6 +667,9 @@ class POGUISE(pl.LightningModule):
                     x_actor,
                     x_object,
                     object_valid.to(device=x_actor.device, dtype=torch.bool),
+                    object_selection_logits,
+                    teacher_indices=interaction_object_index,
+                    teacher_valid=interaction_object_index_valid,
                 )
                 self.last_actor_object_relation_delta = action_actor - x_actor
             if self.hparams.ret_feat:

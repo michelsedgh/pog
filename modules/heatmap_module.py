@@ -21,6 +21,7 @@ from datasets.object_vocab import (
 )
 from datasets.toyota_action_taxonomy import (
     toyota_action_names,
+    toyota_confuser_action_names,
     toyota_action_object_map,
     toyota_action_to_index,
     toyota_group_action_names,
@@ -107,6 +108,16 @@ class HeatmapModule(pl.LightningModule):
             raise ValueError(
                 "objectless_object_action_suppression_loss_weight must be >= 0"
             )
+        self.object_action_confuser_loss_weight = float(
+            hparams.get("object_action_confuser_loss_weight", 0.0)
+        )
+        if self.object_action_confuser_loss_weight < 0:
+            raise ValueError("object_action_confuser_loss_weight must be >= 0")
+        self.object_action_confuser_margin = float(
+            hparams.get("object_action_confuser_margin", 0.5)
+        )
+        if self.object_action_confuser_margin < 0:
+            raise ValueError("object_action_confuser_margin must be >= 0")
         self.num_classes = hparams.num_classes
         self.dataset_name = hparams.dataset_artifact
         self.is_toyota = str(self.dataset_name).lower() == "toyotasm"
@@ -131,10 +142,14 @@ class HeatmapModule(pl.LightningModule):
                 self.task_type,
                 self.action_taxonomy,
             )
+            self.action_object_ids_by_index = self._build_action_object_ids_by_index()
+            self.action_confuser_indices = self._build_action_confuser_indices()
         else:
             self.action_names = [str(index) for index in range(self.num_classes)]
             self.action_to_index = {}
             self.action_object_map = {}
+            self.action_object_ids_by_index = {}
+            self.action_confuser_indices = {}
 
         # Create model
         self.lr = hparams.lr
@@ -412,6 +427,43 @@ class HeatmapModule(pl.LightningModule):
 
     def _toyota_label_dict(self):
         return toyota_label_dict(self.task_type, self.action_taxonomy)
+
+    def _build_action_object_ids_by_index(self):
+        action_object_ids = {}
+        for action_name, object_names in self.action_object_map.items():
+            action_idx = self.action_to_index.get(action_name)
+            if action_idx is None:
+                continue
+            object_ids = [
+                int(OBJECT_TO_ID[object_name])
+                for object_name in object_names
+                if object_name in OBJECT_TO_ID
+            ]
+            if object_ids:
+                action_object_ids[int(action_idx)] = torch.tensor(
+                    object_ids,
+                    dtype=torch.long,
+                )
+        return action_object_ids
+
+    def _build_action_confuser_indices(self):
+        confuser_indices = {}
+        for action_name, action_idx in self.action_to_index.items():
+            confusers = [
+                int(self.action_to_index[confuser_name])
+                for confuser_name in toyota_confuser_action_names(
+                    action_name,
+                    self.task_type,
+                    self.action_taxonomy,
+                )
+                if confuser_name in self.action_to_index
+            ]
+            if confusers:
+                confuser_indices[int(action_idx)] = torch.tensor(
+                    confusers,
+                    dtype=torch.long,
+                )
+        return confuser_indices
 
     def _build_group_indices(self):
         if not self.is_toyota:
@@ -1155,6 +1207,82 @@ class HeatmapModule(pl.LightningModule):
                 count,
             )
 
+    def _object_action_confuser_loss(self, stage, preds, actions, valid, target):
+        if self.object_action_confuser_loss_weight <= 0:
+            return None
+        if not self.is_toyota or not self.scene_object_tokens:
+            return None
+        if (
+            "interaction_object_index" not in target
+            or "interaction_object_index_valid" not in target
+            or "object_classes" not in target
+        ):
+            return None
+
+        selected_indices = target["interaction_object_index"].to(
+            device=preds.device,
+            dtype=torch.long,
+        )
+        selected_valid = target["interaction_object_index_valid"].to(
+            device=preds.device,
+            dtype=torch.bool,
+        )
+        object_classes = target["object_classes"].to(
+            device=preds.device,
+            dtype=torch.long,
+        )
+        valid = valid.to(device=preds.device, dtype=torch.bool)
+        actions = actions.to(device=preds.device, dtype=torch.long)
+        selected_valid = selected_valid & valid & (selected_indices > 0)
+        if not selected_valid.any():
+            return None
+
+        selected_slots = (selected_indices - 1).clamp_min(0)
+        selected_object_classes = object_classes.gather(1, selected_slots)
+        violations = []
+        sample_count = 0
+        for action_idx, confuser_indices in self.action_confuser_indices.items():
+            expected_object_ids = self.action_object_ids_by_index.get(action_idx)
+            if expected_object_ids is None:
+                continue
+            expected_object_ids = expected_object_ids.to(device=preds.device)
+            confuser_indices = confuser_indices.to(device=preds.device)
+            object_matches = (
+                selected_object_classes[..., None] == expected_object_ids.view(1, 1, -1)
+            ).any(dim=-1)
+            mask = selected_valid & object_matches & (actions == int(action_idx))
+            if not mask.any():
+                continue
+            true_logits = preds[..., int(action_idx)][mask]
+            confuser_logits = preds[mask][:, confuser_indices]
+            margin_error = (
+                confuser_logits
+                + float(self.object_action_confuser_margin)
+                - true_logits.unsqueeze(1)
+            )
+            violations.append(F.relu(margin_error).reshape(-1))
+            sample_count += int(mask.sum().item())
+        if not violations:
+            return None
+
+        violation_values = torch.cat(violations, dim=0)
+        loss = violation_values.mean()
+        self.log(
+            f"{stage}_loss_object_action_confuser",
+            loss,
+            on_step=stage == "train",
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+        )
+        self._log_scalar(
+            f"{stage}_object_action_confuser_violation_rate",
+            (violation_values > 0).float().mean(),
+            max(sample_count, 1),
+        )
+        return loss
+
     def _append_nash_mtl_params(self, params):
         if not (
             self.model.hparams.grad_weights
@@ -1354,12 +1482,25 @@ class HeatmapModule(pl.LightningModule):
             raise ValueError(f"{stage} actor batch has no valid actor slots")
 
         object_inputs = self._object_inputs_from_target(target, imgs.device)
+        model_object_inputs = dict(object_inputs)
+        if (
+            stage == "train"
+            and self.scene_object_tokens
+            and "interaction_object_index" in target
+            and "interaction_object_index_valid" in target
+        ):
+            model_object_inputs["interaction_object_index"] = target[
+                "interaction_object_index"
+            ].to(device=imgs.device, dtype=torch.long)
+            model_object_inputs["interaction_object_index_valid"] = target[
+                "interaction_object_index_valid"
+            ].to(device=imgs.device, dtype=torch.bool)
         data = self.model(
             imgs,
             boxes=boxes,
             valid=valid,
             action_labels=actions,
-            **object_inputs,
+            **model_object_inputs,
         )
         (
             preds,
@@ -1412,6 +1553,19 @@ class HeatmapModule(pl.LightningModule):
                 loss_main_task
                 + loss_hard_objectless
                 * self.objectless_object_action_suppression_loss_weight
+            )
+
+        loss_confuser = self._object_action_confuser_loss(
+            stage,
+            preds,
+            actions,
+            valid,
+            target,
+        )
+        if loss_confuser is not None:
+            loss_main_task = (
+                loss_main_task
+                + loss_confuser * self.object_action_confuser_loss_weight
             )
 
         grounding_aux_terms = []

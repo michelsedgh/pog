@@ -513,6 +513,8 @@ def build_parser():
         type=float,
         default=0.0,
     )
+    parser.add_argument("--object_action_confuser_loss_weight", type=float, default=0.0)
+    parser.add_argument("--object_action_confuser_margin", type=float, default=0.5)
     parser.add_argument("--deepspeed_optim", type=int, default=0)
     parser.add_argument("--kp_only", type=int, default=0)
 

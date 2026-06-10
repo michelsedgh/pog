@@ -37,6 +37,8 @@ CORE_COLUMNS = [
     "val_loss_main_deploy",
     "val_loss_grounding_aux",
     "val_loss_objectless_object_action_suppression",
+    "val_loss_object_action_confuser",
+    "val_object_action_confuser_violation_rate",
     "train_nash_weight_action",
     "train_nash_weight_heatmap",
     "train_nash_weight_main_deploy",
@@ -652,6 +654,8 @@ def print_decision(epoch_df):
         latest,
         "val_objectless_with_object_visible_object_action_pred_rate",
     )
+    confuser_loss = metric(latest, "val_loss_object_action_confuser")
+    confuser_violation = metric(latest, "val_object_action_confuser_violation_rate")
     selected_laptop_count = metric(latest, "val_selected_laptop_count")
     selected_laptop_use = metric(latest, "val_selected_laptop_pred_Uselaptop_rate")
     selected_laptop_read = metric(latest, "val_selected_laptop_pred_Readbook_rate")
@@ -693,6 +697,11 @@ def print_decision(epoch_df):
             "objectless hard negatives: "
             f"acc {fmt(hard_objectless)}, count {fmt(hard_objectless_count, 0)}, "
             f"object_action_pred_rate {fmt(hard_object_action_rate)}"
+        )
+    if pd.notna(confuser_loss):
+        print(
+            "object-action confuser: "
+            f"loss {fmt(confuser_loss)}, violation_rate {fmt(confuser_violation)}"
         )
     if pd.notna(selected_laptop_count):
         print(
@@ -809,6 +818,12 @@ def print_row(title, row):
             f"count {metric(row, 'val_objectless_with_object_visible_count'):.0f}, "
             "object_action_pred_rate "
             f"{metric(row, 'val_objectless_with_object_visible_object_action_pred_rate'):.4f}"
+        )
+    if pd.notna(metric(row, "val_loss_object_action_confuser")):
+        print(
+            "object-action confuser: "
+            f"loss {metric(row, 'val_loss_object_action_confuser'):.4f}, "
+            f"violation_rate {metric(row, 'val_object_action_confuser_violation_rate'):.4f}"
         )
     if pd.notna(metric(row, "val_selected_laptop_count")):
         print(
