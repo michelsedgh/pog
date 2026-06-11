@@ -111,15 +111,14 @@ class ToyotaSMDataset(Dataset):
         )
         if self.actor_interaction_heatmaps and not self.actor_prompt:
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
-        self.scene_object_tokens = bool(kwargs.get("scene_object_tokens", 0))
-        if self.scene_object_tokens and not self.actor_prompt:
-            raise ValueError("scene_object_tokens requires actor_prompt")
+        if bool(kwargs.get("scene_object_tokens", 0)):
+            raise ValueError(
+                "scene_object_tokens was removed. Use actor_object_slot_head=1."
+            )
         self.actor_object_slot_head = bool(kwargs.get("actor_object_slot_head", 0))
         if self.actor_object_slot_head and not self.actor_prompt:
             raise ValueError("actor_object_slot_head requires actor_prompt")
-        self.requires_object_proposals = (
-            self.scene_object_tokens or self.actor_object_slot_head
-        )
+        self.requires_object_proposals = self.actor_object_slot_head
         self.num_scene_object_tokens = int(kwargs.get("num_scene_object_tokens", 32))
         if self.num_scene_object_tokens <= 0:
             raise ValueError("num_scene_object_tokens must be positive")

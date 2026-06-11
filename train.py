@@ -202,46 +202,6 @@ def _initialize_actor_prompt_from_checkpoint(module, checkpoint):
                 torch.nn.init.zeros_(last.bias)
                 initialized.append("bbox_mlp_final")
 
-        if hasattr(net, "object_slot_embed") and not _checkpoint_has_key(
-            checkpoint, "model.net.object_slot_embed"
-        ):
-            net.object_slot_embed.zero_()
-            initialized.append("object_slot_embed")
-
-        if hasattr(net, "object_valid_embed") and not _checkpoint_has_key(
-            checkpoint, "model.net.object_valid_embed.weight"
-        ):
-            net.object_valid_embed.weight.zero_()
-            initialized.append("object_valid_embed")
-
-        if hasattr(net, "object_cls_embed"):
-            none_id = getattr(
-                net,
-                "none_object_id",
-                net.object_cls_embed.num_embeddings - 1,
-            )
-            if 0 <= int(none_id) < net.object_cls_embed.weight.shape[0]:
-                net.object_cls_embed.weight[int(none_id)].zero_()
-                initialized.append("object_cls_embed_none_zero")
-
-        if hasattr(net, "object_bbox_mlp") and not _checkpoint_has_key(
-            checkpoint, "model.net.object_bbox_mlp.2.weight"
-        ):
-            last = net.object_bbox_mlp[-1]
-            if isinstance(last, torch.nn.Linear):
-                torch.nn.init.zeros_(last.weight)
-                torch.nn.init.zeros_(last.bias)
-                initialized.append("object_bbox_mlp_final")
-
-        if hasattr(net, "object_conf_mlp") and not _checkpoint_has_key(
-            checkpoint, "model.net.object_conf_mlp.2.weight"
-        ):
-            last = net.object_conf_mlp[-1]
-            if isinstance(last, torch.nn.Linear):
-                torch.nn.init.zeros_(last.weight)
-                torch.nn.init.zeros_(last.bias)
-                initialized.append("object_conf_mlp_final")
-
     if initialized:
         print(
             "Initialized actor-prompt modules from current class path: "
@@ -301,31 +261,17 @@ def _validate_active_actor_action_path(module):
         raise RuntimeError(
             "Actor action path must be a plain nn.Linear over actor tokens. "
             "Object detections should affect action logits through the structured "
-            "actor-object compatibility expert, not through a replacement action head."
+            "actor-object action query decoder, not through a replacement actor head."
         )
     if getattr(model, "actor_object_conditioned_action", False):
         raise RuntimeError("actor_object_conditioned_action must be disabled.")
     if hasattr(actor_head, "action_head"):
         raise RuntimeError("Legacy actor_head.action_head is still active.")
-    if getattr(model, "scene_object_tokens", False):
-        relation = getattr(model, "actor_object_relation", None)
-        if relation is None:
-            raise RuntimeError(
-                "scene_object_tokens requires the actor-object compatibility expert."
-            )
-        if not hasattr(relation, "allowed_action_mask"):
-            raise RuntimeError(
-                "scene_object_tokens is not using the structured compatibility expert."
-            )
     if getattr(model, "actor_object_slot_head_enabled", False):
         slot_head = getattr(model, "actor_object_slot_head", None)
         if slot_head is None:
             raise RuntimeError(
                 "actor_object_slot_head is enabled but the slot head was not built."
-            )
-        if getattr(model, "scene_object_tokens", False):
-            raise RuntimeError(
-                "actor_object_slot_head must not be combined with scene_object_tokens."
             )
 
 
@@ -521,18 +467,17 @@ def build_parser():
     parser.add_argument("--poguiseplus_heatmap_log_eps", type=float, default=1e-6)
     parser.add_argument("--poguiseplus_normalized_heatmap_loss", type=int, default=0)
     parser.add_argument("--poguiseplus_heatmap_mse_scale", type=float, default=1000.0)
-    parser.add_argument("--aux_object_selection_loss_weight", type=float, default=0.5)
     parser.add_argument("--motion_aux_loss_weight", type=float, default=0.25)
-    parser.add_argument("--object_relevance_loss_weight", type=float, default=0.25)
     parser.add_argument(
         "--objectless_object_action_suppression_loss_weight",
         type=float,
-        default=0.0,
+        default=0.3,
     )
-    parser.add_argument("--object_action_confuser_loss_weight", type=float, default=0.25)
-    parser.add_argument("--object_action_confuser_margin", type=float, default=0.5)
-    parser.add_argument("--object_slot_target_loss_weight", type=float, default=0.5)
+    parser.add_argument("--object_action_confuser_loss_weight", type=float, default=0.5)
+    parser.add_argument("--object_action_confuser_margin", type=float, default=0.75)
+    parser.add_argument("--object_slot_target_loss_weight", type=float, default=1.0)
     parser.add_argument("--object_slot_ignore_missing_object", type=int, default=0)
+    parser.add_argument("--object_slot_quality_loss_weight", type=float, default=0.5)
     parser.add_argument("--deepspeed_optim", type=int, default=0)
     parser.add_argument("--kp_only", type=int, default=0)
 
@@ -556,16 +501,12 @@ def main():
         )
     if hparams.actor_interaction_heatmaps and not hparams.actor_prompt:
         raise ValueError("actor_interaction_heatmaps requires actor_prompt")
-    if hparams.scene_object_tokens and not hparams.actor_prompt:
-        raise ValueError("scene_object_tokens requires actor_prompt")
-    if hparams.scene_object_tokens and not hparams.object_detector_cache:
-        raise ValueError("scene_object_tokens requires --object_detector_cache")
+    if getattr(hparams, "scene_object_tokens", 0):
+        raise ValueError(
+            "scene_object_tokens was removed. Use --actor_object_slot_head 1."
+        )
     if hparams.actor_object_slot_head and not hparams.actor_prompt:
         raise ValueError("actor_object_slot_head requires actor_prompt")
-    if hparams.actor_object_slot_head and hparams.scene_object_tokens:
-        raise ValueError(
-            "actor_object_slot_head and scene_object_tokens are mutually exclusive"
-        )
     if hparams.actor_object_slot_head and not hparams.object_detector_cache:
         raise ValueError("actor_object_slot_head requires --object_detector_cache")
 

@@ -71,11 +71,10 @@ def cli_hparam_overrides(args):
 
 
 class ActorExport(torch.nn.Module):
-    def __init__(self, actor_model, uses_object_proposals, scene_object_tokens):
+    def __init__(self, actor_model, uses_object_proposals):
         super().__init__()
         self.actor_model = actor_model
         self.uses_object_proposals = bool(uses_object_proposals)
-        self.scene_object_tokens = bool(scene_object_tokens)
 
     def forward(
         self,
@@ -100,8 +99,6 @@ class ActorExport(torch.nn.Module):
         output = self.actor_model(video, **kwargs)
         logits = output[0]
         presence = output[2]
-        if self.scene_object_tokens:
-            return logits, presence, output[3]
         return logits, presence
 
 
@@ -159,23 +156,6 @@ def compare_outputs(reference, candidate, valid, object_valid=None):
     for name, ref in reference.items():
         if name in {"logits", "presence"}:
             result[name] = compare_tensor(ref, candidate[name], valid)
-        elif name == "object_selection":
-            if object_valid is None:
-                raise RuntimeError("object_valid is required to compare object_selection")
-            selection_mask = torch.cat(
-                (
-                    torch.ones(
-                        object_valid.shape[0],
-                        1,
-                        dtype=torch.bool,
-                        device=object_valid.device,
-                    ),
-                    object_valid.to(dtype=torch.bool),
-                ),
-                dim=1,
-            )
-            selection_mask = valid[:, :, None] & selection_mask[:, None, :]
-            result[name] = compare_tensor(ref, candidate[name], selection_mask)
         else:
             result[name] = compare_tensor(ref, candidate[name])
     return result
@@ -196,20 +176,19 @@ def main():
         return_metadata=True,
         hparam_overrides=hparam_overrides,
     )
-    scene_object_tokens = bool(hparams.get("scene_object_tokens", 0))
-    actor_object_slot_head = bool(hparams.get("actor_object_slot_head", 0))
-    uses_object_proposals = scene_object_tokens or actor_object_slot_head
-    if scene_object_tokens != bool(engine.scene_object_tokens):
+    if bool(hparams.get("scene_object_tokens", 0)):
         raise RuntimeError(
-            "Checkpoint/engine scene_object_tokens mismatch: "
-            f"checkpoint={scene_object_tokens}, engine={engine.scene_object_tokens}"
+            "scene_object_tokens checkpoints use the removed object-selection path. "
+            "Export an actor_object_slot_head checkpoint instead."
         )
+    actor_object_slot_head = bool(hparams.get("actor_object_slot_head", 0))
+    uses_object_proposals = actor_object_slot_head
     if uses_object_proposals != bool(engine.uses_object_proposals):
         raise RuntimeError(
             "Checkpoint/engine object-proposal input mismatch: "
             f"checkpoint={uses_object_proposals}, engine={engine.uses_object_proposals}"
         )
-    wrapped = ActorExport(model, uses_object_proposals, scene_object_tokens).eval()
+    wrapped = ActorExport(model, uses_object_proposals).eval()
 
     dummy_inputs, input_names = make_dummy_inputs(
         batch_size=engine.batch_size,
@@ -226,9 +205,7 @@ def main():
 
     with torch.inference_mode():
         torch_outputs = wrapped(*dummy_inputs)
-    output_names = ["logits", "presence"] + (
-        ["object_selection"] if scene_object_tokens else []
-    )
+    output_names = ["logits", "presence"]
     reference = {
         name: value.detach().cpu()
         for name, value in zip(output_names, torch_outputs)
@@ -243,7 +220,7 @@ def main():
             "object_confs": inputs["object_confs"],
             "object_valid": inputs["object_valid"],
         }
-    trt_logits, trt_presence, trt_object_selection = engine(
+    trt_logits, trt_presence = engine(
         inputs["video"],
         inputs["boxes"],
         inputs["valid"],
@@ -253,15 +230,11 @@ def main():
         "logits": trt_logits.detach().cpu(),
         "presence": trt_presence.detach().cpu(),
     }
-    if scene_object_tokens:
-        trt_outputs["object_selection"] = trt_object_selection.detach().cpu()
-
     report = {
         "checkpoint": str(Path(args.checkpoint)),
         "checkpoint_epoch": metadata.get("epoch"),
         "onnx": str(Path(args.onnx)),
         "engine": str(Path(args.engine)),
-        "scene_object_tokens": scene_object_tokens,
         "actor_object_slot_head": actor_object_slot_head,
         "uses_object_proposals": uses_object_proposals,
         "hparam_overrides": hparam_overrides,

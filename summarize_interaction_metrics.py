@@ -17,10 +17,6 @@ CORE_COLUMNS = [
     "val_deploy_key_action_min",
     "val_deploy_objectless_with_object_visible_acc",
     "val_deploy_objectless_with_object_visible_object_action_pred_rate",
-    "val_deploy_selected_laptop_uselaptop_acc",
-    "val_deploy_selected_laptop_uselaptop_count",
-    "val_deploy_selected_laptop_uselaptop_coverage",
-    "val_deploy_selected_laptop_uselaptop_u_minus_read_margin",
     "val_actor_all_slot_acc",
     "val_actor_slot_consistency",
     "val_actor_pair_acc",
@@ -44,6 +40,7 @@ CORE_COLUMNS = [
     "val_loss_object_action_confuser",
     "val_object_action_confuser_violation_rate",
     "val_loss_object_slot_target",
+    "val_loss_object_slot_quality",
     "val_object_slot_true_compatible_rate",
     "val_object_slot_true_unknown_rate",
     "val_object_slot_true_null_rate",
@@ -53,6 +50,10 @@ CORE_COLUMNS = [
     "val_object_slot_objectless_nonnull_rate",
     "val_object_slot_quality_mean",
     "val_object_slot_quality_max_mean",
+    "val_object_slot_quality_pos_acc",
+    "val_object_slot_quality_pos_mean",
+    "val_object_slot_quality_neg_acc",
+    "val_object_slot_quality_neg_mean",
     "val_object_slot_mismatch_mean",
     "val_object_slot_Uselaptop_laptop_rate",
     "val_object_slot_Uselaptop_unknown_rate",
@@ -67,9 +68,6 @@ CORE_COLUMNS = [
     "val_object_slot_Readbook_minus_Uselaptop_logit_margin",
     "val_loss_motion_aux",
     "val_motion_aux_acc",
-    "val_loss_object_relevance",
-    "val_object_relevance_acc",
-    "val_object_relevance_pos_rate",
     "train_nash_weight_action",
     "train_nash_weight_heatmap",
     "train_nash_weight_main_deploy",
@@ -82,16 +80,8 @@ CORE_COLUMNS = [
     "val_interaction_heatmap_pred_max",
     "val_interaction_heatmap_target_max",
     "val_interaction_heatmap_center_l2",
-    "val_object_selection_loss",
-    "val_object_selection_acc",
-    "val_object_selection_none_acc",
-    "val_object_selection_object_acc",
-    "val_object_selection_true_prob",
-    "val_object_selection_teacher_count",
-    "val_object_selection_none_teacher_count",
-    "val_object_selection_object_teacher_count",
-    "val_object_counterfactual_selected_logit_drop",
-    "val_object_counterfactual_selected_prob_drop",
+    "val_object_counterfactual_teacher_logit_drop",
+    "val_object_counterfactual_teacher_prob_drop",
     "val_objectless_with_object_visible_acc",
     "val_objectless_with_object_visible_count",
     "val_objectless_with_object_visible_object_action_pred_rate",
@@ -101,27 +91,8 @@ CORE_COLUMNS = [
     "val_objectless_with_book_visible_count",
     "val_objectless_with_phone_visible_acc",
     "val_objectless_with_phone_visible_count",
-    "val_selected_laptop_count",
-    "val_selected_laptop_pred_Uselaptop_rate",
-    "val_selected_laptop_pred_Readbook_rate",
-    "val_selected_laptop_pred_WatchTV_rate",
-    "val_selected_laptop_Uselaptop_minus_confuser_logit_margin",
-    "val_selected_laptop_Uselaptop_minus_confuser_prob_margin",
-    "val_selected_laptop_Uselaptop_minus_Readbook_logit_margin",
-    "val_actor_object_compat_adjust_abs_mean",
-    "val_actor_object_compat_adjust_l2_mean",
-    "val_actor_object_compatibility_scale",
-    "val_actor_object_compatibility_prior_abs_mean",
-    "val_actor_object_compatibility_prior_signed_mean",
-    "val_actor_object_pair_residual_abs_mean",
-    "val_actor_object_pair_residual_scale",
-    "val_actor_object_relation_delta_abs_mean",
-    "val_actor_object_relation_delta_l2_mean",
     "val_actor_object_slot_delta_abs_mean",
     "val_actor_object_slot_delta_l2_mean",
-    "val_actor_object_relation_scale",
-    "val_actor_object_relevance_mean",
-    "val_actor_object_relation_mass_mean",
 ]
 
 GROUPS = [
@@ -312,14 +283,13 @@ def print_compact_epoch_summary(epoch_df):
         "val_group_phone_tv_acc",
         "val_group_drink_cup_bottle_glass_acc",
         "val_group_drink_acc",
-        "val_object_selection_acc",
-        "val_object_selection_object_acc",
-        "val_object_selection_true_prob",
         "val_object_slot_true_compatible_rate",
         "val_object_slot_true_unknown_rate",
+        "val_object_slot_quality_pos_acc",
+        "val_object_slot_quality_neg_acc",
         "val_object_slot_Uselaptop_laptop_rate",
         "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
-        "val_object_counterfactual_selected_logit_drop",
+        "val_object_counterfactual_teacher_logit_drop",
         "val_interaction_heatmap_positive_mean",
         "val_interaction_heatmap_pred_max",
         "val_interaction_heatmap_soft_iou",
@@ -363,14 +333,13 @@ def print_compact_best(epoch_df):
         "val_group_objectless_acc",
         "val_group_laptop_book_tv_acc",
         "val_group_phone_tv_acc",
-        "val_object_selection_acc",
-        "val_object_selection_object_acc",
-        "val_object_selection_true_prob",
         "val_object_slot_true_compatible_rate",
         "val_object_slot_objectless_null_rate",
+        "val_object_slot_quality_pos_acc",
+        "val_object_slot_quality_neg_acc",
         "val_object_slot_Uselaptop_laptop_rate",
         "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
-        "val_object_counterfactual_selected_logit_drop",
+        "val_object_counterfactual_teacher_logit_drop",
         "val_action_Uselaptop_acc",
         "val_action_Readbook_acc",
         "val_action_WatchTV_acc",
@@ -401,22 +370,18 @@ def print_object_use_epoch_table(epoch_df):
         "val_interaction_heatmap_pred_max",
         "val_interaction_heatmap_soft_iou",
         "val_interaction_heatmap_center_l2",
-        "val_object_selection_acc",
-        "val_object_selection_none_acc",
-        "val_object_selection_object_acc",
-        "val_object_selection_true_prob",
-        "val_object_selection_none_teacher_count",
-        "val_object_selection_object_teacher_count",
         "val_object_slot_true_compatible_rate",
         "val_object_slot_true_unknown_rate",
         "val_object_slot_true_incompatible_rate",
         "val_object_slot_objectless_null_rate",
+        "val_object_slot_quality_pos_acc",
+        "val_object_slot_quality_neg_acc",
         "val_object_slot_Uselaptop_laptop_rate",
         "val_object_slot_Uselaptop_unknown_rate",
         "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
         "val_object_slot_delta_Uselaptop_minus_Readbook_logit_margin",
-        "val_object_counterfactual_selected_logit_drop",
-        "val_object_counterfactual_selected_prob_drop",
+        "val_object_counterfactual_teacher_logit_drop",
+        "val_object_counterfactual_teacher_prob_drop",
     ]
     if not any(df_has_metric(epoch_df, col) for col in object_cols):
         return
@@ -428,16 +393,14 @@ def print_object_use_epoch_table(epoch_df):
         "val_interaction_heatmap_pred_max",
         "val_interaction_heatmap_soft_iou",
         "val_interaction_heatmap_center_l2",
-        "val_object_selection_acc",
-        "val_object_selection_none_acc",
-        "val_object_selection_object_acc",
-        "val_object_selection_true_prob",
-        "val_object_counterfactual_selected_logit_drop",
-        "val_object_counterfactual_selected_prob_drop",
+        "val_object_counterfactual_teacher_logit_drop",
+        "val_object_counterfactual_teacher_prob_drop",
         "val_object_slot_true_compatible_rate",
         "val_object_slot_true_unknown_rate",
         "val_object_slot_true_incompatible_rate",
         "val_object_slot_objectless_null_rate",
+        "val_object_slot_quality_pos_acc",
+        "val_object_slot_quality_neg_acc",
         "val_object_slot_Uselaptop_laptop_rate",
         "val_object_slot_Uselaptop_unknown_rate",
         "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
@@ -662,11 +625,9 @@ def print_best_epochs(epoch_df):
         "val_interaction_heatmap_laptop_iou",
         "val_actor_all_slot_acc",
         "val_actor_pair_acc",
-        "val_object_selection_acc",
-        "val_object_selection_true_prob",
         "val_objectless_with_object_visible_acc",
         "val_objectless_with_laptop_visible_acc",
-        "val_object_counterfactual_selected_logit_drop",
+        "val_object_counterfactual_teacher_logit_drop",
     ]
     rows = []
     for name in metrics:
@@ -705,18 +666,14 @@ def print_decision(epoch_df):
     center_l2 = metric(latest, "val_interaction_heatmap_center_l2")
     laptop_pos = metric(latest, "val_interaction_heatmap_laptop_positive_mean")
     laptop_iou = metric(latest, "val_interaction_heatmap_laptop_iou")
-    selection_acc = metric(latest, "val_object_selection_acc")
-    selection_prob = metric(latest, "val_object_selection_true_prob")
-    selection_none_count = metric(latest, "val_object_selection_none_teacher_count")
-    selection_object_count = metric(latest, "val_object_selection_object_teacher_count")
     actor_all_slot = metric(latest, "val_actor_all_slot_acc")
     actor_pair = metric(latest, "val_actor_pair_acc")
     actor_pair_swap = metric(latest, "val_actor_pair_swap_acc")
     actor_presence = metric(latest, "val_actor_presence_acc")
     object_mapped_acc = metric(latest, "val_group_object_mapped_acc")
     objectless_acc = metric(latest, "val_group_objectless_acc")
-    cf_logit = metric(latest, "val_object_counterfactual_selected_logit_drop")
-    cf_prob = metric(latest, "val_object_counterfactual_selected_prob_drop")
+    cf_logit = metric(latest, "val_object_counterfactual_teacher_logit_drop")
+    cf_prob = metric(latest, "val_object_counterfactual_teacher_prob_drop")
     hard_objectless = metric(latest, "val_objectless_with_object_visible_acc")
     hard_objectless_count = metric(latest, "val_objectless_with_object_visible_count")
     hard_object_action_rate = metric(
@@ -727,58 +684,16 @@ def print_decision(epoch_df):
     confuser_violation = metric(latest, "val_object_action_confuser_violation_rate")
     motion_aux_loss = metric(latest, "val_loss_motion_aux")
     motion_aux_acc = metric(latest, "val_motion_aux_acc")
-    relevance_loss = metric(latest, "val_loss_object_relevance")
-    relevance_acc = metric(latest, "val_object_relevance_acc")
-    selected_laptop_count = metric(latest, "val_selected_laptop_count")
-    selected_laptop_use = metric(latest, "val_selected_laptop_pred_Uselaptop_rate")
-    selected_laptop_read = metric(latest, "val_selected_laptop_pred_Readbook_rate")
-    selected_laptop_tv = metric(latest, "val_selected_laptop_pred_WatchTV_rate")
-    selected_laptop_margin = metric(
-        latest,
-        "val_selected_laptop_Uselaptop_minus_confuser_logit_margin",
-    )
-    selected_laptop_read_margin = metric(
-        latest,
-        "val_selected_laptop_Uselaptop_minus_Readbook_logit_margin",
-    )
-    deploy_laptop_use_acc = metric(
-        latest,
-        "val_deploy_selected_laptop_uselaptop_acc",
-    )
-    deploy_laptop_use_count = metric(
-        latest,
-        "val_deploy_selected_laptop_uselaptop_count",
-    )
-    deploy_laptop_use_coverage = metric(
-        latest,
-        "val_deploy_selected_laptop_uselaptop_coverage",
-    )
-    deploy_laptop_use_margin = metric(
-        latest,
-        "val_deploy_selected_laptop_uselaptop_u_minus_read_margin",
-    )
-    compat_abs = metric(latest, "val_actor_object_compat_adjust_abs_mean")
-    compat_l2 = metric(latest, "val_actor_object_compat_adjust_l2_mean")
-    compat_scale = metric(latest, "val_actor_object_compatibility_scale")
-    compat_prior_abs = metric(latest, "val_actor_object_compatibility_prior_abs_mean")
-    compat_prior_signed = metric(
-        latest,
-        "val_actor_object_compatibility_prior_signed_mean",
-    )
-    pair_residual_abs = metric(latest, "val_actor_object_pair_residual_abs_mean")
-    pair_residual_scale = metric(latest, "val_actor_object_pair_residual_scale")
-    relation_abs = metric(latest, "val_actor_object_relation_delta_abs_mean")
-    relation_l2 = metric(latest, "val_actor_object_relation_delta_l2_mean")
-    relation_scale = metric(latest, "val_actor_object_relation_scale")
-    relation_relevance = metric(latest, "val_actor_object_relevance_mean")
-    relation_mass = metric(latest, "val_actor_object_relation_mass_mean")
     slot_loss = metric(latest, "val_loss_object_slot_target")
+    slot_quality_loss = metric(latest, "val_loss_object_slot_quality")
     slot_compatible = metric(latest, "val_object_slot_true_compatible_rate")
     slot_unknown = metric(latest, "val_object_slot_true_unknown_rate")
     slot_null = metric(latest, "val_object_slot_true_null_rate")
     slot_incompatible = metric(latest, "val_object_slot_true_incompatible_rate")
     slot_objectless_null = metric(latest, "val_object_slot_objectless_null_rate")
     slot_quality = metric(latest, "val_object_slot_quality_max_mean")
+    slot_quality_pos_acc = metric(latest, "val_object_slot_quality_pos_acc")
+    slot_quality_neg_acc = metric(latest, "val_object_slot_quality_neg_acc")
     slot_mismatch = metric(latest, "val_object_slot_mismatch_mean")
     slot_laptop_rate = metric(latest, "val_object_slot_Uselaptop_laptop_rate")
     slot_laptop_unknown = metric(latest, "val_object_slot_Uselaptop_unknown_rate")
@@ -814,13 +729,6 @@ def print_decision(epoch_df):
     )
     if pd.notna(laptop_pos) or pd.notna(laptop_iou):
         print(f"laptop heatmap: positive {fmt(laptop_pos)}, iou {fmt(laptop_iou)}")
-    if pd.notna(selection_acc) or pd.notna(selection_prob):
-        print(
-            "object selection: "
-            f"acc {fmt(selection_acc)}, true_prob {fmt(selection_prob)}, "
-            f"none_teachers {fmt(selection_none_count, 0)}, "
-            f"object_teachers {fmt(selection_object_count, 0)}"
-        )
     if pd.notna(object_mapped_acc) or pd.notna(objectless_acc):
         print(
             "action groups: "
@@ -834,6 +742,9 @@ def print_decision(epoch_df):
             f"unknown {fmt(slot_unknown)}, null {fmt(slot_null)}, "
             f"incompatible {fmt(slot_incompatible)}, "
             f"objectless_null {fmt(slot_objectless_null)}, "
+            f"quality_loss {fmt(slot_quality_loss)}, "
+            f"quality_pos_acc {fmt(slot_quality_pos_acc)}, "
+            f"quality_neg_acc {fmt(slot_quality_neg_acc)}, "
             f"quality_max {fmt(slot_quality)}, mismatch {fmt(slot_mismatch)}"
         )
         print(
@@ -856,51 +767,10 @@ def print_decision(epoch_df):
             "object-action confuser: "
             f"loss {fmt(confuser_loss)}, violation_rate {fmt(confuser_violation)}"
         )
-    if pd.notna(motion_aux_loss) or pd.notna(relevance_loss):
+    if pd.notna(motion_aux_loss):
         print(
             "aux safeguards: "
-            f"motion_loss {fmt(motion_aux_loss)}, motion_acc {fmt(motion_aux_acc)}, "
-            f"relevance_loss {fmt(relevance_loss)}, relevance_acc {fmt(relevance_acc)}"
-        )
-    if pd.notna(selected_laptop_count):
-        print(
-            "selected laptop actions: "
-            f"count {fmt(selected_laptop_count, 0)}, "
-            f"Uselaptop {fmt(selected_laptop_use)}, "
-            f"Readbook {fmt(selected_laptop_read)}, "
-            f"WatchTV {fmt(selected_laptop_tv)}, "
-            f"margin_vs_confuser {fmt(selected_laptop_margin)}, "
-            f"u_minus_read {fmt(selected_laptop_read_margin)}"
-        )
-    if pd.notna(deploy_laptop_use_acc):
-        print(
-            "deploy selected-laptop/Uselaptop slice: "
-            f"acc {fmt(deploy_laptop_use_acc)}, "
-            f"count {fmt(deploy_laptop_use_count, 0)}, "
-            f"coverage {fmt(deploy_laptop_use_coverage)}, "
-            f"u_minus_read {fmt(deploy_laptop_use_margin)}"
-        )
-    if pd.notna(compat_abs):
-        print(
-            "actor-object compatibility: "
-            f"adjust_abs {fmt(compat_abs)}, "
-            f"adjust_l2 {fmt(compat_l2)}, "
-            f"scale {fmt(compat_scale)}, "
-            f"prior_abs {fmt(compat_prior_abs)}, "
-            f"prior_signed {fmt(compat_prior_signed)}, "
-            f"pair_abs {fmt(pair_residual_abs)}, "
-            f"pair_scale {fmt(pair_residual_scale)}, "
-            f"relevance {fmt(relation_relevance)}, "
-            f"mass {fmt(relation_mass)}"
-        )
-    if pd.isna(compat_abs) and pd.notna(relation_abs):
-        print(
-            "actor-object relation: "
-            f"delta_abs {fmt(relation_abs)}, "
-            f"delta_l2 {fmt(relation_l2)}, "
-            f"scale {fmt(relation_scale)}, "
-            f"relevance {fmt(relation_relevance)}, "
-            f"mass {fmt(relation_mass)}"
+            f"motion_loss {fmt(motion_aux_loss)}, motion_acc {fmt(motion_aux_acc)}"
         )
     if (
         pd.notna(actor_all_slot)
@@ -915,7 +785,7 @@ def print_decision(epoch_df):
         )
     if pd.notna(cf_logit) or pd.notna(cf_prob):
         print(
-            "selected-object removal: "
+            "teacher-object removal: "
             f"logit_drop {fmt(cf_logit)}, prob_drop {fmt(cf_prob)}"
         )
 
@@ -923,14 +793,14 @@ def print_decision(epoch_df):
         print("STOP/ROLL BACK: action F1 dropped more than 0.01 from epoch 0.")
         return
     if pd.notna(cf_logit):
-        if cf_logit > 0.02 and pd.notna(selection_acc) and selection_acc > 0.20:
+        if cf_logit > 0.02 and pd.notna(slot_compatible) and slot_compatible > 0.20:
             print(
-                "GOOD SUPPORTING SIGN: selected-object removal affects the "
+                "GOOD SUPPORTING SIGN: teacher-object removal affects the "
                 "true action logit."
             )
         elif cf_logit <= 0.0:
             print(
-                "WARNING: selected-object removal is not lowering the true "
+                "WARNING: teacher-object removal is not lowering the true "
                 "action logit yet."
             )
         else:
@@ -977,23 +847,11 @@ def print_row(title, row):
         f"rate {metric(row, 'val_interaction_teacher_slot_rate'):.4f}, "
         f"count {metric(row, 'val_interaction_teacher_slot_count'):.1f}"
     )
-    if pd.notna(metric(row, "val_object_selection_acc")):
+    if pd.notna(metric(row, "val_object_counterfactual_teacher_logit_drop")):
         print(
-            "object selection: "
-            f"loss {metric(row, 'val_object_selection_loss'):.4f}, "
-            f"acc {metric(row, 'val_object_selection_acc'):.4f}, "
-            f"none_acc {metric(row, 'val_object_selection_none_acc'):.4f}, "
-            f"object_acc {metric(row, 'val_object_selection_object_acc'):.4f}, "
-            f"true_prob {metric(row, 'val_object_selection_true_prob'):.4f}, "
-            f"teachers {metric(row, 'val_object_selection_teacher_count'):.1f}, "
-            f"none_teachers {metric(row, 'val_object_selection_none_teacher_count'):.0f}, "
-            f"object_teachers {metric(row, 'val_object_selection_object_teacher_count'):.0f}"
-        )
-    if pd.notna(metric(row, "val_object_counterfactual_selected_logit_drop")):
-        print(
-            "selected-object counterfactual: "
-            f"logit_drop {metric(row, 'val_object_counterfactual_selected_logit_drop'):.4f}, "
-            f"prob_drop {metric(row, 'val_object_counterfactual_selected_prob_drop'):.4f}"
+            "teacher-object counterfactual: "
+            f"logit_drop {metric(row, 'val_object_counterfactual_teacher_logit_drop'):.4f}, "
+            f"prob_drop {metric(row, 'val_object_counterfactual_teacher_prob_drop'):.4f}"
         )
     if pd.notna(metric(row, "val_objectless_with_object_visible_acc")):
         print(
@@ -1009,62 +867,11 @@ def print_row(title, row):
             f"loss {metric(row, 'val_loss_object_action_confuser'):.4f}, "
             f"violation_rate {metric(row, 'val_object_action_confuser_violation_rate'):.4f}"
         )
-    if pd.notna(metric(row, "val_loss_motion_aux")) or pd.notna(
-        metric(row, "val_loss_object_relevance")
-    ):
+    if pd.notna(metric(row, "val_loss_motion_aux")):
         print(
             "aux safeguards: "
             f"motion_loss {metric(row, 'val_loss_motion_aux'):.4f}, "
-            f"motion_acc {metric(row, 'val_motion_aux_acc'):.4f}, "
-            f"relevance_loss {metric(row, 'val_loss_object_relevance'):.4f}, "
-            f"relevance_acc {metric(row, 'val_object_relevance_acc'):.4f}"
-        )
-    if pd.notna(metric(row, "val_selected_laptop_count")):
-        print(
-            "selected laptop actions: "
-            f"count {metric(row, 'val_selected_laptop_count'):.0f}, "
-            f"Uselaptop {metric(row, 'val_selected_laptop_pred_Uselaptop_rate'):.4f}, "
-            f"Readbook {metric(row, 'val_selected_laptop_pred_Readbook_rate'):.4f}, "
-            f"WatchTV {metric(row, 'val_selected_laptop_pred_WatchTV_rate'):.4f}, "
-            "margin_vs_confuser "
-            f"{metric(row, 'val_selected_laptop_Uselaptop_minus_confuser_logit_margin'):.4f}, "
-            "u_minus_read "
-            f"{metric(row, 'val_selected_laptop_Uselaptop_minus_Readbook_logit_margin'):.4f}"
-        )
-    if pd.notna(metric(row, "val_deploy_selected_laptop_uselaptop_acc")):
-        print(
-            "deploy selected-laptop/Uselaptop slice: "
-            f"acc {metric(row, 'val_deploy_selected_laptop_uselaptop_acc'):.4f}, "
-            f"count {metric(row, 'val_deploy_selected_laptop_uselaptop_count'):.0f}, "
-            "coverage "
-            f"{metric(row, 'val_deploy_selected_laptop_uselaptop_coverage'):.4f}, "
-            "u_minus_read "
-            f"{metric(row, 'val_deploy_selected_laptop_uselaptop_u_minus_read_margin'):.4f}"
-        )
-    if pd.notna(metric(row, "val_actor_object_compat_adjust_abs_mean")):
-        print(
-            "actor-object compatibility: "
-            f"adjust_abs {metric(row, 'val_actor_object_compat_adjust_abs_mean'):.4f}, "
-            f"adjust_l2 {metric(row, 'val_actor_object_compat_adjust_l2_mean'):.4f}, "
-            f"scale {metric(row, 'val_actor_object_compatibility_scale'):.4f}, "
-            f"prior_abs {metric(row, 'val_actor_object_compatibility_prior_abs_mean'):.4f}, "
-            "prior_signed "
-            f"{metric(row, 'val_actor_object_compatibility_prior_signed_mean'):.4f}, "
-            f"pair_abs {metric(row, 'val_actor_object_pair_residual_abs_mean'):.4f}, "
-            f"pair_scale {metric(row, 'val_actor_object_pair_residual_scale'):.4f}, "
-            f"relevance {metric(row, 'val_actor_object_relevance_mean'):.4f}, "
-            f"mass {metric(row, 'val_actor_object_relation_mass_mean'):.4f}"
-        )
-    if pd.isna(metric(row, "val_actor_object_compat_adjust_abs_mean")) and pd.notna(
-        metric(row, "val_actor_object_relation_delta_abs_mean")
-    ):
-        print(
-            "actor-object relation: "
-            f"delta_abs {metric(row, 'val_actor_object_relation_delta_abs_mean'):.4f}, "
-            f"delta_l2 {metric(row, 'val_actor_object_relation_delta_l2_mean'):.4f}, "
-            f"scale {metric(row, 'val_actor_object_relation_scale'):.4f}, "
-            f"relevance {metric(row, 'val_actor_object_relevance_mean'):.4f}, "
-            f"mass {metric(row, 'val_actor_object_relation_mass_mean'):.4f}"
+            f"motion_acc {metric(row, 'val_motion_aux_acc'):.4f}"
         )
     print(
         "poguise+ heatmap loss: "
@@ -1184,12 +991,12 @@ def main():
     print_decision(epoch_df)
 
     print("\nREAD THIS:")
-    print("- Main proof: val_f1/per-action accuracy stay healthy while object selection and heatmaps improve.")
-    print("- NONE selection should be strong for objectless actions, so detector misses do not dominate.")
-    print("- Counterfactual selected-object removal is supporting evidence, not the checkpoint target by itself.")
+    print("- Main proof: val_f1/per-action accuracy stay healthy while slot explanations and heatmaps improve.")
+    print("- Objectless actions should use NULL slots; objectful detector misses should use UNKNOWN.")
+    print("- Teacher-object removal is supporting evidence, not the checkpoint target by itself.")
     print("- Guardrail: val_f1/per-action target accuracy should not collapse while object-use metrics rise.")
     print("- Heatmap/object-channel metrics are secondary; use --verbose when debugging teacher quality.")
-    print("- With --scene_object_tokens 1, RF-DETR boxes are runtime model inputs as well as teacher labels.")
+    print("- actor_object_slot_head is the only runtime object-proposal action path.")
 
 
 if __name__ == "__main__":

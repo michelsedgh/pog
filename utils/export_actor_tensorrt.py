@@ -96,9 +96,7 @@ def default_output_paths(args, hparams):
         if args.max_objects is not None
         else hparams.get("num_scene_object_tokens", 0)
     )
-    uses_object_proposals = bool(hparams.get("scene_object_tokens", 0)) or bool(
-        hparams.get("actor_object_slot_head", 0)
-    )
+    uses_object_proposals = bool(hparams.get("actor_object_slot_head", 0))
     object_suffix = f"_o{max_objects}" if uses_object_proposals else ""
     fixed = (
         f"{stem}_b{args.batch_size}_t{clip_frames}_k{max_actors}"
@@ -207,9 +205,13 @@ def run_command(command):
 def export_onnx(model, onnx_out, args, clip_frames, max_actors, max_objects, hparams, device):
     import torch
 
-    scene_object_tokens = bool(hparams.get("scene_object_tokens", 0))
+    if bool(hparams.get("scene_object_tokens", 0)):
+        raise RuntimeError(
+            "scene_object_tokens checkpoints use the removed object-selection path. "
+            "Export an actor_object_slot_head checkpoint instead."
+        )
     actor_object_slot_head = bool(hparams.get("actor_object_slot_head", 0))
-    uses_object_proposals = scene_object_tokens or actor_object_slot_head
+    uses_object_proposals = actor_object_slot_head
     num_object_classes = int(hparams.get("num_object_classes", 19))
 
     class ActorExport(torch.nn.Module):
@@ -254,13 +256,6 @@ def export_onnx(model, onnx_out, args, clip_frames, max_actors, max_objects, hpa
                 raise RuntimeError(
                     "Actor TensorRT export requires presence-head checkpoints."
                 )
-            if scene_object_tokens:
-                if len(output) != 4:
-                    raise RuntimeError(
-                        "Object-token actor export requires object_selection output."
-                    )
-                object_selection = output[3]
-                return logits, presence, object_selection
             return logits, presence
 
     wrapped = ActorExport(model).to(device).eval()
@@ -284,9 +279,6 @@ def export_onnx(model, onnx_out, args, clip_frames, max_actors, max_objects, hpa
         "logits": tuple(logits.shape),
         "presence": tuple(presence.shape),
     }
-    if scene_object_tokens:
-        output_names.append("object_selection")
-        output_shapes["object_selection"] = tuple(outputs[2].shape)
     print(
         "PyTorch check:",
         {
@@ -368,6 +360,11 @@ def checkpoint_payload(checkpoint_path, hparam_overrides=None):
         raise RuntimeError(f"No hyperparameters found in checkpoint: {checkpoint_path}")
     if not hparams.get("actor_prompt", 0):
         raise RuntimeError("Checkpoint is not an actor-prompt checkpoint.")
+    if bool(hparams.get("scene_object_tokens", 0)):
+        raise RuntimeError(
+            "scene_object_tokens checkpoints use the removed object-selection path. "
+            "Export an actor_object_slot_head checkpoint instead."
+        )
     original_hparams = dict(hparams)
     if hparam_overrides:
         hparams.update(hparam_overrides)
@@ -378,20 +375,14 @@ def checkpoint_payload(checkpoint_path, hparam_overrides=None):
             hparams.get("actor_interaction_heatmaps", 0)
         ),
         "interaction_heatmap_channels": "per_actor_interacted_object",
-        "scene_object_tokens": int(hparams.get("scene_object_tokens", 0)),
         "actor_object_slot_head": int(hparams.get("actor_object_slot_head", 0)),
         "uses_object_proposals": int(
-            bool(hparams.get("scene_object_tokens", 0))
-            or bool(hparams.get("actor_object_slot_head", 0))
+            bool(hparams.get("actor_object_slot_head", 0))
         ),
         "num_scene_object_tokens": int(hparams.get("num_scene_object_tokens", 0)),
         "num_object_classes": int(hparams.get("num_object_classes", 19)),
         "actor_object_logit_residual": 0,
         "actor_object_conditioned_action": 0,
-        "actor_object_relation": int(bool(hparams.get("scene_object_tokens", 0))),
-        "actor_object_compatibility_expert": int(
-            bool(hparams.get("scene_object_tokens", 0))
-        ),
         "actor_object_explanation_slot_head": int(
             bool(hparams.get("actor_object_slot_head", 0))
         ),
@@ -450,9 +441,12 @@ def internal_export(args):
             f"--max-actors={args.max_actors} does not match checkpoint "
             f"num_actor_tokens={checkpoint_actors}."
         )
-    uses_object_proposals = bool(hparams.get("scene_object_tokens", 0)) or bool(
-        hparams.get("actor_object_slot_head", 0)
-    )
+    if bool(hparams.get("scene_object_tokens", 0)):
+        raise RuntimeError(
+            "scene_object_tokens checkpoints use the removed object-selection path. "
+            "Export an actor_object_slot_head checkpoint instead."
+        )
+    uses_object_proposals = bool(hparams.get("actor_object_slot_head", 0))
     if uses_object_proposals:
         checkpoint_objects = int(hparams.get("num_scene_object_tokens", 0))
         if args.max_objects is not None and args.max_objects != checkpoint_objects:
@@ -565,9 +559,13 @@ def main():
             f"num_actor_tokens={checkpoint_actors}."
         )
     checkpoint_objects = int(hparams.get("num_scene_object_tokens", 0))
-    scene_object_tokens = bool(hparams.get("scene_object_tokens", 0))
     actor_object_slot_head = bool(hparams.get("actor_object_slot_head", 0))
-    uses_object_proposals = scene_object_tokens or actor_object_slot_head
+    if bool(hparams.get("scene_object_tokens", 0)):
+        raise RuntimeError(
+            "scene_object_tokens checkpoints use the removed object-selection path. "
+            "Export an actor_object_slot_head checkpoint instead."
+        )
+    uses_object_proposals = actor_object_slot_head
     max_objects = int(args.max_objects if args.max_objects is not None else checkpoint_objects)
     if uses_object_proposals and max_objects != checkpoint_objects:
         raise ValueError(
@@ -617,7 +615,6 @@ def main():
             "keep_rate_merge": float(hparams.get("keep_rate_merge", 1.0)),
             "merge_type": str(hparams.get("merge_type", "")),
             "trt_safe_attention": int(hparams.get("trt_safe_attention", 0)),
-            "scene_object_tokens": int(hparams.get("scene_object_tokens", 0)),
             "actor_object_slot_head": int(hparams.get("actor_object_slot_head", 0)),
             "uses_object_proposals": int(uses_object_proposals),
         },
@@ -647,12 +644,6 @@ def main():
                 "object_valid": [args.batch_size, max_objects],
             }
         )
-        if scene_object_tokens:
-            metadata["outputs"]["object_selection"] = [
-                args.batch_size,
-                max_actors,
-                max_objects + 1,
-            ]
     metadata_out.write_text(json.dumps(metadata, indent=2) + "\n")
     print(f"Wrote metadata: {metadata_out}", flush=True)
 

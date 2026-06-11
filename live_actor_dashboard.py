@@ -567,19 +567,16 @@ class TorchActorBackend:
         self.clip_frames = int(self.hparams.get("n_frames", 16))
         self.input_size = MODEL_INPUT_SIZE
         self.backend_name = "pytorch"
-        self.scene_object_tokens = bool(self.hparams.get("scene_object_tokens", 0))
+        if bool(self.hparams.get("scene_object_tokens", 0)):
+            raise RuntimeError(
+                "scene_object_tokens checkpoints use the removed object-selection "
+                "path. Use an actor_object_slot_head checkpoint instead."
+            )
         self.actor_object_slot_head = bool(self.hparams.get("actor_object_slot_head", 0))
-        self.uses_object_proposals = self.scene_object_tokens or self.actor_object_slot_head
+        self.uses_object_proposals = self.actor_object_slot_head
         self.actor_object_logit_residual = False
         self.actor_object_conditioned_action = bool(
             getattr(self.model, "actor_object_conditioned_action", False)
-        )
-        self.actor_object_relation = bool(
-            getattr(self.model, "actor_object_relation", None) is not None
-        )
-        self.actor_object_compatibility_expert = bool(
-            getattr(self.model, "actor_object_relation", None) is not None
-            and hasattr(self.model.actor_object_relation, "allowed_action_mask")
         )
         self.num_scene_object_tokens = (
             int(self.hparams.get("num_scene_object_tokens", 0))
@@ -594,7 +591,7 @@ class TorchActorBackend:
         if not self.uses_object_proposals:
             raise RuntimeError(
                 "This dashboard requires actor checkpoints with object proposal "
-                "inputs: scene_object_tokens=1 or actor_object_slot_head=1."
+                "inputs: actor_object_slot_head=1."
             )
         if self.num_scene_object_tokens <= 0:
             raise RuntimeError("Checkpoint object proposal count must be positive.")
@@ -626,14 +623,11 @@ class TorchActorBackend:
             output = self.model(clip, **model_kwargs)
             if not isinstance(output, (tuple, list)):
                 raise RuntimeError(f"Unexpected model output type: {type(output)}")
-            if len(output) == 4:
-                logits, _heatmap, presence, object_selection = output
-            elif len(output) == 3:
+            if len(output) == 3:
                 logits, _heatmap, presence = output
-                object_selection = None
             else:
                 raise RuntimeError(f"Unexpected model output length: {len(output)}")
-        return logits, presence, object_selection
+        return logits, presence
 
 
 class TensorRTLiveActorBackend:
@@ -645,26 +639,15 @@ class TensorRTLiveActorBackend:
         self.clip_frames = int(self.engine.clip_frames)
         self.input_size = int(self.engine.input_size)
         self.backend_name = "tensorrt"
-        self.scene_object_tokens = bool(self.engine.scene_object_tokens)
         self.actor_object_slot_head = bool(
             getattr(self.engine, "actor_object_slot_head", False)
         )
         self.uses_object_proposals = bool(
-            getattr(self.engine, "uses_object_proposals", self.scene_object_tokens)
+            getattr(self.engine, "uses_object_proposals", False)
         )
         self.actor_object_logit_residual = bool(self.engine.actor_object_logit_residual)
         self.actor_object_conditioned_action = bool(
             getattr(self.engine, "actor_object_conditioned_action", False)
-        )
-        self.actor_object_relation = bool(
-            getattr(self.engine, "actor_object_relation", self.scene_object_tokens)
-        )
-        self.actor_object_compatibility_expert = bool(
-            getattr(
-                self.engine,
-                "actor_object_compatibility_expert",
-                self.actor_object_relation,
-            )
         )
         self.num_scene_object_tokens = int(self.engine.num_scene_object_tokens)
         if self.clip_frames != TRAINING_CLIP_FRAMES:
@@ -727,7 +710,7 @@ def run_actor_smoke(args, actor):
         actor.device,
         track_iou_threshold=0.2,
     )
-    logits, presence, object_selection = actor(clip, boxes, valid, object_inputs)
+    logits, presence = actor(clip, boxes, valid, object_inputs)
     if logits.shape[-1] != len(ACTION_CLASSES):
         raise RuntimeError(
             "Actor output class count does not match dashboard taxonomy: "
@@ -741,20 +724,15 @@ def run_actor_smoke(args, actor):
             "backend": actor.backend_name,
             "precision": actor.precision,
             "device": str(actor.device),
-            "scene_object_tokens": bool(actor.scene_object_tokens),
             "actor_object_slot_head": bool(
                 getattr(actor, "actor_object_slot_head", False)
             ),
             "uses_object_proposals": bool(
-                getattr(actor, "uses_object_proposals", actor.scene_object_tokens)
+                getattr(actor, "uses_object_proposals", False)
             ),
             "actor_object_logit_residual": bool(actor.actor_object_logit_residual),
             "actor_object_conditioned_action": bool(
                 actor.actor_object_conditioned_action
-            ),
-            "actor_object_relation": bool(actor.actor_object_relation),
-            "actor_object_compatibility_expert": bool(
-                actor.actor_object_compatibility_expert
             ),
             "num_scene_object_tokens": int(actor.num_scene_object_tokens),
             "clip_frames": TRAINING_CLIP_FRAMES,
@@ -762,9 +740,6 @@ def run_actor_smoke(args, actor):
             "sampling": "linspace",
             "min_object_track_sample_count": MIN_OBJECT_TRACK_SAMPLE_COUNT,
             "valid_slots": int(valid.sum().item()),
-            "object_selection_shape": None
-            if object_selection is None
-            else tuple(object_selection.shape),
             "top_action": ACTION_CLASSES[int(probs.argmax().item())],
             "top_prob": float(probs.max().item()),
             "presence": float(torch.sigmoid(presence[0, 0]).item()),
@@ -785,11 +760,8 @@ class DashboardState:
             "objects": [],
             "actor_backend": None,
             "actor_device": None,
-            "scene_object_tokens": None,
             "actor_object_logit_residual": None,
             "actor_object_conditioned_action": None,
-            "actor_object_relation": None,
-            "actor_object_compatibility_expert": None,
             "num_scene_object_tokens": None,
             "detector_backend": None,
             "last_detector_ms": None,
@@ -841,17 +813,11 @@ def draw_overlay(frame_bgr, actors, objects, message):
         action_conf = actor.get("action_conf")
         det_conf = actor.get("det_conf")
         presence = actor.get("presence")
-        selected_object = actor.get("selected_object")
-        selected_object_conf = actor.get("selected_object_conf")
         text = label
         if action_conf is not None:
             text += f" {action_conf:.2f}"
         if presence is not None:
             text += f" pres={presence:.2f}"
-        if selected_object is not None:
-            text += f" obj={selected_object}"
-            if selected_object_conf is not None:
-                text += f":{selected_object_conf:.2f}"
         if det_conf is not None:
             text += f" det={det_conf:.2f}"
         cv2.rectangle(out, (x1, y1), (x2, y2), (0, 220, 0), 2)
@@ -972,18 +938,16 @@ class LiveRunner:
             actor_backend=self.actor.backend_name,
             actor_precision=self.actor.precision,
             actor_device=str(self.actor.device),
-            scene_object_tokens=bool(self.actor.scene_object_tokens),
             actor_object_slot_head=bool(
                 getattr(self.actor, "actor_object_slot_head", False)
             ),
             uses_object_proposals=bool(
-                getattr(self.actor, "uses_object_proposals", self.actor.scene_object_tokens)
+                getattr(self.actor, "uses_object_proposals", False)
             ),
             actor_object_logit_residual=bool(self.actor.actor_object_logit_residual),
             actor_object_conditioned_action=bool(
                 self.actor.actor_object_conditioned_action
             ),
-            actor_object_relation=bool(self.actor.actor_object_relation),
             num_scene_object_tokens=int(self.actor.num_scene_object_tokens),
             detector_backend=self.detector_backend_name,
             crop_mode=self.args.crop_mode,
@@ -1253,7 +1217,7 @@ class LiveRunner:
                         )
                     if valid.any():
                         started = time.perf_counter()
-                        logits, presence_logits, object_selection_logits = self.actor(
+                        logits, presence_logits = self.actor(
                             clip,
                             boxes,
                             valid,
@@ -1270,14 +1234,6 @@ class LiveRunner:
                         presence_probs = (
                             torch.sigmoid(presence_logits[0]).detach().cpu().numpy()
                         )
-                        selection_probs = None
-                        if object_selection_logits is not None:
-                            selection_probs = (
-                                torch.softmax(object_selection_logits[0], dim=-1)
-                                .detach()
-                                .cpu()
-                                .numpy()
-                            )
                         kept_actor_idx = np.flatnonzero(keep)[: self.max_actors]
                         for slot, actor_idx in enumerate(kept_actor_idx):
                             if actor_idx >= len(self.current_track_ids):
@@ -1299,34 +1255,6 @@ class LiveRunner:
                                     for index in top_indices
                                 ],
                             }
-                            if selection_probs is not None:
-                                selected_index = int(selection_probs[slot].argmax())
-                                selected_conf = float(selection_probs[slot, selected_index])
-                                selection_payload = {
-                                    "selected_object": "none",
-                                    "selected_object_conf": selected_conf,
-                                }
-                                if selected_index > 0:
-                                    object_slot = selected_index - 1
-                                    if object_slot < len(packed_objects):
-                                        selected_object = packed_objects[object_slot]
-                                        selection_payload.update(
-                                            {
-                                                "selected_object": selected_object["label"],
-                                                "selected_object_slot": int(object_slot),
-                                                "selected_object_det_conf": float(
-                                                    selected_object["conf"]
-                                                ),
-                                            }
-                                        )
-                                    else:
-                                        selection_payload.update(
-                                            {
-                                                "selected_object": "invalid_slot",
-                                                "selected_object_slot": int(object_slot),
-                                            }
-                                        )
-                                raw_payload.update(selection_payload)
                             track.update_action(
                                 action_probs[slot],
                                 presence_probs[slot],

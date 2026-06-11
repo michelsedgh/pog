@@ -111,7 +111,6 @@ class ActorStageExport(torch.nn.Module):
             raise ValueError(
                 f"{stage} exceeds network depth {self.net.depth}."
             )
-        self.scene_object_tokens = bool(actor_model.scene_object_tokens)
         self.actor_object_slot_head = bool(
             getattr(actor_model, "actor_object_slot_head_enabled", False)
         )
@@ -169,35 +168,6 @@ class ActorStageExport(torch.nn.Module):
                     device=x.device,
                 )
             )
-
-        if net.n_object_tokens > 0:
-            object_boxes = object_boxes.to(device=x.device, dtype=x.dtype).clamp(0.0, 1.0)
-            object_classes = object_classes.to(device=x.device, dtype=torch.long)
-            object_confs = object_confs.to(device=x.device, dtype=x.dtype).clamp(0.0, 1.0)
-            object_valid = object_valid.to(device=x.device, dtype=torch.bool)
-            safe_object_classes = object_classes.clamp(0, net.none_object_id)
-            safe_object_classes = torch.where(
-                object_valid,
-                safe_object_classes,
-                torch.full_like(safe_object_classes, net.none_object_id),
-            )
-            object_visual_feat = net._pool_box_features(
-                x,
-                object_boxes,
-                object_valid,
-                window_size,
-            )
-            object_tokens = (
-                net.object_slot_embed.expand(batch_size, -1, -1)
-                + net.object_cls_embed(safe_object_classes).to(dtype=x.dtype)
-                + net.object_bbox_mlp(object_boxes)
-                + net.object_conf_mlp(object_confs.unsqueeze(-1))
-                + net.object_visual_proj(object_visual_feat)
-                + net.object_valid_embed(object_valid.long()).to(dtype=x.dtype)
-            )
-            object_tokens = object_tokens * object_valid.to(dtype=x.dtype).unsqueeze(-1)
-            prefix_tokens.append(object_tokens)
-            prefix_key_masks.append(~object_valid)
 
         if net.n_registers > 0:
             prefix_tokens.append(net.register_tokens.expand(batch_size, -1, -1))
@@ -263,28 +233,15 @@ class ActorStageExport(torch.nn.Module):
         net = self.net
         x_class = x[:, 0, :]
         x_actor = x[:, 1 : 1 + net.n_actor_tokens, :]
-        x_object = None
-        if net.n_object_tokens > 0:
-            object_start = 1 + net.n_actor_tokens
-            object_end = object_start + net.n_object_tokens
-            x_object = x[:, object_start:object_end, :]
-
         if net.fc_norm is not None:
             x_class = net.fc_norm(x_class)
             x_actor = net.fc_norm(x_actor)
-            if x_object is not None:
-                x_object = net.fc_norm(x_object)
         else:
             x_class = net.norm(x_class)
             x_actor = net.norm(x_actor)
-            if x_object is not None:
-                x_object = net.norm(x_object)
         x_class = net.head_dropout(x_class).unsqueeze(1)
         x_actor = net.head_dropout(x_actor)
-        if x_object is None:
-            return torch.cat([x_class, x_actor], dim=1)
-        x_object = net.head_dropout(x_object)
-        return torch.cat([x_class, x_actor, x_object], dim=1)
+        return torch.cat([x_class, x_actor], dim=1)
 
     def forward(
         self,
@@ -324,30 +281,7 @@ class ActorStageExport(torch.nn.Module):
             return (final_tokens,)
 
         x_actor = final_tokens[:, 1 : 1 + self.net.n_actor_tokens, :]
-        x_object = None
-        if self.net.n_object_tokens > 0:
-            object_start = 1 + self.net.n_actor_tokens
-            object_end = object_start + self.net.n_object_tokens
-            x_object = final_tokens[:, object_start:object_end, :]
-        object_selection_logits = None
-        if self.actor_model.object_selection_head is not None:
-            object_selection_logits = self.actor_model.object_selection_head(
-                x_actor,
-                x_object,
-                object_valid.to(device=x_actor.device, dtype=torch.bool),
-            )
         action_logits = self.actor_model.actor_head(x_actor)
-        actor_object_relation = getattr(self.actor_model, "actor_object_relation", None)
-        if actor_object_relation is not None:
-            expert_output = actor_object_relation(
-                x_actor,
-                x_object,
-                object_valid.to(device=x_actor.device, dtype=torch.bool),
-                object_selection_logits,
-                object_classes=object_classes,
-                base_logits=action_logits,
-            )
-            action_logits = expert_output["logits"]
         actor_object_slot_head = getattr(self.actor_model, "actor_object_slot_head", None)
         if actor_object_slot_head is not None:
             if object_boxes is None or object_classes is None:
@@ -363,19 +297,18 @@ class ActorStageExport(torch.nn.Module):
             )
             slot_output = actor_object_slot_head(
                 actor_tokens=x_actor,
-                motion_logits=action_logits,
                 actor_boxes=boxes,
+                actor_valid=valid,
                 object_boxes=object_boxes,
                 object_classes=object_classes,
                 object_confs=object_confs,
                 object_valid=object_valid,
                 object_heatmap_scores=object_heatmap_scores,
+                motion_logits=action_logits,
             )
             action_logits = slot_output["logits"]
         presence = self.actor_model.presence_head(x_actor).squeeze(-1)
-        if object_selection_logits is None:
-            return action_logits, presence
-        return action_logits, presence, object_selection_logits
+        return action_logits, presence
 
 
 class GenericTensorRTEngine:
@@ -539,9 +472,13 @@ def main():
         return_metadata=True,
         hparam_overrides=hparam_overrides(args),
     )
-    scene_object_tokens = bool(hparams.get("scene_object_tokens", 0))
+    if bool(hparams.get("scene_object_tokens", 0)):
+        raise RuntimeError(
+            "scene_object_tokens checkpoints use the removed object-selection path. "
+            "Use an actor_object_slot_head checkpoint instead."
+        )
     actor_object_slot_head = bool(hparams.get("actor_object_slot_head", 0))
-    uses_object_proposals = scene_object_tokens or actor_object_slot_head
+    uses_object_proposals = actor_object_slot_head
     clip_frames = int(args.clip_frames or hparams.get("n_frames", 16))
     max_actors = int(args.max_actors or hparams.get("num_actor_tokens", 0))
     max_objects = int(
