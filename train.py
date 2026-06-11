@@ -300,8 +300,8 @@ def _validate_active_actor_action_path(module):
     if not isinstance(actor_head, torch.nn.Linear):
         raise RuntimeError(
             "Actor action path must be a plain nn.Linear over actor tokens. "
-            "Object detections should affect action logits through transformer "
-            "object tokens, not through a late object-conditioned action head."
+            "Object detections should affect action logits through the structured "
+            "actor-object compatibility expert, not through a replacement action head."
         )
     if getattr(model, "actor_object_conditioned_action", False):
         raise RuntimeError("actor_object_conditioned_action must be disabled.")
@@ -311,7 +311,11 @@ def _validate_active_actor_action_path(module):
         relation = getattr(model, "actor_object_relation", None)
         if relation is None:
             raise RuntimeError(
-                "scene_object_tokens requires the actor-object relation block."
+                "scene_object_tokens requires the actor-object compatibility expert."
+            )
+        if not hasattr(relation, "allowed_action_mask"):
+            raise RuntimeError(
+                "scene_object_tokens is not using the structured compatibility expert."
             )
 
 
@@ -399,8 +403,8 @@ def _validate_no_deprecated_object_path(checkpoint):
         raise ValueError(
             "Deprecated object specialist checkpoint detected. The active "
             "actor-object path uses actor interaction heatmaps, scene object "
-            "tokens, object selection, a relation block, and one actor-token "
-            "action head. "
+            "tokens, object selection, a compatibility expert, and one base "
+            "actor-token action head. "
             f"First deprecated keys: {preview}"
         )
 

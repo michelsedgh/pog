@@ -8,6 +8,11 @@ import torch
 import os
 import os.path
 import pickle
+from datasets.object_vocab import NUM_OBJECT_CLASSES, OBJECT_TO_ID
+from datasets.toyota_action_taxonomy import (
+    toyota_action_object_map,
+    toyota_action_to_index,
+)
 
 
 def load_state_dict(
@@ -167,199 +172,88 @@ class ActorObjectSelectionHead(nn.Module):
         return torch.cat([none_logits, object_logits], dim=-1)
 
 
-class ActorObjectRelationLayer(nn.Module):
-    def __init__(self, dim, num_heads=8, hidden_dim=None):
-        super().__init__()
-        if dim % int(num_heads) != 0:
-            raise ValueError("dim must be divisible by num_heads")
-        hidden_dim = int(hidden_dim or dim * 4)
-        self.num_heads = int(num_heads)
-        self.head_dim = dim // self.num_heads
-        self.scale = self.head_dim ** -0.5
-        self.actor_norm = nn.LayerNorm(dim)
-        self.object_norm = nn.LayerNorm(dim)
-        self.query = nn.Linear(dim, dim)
-        self.key = nn.Linear(dim, dim)
-        self.value = nn.Linear(dim, dim)
-        self.out = nn.Linear(dim, dim)
-        self.ffn = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, dim),
-        )
-        self.geometry_bias = nn.Sequential(
-            nn.Linear(7, 64),
-            nn.GELU(),
-            nn.Linear(64, self.num_heads),
-        )
-        nn.init.zeros_(self.out.weight)
-        nn.init.zeros_(self.out.bias)
-        nn.init.zeros_(self.ffn[-1].weight)
-        nn.init.zeros_(self.ffn[-1].bias)
-        nn.init.zeros_(self.geometry_bias[-1].weight)
-        nn.init.zeros_(self.geometry_bias[-1].bias)
-
-    def _box_geometry_bias(
-        self,
-        actor_boxes,
-        object_boxes,
-        object_confs,
-        batch,
-        num_actors,
-        num_objects,
-        device,
-        dtype,
-    ):
-        if actor_boxes is None or object_boxes is None:
-            return torch.zeros(
-                batch,
-                self.num_heads,
-                num_actors,
-                num_objects,
-                device=device,
-                dtype=dtype,
-            )
-
-        actor_boxes = actor_boxes.to(device=device, dtype=dtype)
-        object_boxes = object_boxes.to(device=device, dtype=dtype)
-        actor_xy1 = actor_boxes[..., :2]
-        actor_xy2 = actor_boxes[..., 2:].clamp_min(actor_xy1 + 1e-4)
-        object_xy1 = object_boxes[..., :2]
-        object_xy2 = object_boxes[..., 2:].clamp_min(object_xy1 + 1e-4)
-
-        actor_ctr = (actor_xy1 + actor_xy2) * 0.5
-        object_ctr = (object_xy1 + object_xy2) * 0.5
-        actor_size = (actor_xy2 - actor_xy1).clamp_min(1e-4)
-        object_size = (object_xy2 - object_xy1).clamp_min(1e-4)
-
-        delta = object_ctr[:, None, :, :] - actor_ctr[:, :, None, :]
-        normalized_delta = delta / actor_size[:, :, None, :]
-        size_ratio = torch.log(object_size[:, None, :, :] / actor_size[:, :, None, :])
-        actor_area = actor_size[..., 0] * actor_size[..., 1]
-        object_area = object_size[..., 0] * object_size[..., 1]
-        area_ratio = torch.log(object_area[:, None, :] / actor_area[:, :, None])
-
-        inter_xy1 = torch.maximum(actor_xy1[:, :, None, :], object_xy1[:, None, :, :])
-        inter_xy2 = torch.minimum(actor_xy2[:, :, None, :], object_xy2[:, None, :, :])
-        inter_size = (inter_xy2 - inter_xy1).clamp_min(0.0)
-        inter_area = inter_size[..., 0] * inter_size[..., 1]
-        union_area = (
-            actor_area[:, :, None] + object_area[:, None, :] - inter_area
-        ).clamp_min(1e-6)
-        iou = inter_area / union_area
-
-        if object_confs is None:
-            conf = torch.ones(batch, num_objects, device=device, dtype=dtype)
-        else:
-            conf = object_confs.to(device=device, dtype=dtype).clamp(0.0, 1.0)
-        conf = conf[:, None, :].expand(-1, num_actors, -1)
-
-        features = torch.stack(
-            (
-                normalized_delta[..., 0],
-                normalized_delta[..., 1],
-                size_ratio[..., 0],
-                size_ratio[..., 1],
-                area_ratio,
-                iou,
-                conf,
-            ),
-            dim=-1,
-        )
-        bias = self.geometry_bias(features.float()).to(dtype=dtype)
-        return bias.permute(0, 3, 1, 2).contiguous()
-
-    def forward(
-        self,
-        actor_tokens,
-        object_tokens,
-        object_valid,
-        object_prior,
-        actor_boxes=None,
-        object_boxes=None,
-        object_confs=None,
-    ):
-        batch, num_actors, dim = actor_tokens.shape
-        num_objects = object_tokens.shape[1]
-        if object_prior.shape != (batch, num_actors, num_objects):
-            raise ValueError(
-                "object_prior must have shape "
-                f"{(batch, num_actors, num_objects)}, got {tuple(object_prior.shape)}"
-            )
-
-        q = self.query(self.actor_norm(actor_tokens))
-        k = self.key(self.object_norm(object_tokens))
-        v = self.value(self.object_norm(object_tokens))
-        q = q.view(batch, num_actors, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(batch, num_objects, self.num_heads, self.head_dim).transpose(1, 2)
-        v = v.view(batch, num_objects, self.num_heads, self.head_dim).transpose(1, 2)
-
-        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-        prior = object_prior.to(device=scores.device, dtype=scores.dtype).clamp_min(1e-6)
-        scores = scores + prior[:, None, :, :].log()
-        scores = scores + self._box_geometry_bias(
-            actor_boxes,
-            object_boxes,
-            object_confs,
-            batch,
-            num_actors,
-            num_objects,
-            scores.device,
-            scores.dtype,
-        )
-
-        object_valid = object_valid.to(device=scores.device, dtype=torch.bool)
-        mask = object_valid[:, None, None, :]
-        scores = scores.masked_fill(~mask, torch.finfo(scores.dtype).min)
-        has_object = object_valid.any(dim=-1)
-        scores = torch.where(
-            has_object[:, None, None, None],
-            scores,
-            torch.zeros_like(scores),
-        )
-        attn = scores.float().softmax(dim=-1).to(dtype=scores.dtype)
-        attn = attn * mask.to(dtype=attn.dtype)
-
-        context = torch.matmul(attn, v)
-        context = context.transpose(1, 2).reshape(batch, num_actors, dim)
-        actor_tokens = actor_tokens + self.out(context)
-        actor_tokens = actor_tokens + self.ffn(actor_tokens)
-        return actor_tokens
-
-
-class ActorObjectRelationBlock(nn.Module):
+class ActorObjectCompatibilityExpert(nn.Module):
     def __init__(
         self,
         dim,
+        num_classes,
+        object_action_indices,
+        allowed_action_indices,
+        num_object_classes=NUM_OBJECT_CLASSES,
         hidden_dim=512,
-        num_layers=2,
-        num_heads=8,
         relevance_gate_init=-2.0,
+        compatibility_eps=0.05,
+        compatibility_scale=1.0,
+        pair_residual_scale=1.0,
     ):
         super().__init__()
+        num_classes = int(num_classes)
+        num_object_classes = int(num_object_classes)
+        if num_classes <= 0:
+            raise ValueError("num_classes must be positive")
+        if num_object_classes <= 0:
+            raise ValueError("num_object_classes must be positive")
+        if compatibility_eps <= 0:
+            raise ValueError("compatibility_eps must be > 0")
+        if compatibility_scale < 0:
+            raise ValueError("compatibility_scale must be >= 0")
+        if pair_residual_scale < 0:
+            raise ValueError("pair_residual_scale must be >= 0")
+
+        self.num_classes = num_classes
+        self.num_object_classes = num_object_classes
+        self.compatibility_eps = float(compatibility_eps)
+        self.compatibility_scale = float(compatibility_scale)
+        self.pair_residual_scale = float(pair_residual_scale)
         self.object_norm = nn.LayerNorm(dim)
         self.actor_norm = nn.LayerNorm(dim)
-        self.layers = nn.ModuleList(
-            [
-                ActorObjectRelationLayer(dim, num_heads=num_heads, hidden_dim=hidden_dim)
-                for _ in range(int(num_layers))
-            ]
-        )
         self.relevance_head = nn.Sequential(
             nn.LayerNorm(dim * 3 + 3),
             nn.Linear(dim * 3 + 3, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, 1),
         )
-        self.relation_scale = nn.Parameter(torch.ones(()))
+        self.pair_head = nn.Sequential(
+            nn.LayerNorm(dim * 3 + 3),
+            nn.Linear(dim * 3 + 3, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, num_classes),
+        )
+        object_action_mask = torch.zeros(num_object_classes, num_classes)
+        for object_id, action_indices in object_action_indices.items():
+            object_id = int(object_id)
+            if object_id < 0 or object_id >= num_object_classes:
+                continue
+            for action_idx in action_indices:
+                action_idx = int(action_idx)
+                if 0 <= action_idx < num_classes:
+                    object_action_mask[object_id, action_idx] = 1.0
+        allowed_action_mask = torch.zeros(num_classes)
+        for action_idx in allowed_action_indices:
+            action_idx = int(action_idx)
+            if 0 <= action_idx < num_classes:
+                allowed_action_mask[action_idx] = 1.0
+        if float(object_action_mask.sum()) == 0.0:
+            allowed_action_mask.zero_()
+        self.register_buffer(
+            "object_action_mask",
+            object_action_mask,
+            persistent=False,
+        )
+        self.register_buffer(
+            "allowed_action_mask",
+            allowed_action_mask,
+            persistent=False,
+        )
         nn.init.zeros_(self.relevance_head[-1].weight)
         nn.init.constant_(self.relevance_head[-1].bias, float(relevance_gate_init))
+        nn.init.zeros_(self.pair_head[-1].weight)
+        nn.init.zeros_(self.pair_head[-1].bias)
 
     def _selection_distribution(self, object_selection_logits, object_valid, dtype):
         if object_selection_logits is None:
             raise ValueError(
-                "object_selection_logits is required for actor-object relation"
+                "object_selection_logits is required for actor-object compatibility"
             )
         if object_selection_logits.ndim != 3:
             raise ValueError("object_selection_logits must be rank-3")
@@ -392,15 +286,48 @@ class ActorObjectRelationBlock(nn.Module):
         entropy = entropy / selection_probs.shape[-1]
         return torch.cat((1.0 - none_prob, top_object_prob, entropy), dim=-1), object_mass
 
+    def _object_context(self, object_tokens, object_probs, object_mass):
+        conditional_object_probs = object_probs / object_mass.clamp_min(1e-6)
+        return torch.einsum(
+            "bkm,bmd->bkd",
+            conditional_object_probs,
+            object_tokens.detach(),
+        )
+
+    def _object_compatibility(self, object_probs, object_classes, object_valid):
+        if object_classes is None:
+            raise ValueError(
+                "object_classes is required for actor-object compatibility"
+            )
+        if object_classes.shape != object_valid.shape:
+            raise ValueError(
+                "object_classes must have shape "
+                f"{tuple(object_valid.shape)}, got {tuple(object_classes.shape)}"
+            )
+        device = object_probs.device
+        object_action_mask = self.object_action_mask.to(
+            device=device,
+            dtype=object_probs.dtype,
+        )
+        object_valid = object_valid.to(device=device, dtype=torch.bool)
+        raw_classes = object_classes.to(device=device, dtype=torch.long)
+        class_valid = (raw_classes >= 0) & (raw_classes < self.num_object_classes)
+        safe_classes = raw_classes.clamp(0, self.num_object_classes - 1)
+        slot_action_mask = object_action_mask[safe_classes]
+        valid_class_slots = object_valid & class_valid
+        slot_action_mask = slot_action_mask * valid_class_slots[:, :, None].to(
+            dtype=object_probs.dtype
+        )
+        return torch.einsum("bkm,bmc->bkc", object_probs, slot_action_mask)
+
     def forward(
         self,
         actor_tokens,
         object_tokens,
         object_valid,
         object_selection_logits,
-        actor_boxes=None,
-        object_boxes=None,
-        object_confs=None,
+        object_classes,
+        base_logits,
     ):
         if actor_tokens.ndim != 3 or object_tokens.ndim != 3:
             raise ValueError("actor_tokens and object_tokens must be rank-3 tensors")
@@ -416,6 +343,12 @@ class ActorObjectRelationBlock(nn.Module):
             raise ValueError(
                 "object_selection_logits must have shape [batch, actors, objects+1]"
             )
+        if base_logits.shape != actor_tokens.shape[:2] + (self.num_classes,):
+            raise ValueError(
+                "base_logits must have shape "
+                f"{actor_tokens.shape[:2] + (self.num_classes,)}, "
+                f"got {tuple(base_logits.shape)}"
+            )
 
         object_valid = object_valid.to(device=actor_tokens.device, dtype=torch.bool)
         selection_probs = self._selection_distribution(
@@ -427,25 +360,17 @@ class ActorObjectRelationBlock(nn.Module):
         object_probs = selection_probs[..., 1:] * object_valid[:, None, :].to(
             dtype=selection_probs.dtype
         )
-        conditional_object_probs = object_probs / object_mass.clamp_min(1e-6)
-        object_context = torch.einsum(
-            "bkm,bmd->bkd",
-            conditional_object_probs,
+        object_context = self._object_context(
             object_tokens,
+            object_probs,
+            object_mass,
         )
-
-        relation_actor = actor_tokens
-        for layer in self.layers:
-            relation_actor = layer(
-                relation_actor,
-                object_tokens,
-                object_valid,
-                conditional_object_probs,
-                actor_boxes=actor_boxes,
-                object_boxes=object_boxes,
-                object_confs=object_confs,
-            )
-        relation_delta = relation_actor - actor_tokens
+        compatibility = self._object_compatibility(
+            object_probs,
+            object_classes,
+            object_valid,
+        ).to(dtype=actor_tokens.dtype)
+        object_mass_for_actions = object_mass.to(dtype=actor_tokens.dtype)
 
         relevance_input = torch.cat(
             (
@@ -458,9 +383,41 @@ class ActorObjectRelationBlock(nn.Module):
         )
         relevance_logits = self.relevance_head(relevance_input).squeeze(-1)
         relevance_gate = torch.sigmoid(relevance_logits).unsqueeze(-1)
-        final_gate = relevance_gate * object_mass.to(dtype=actor_tokens.dtype)
-        fused_actor = actor_tokens + self.relation_scale * final_gate * relation_delta
-        return fused_actor, relevance_logits, object_mass.squeeze(-1)
+        final_gate = relevance_gate * object_mass_for_actions
+
+        eps = torch.as_tensor(
+            self.compatibility_eps,
+            device=actor_tokens.device,
+            dtype=actor_tokens.dtype,
+        )
+        incompatible_mass = (object_mass_for_actions - compatibility).clamp_min(0.0)
+        compatibility_prior = torch.log1p(compatibility / eps) - torch.log1p(
+            incompatible_mass / eps
+        )
+        allowed_action_mask = self.allowed_action_mask.to(
+            device=actor_tokens.device,
+            dtype=actor_tokens.dtype,
+        ).view(1, 1, -1)
+        compatibility_prior = compatibility_prior * allowed_action_mask
+
+        pair_residual = torch.tanh(self.pair_head(relevance_input))
+        pair_residual = pair_residual * allowed_action_mask
+        pair_residual = pair_residual * compatibility.detach()
+        pair_residual = pair_residual * self.pair_residual_scale
+
+        adjustment = final_gate * (
+            self.compatibility_scale * compatibility_prior + pair_residual
+        )
+        final_logits = base_logits + adjustment.to(dtype=base_logits.dtype)
+        return {
+            "logits": final_logits,
+            "relevance_logits": relevance_logits,
+            "object_mass": object_mass.squeeze(-1),
+            "compatibility": compatibility,
+            "compatibility_prior": compatibility_prior,
+            "pair_residual": pair_residual,
+            "adjustment": adjustment,
+        }
 
 
 class POGUISE(pl.LightningModule):
@@ -615,20 +572,37 @@ class POGUISE(pl.LightningModule):
                 if self.scene_object_tokens
                 else None
             )
+            object_action_indices = self._object_action_indices()
+            object_action_indices_by_object = self._object_action_indices_by_object()
+            if self.scene_object_tokens and not object_action_indices:
+                raise ValueError(
+                    "scene_object_tokens requires a Toyota action-object taxonomy "
+                    "mapping for the compatibility expert."
+                )
             self.actor_object_relation = (
-                ActorObjectRelationBlock(
+                ActorObjectCompatibilityExpert(
                     self.net.num_features,
+                    num_classes=self.hparams.num_classes,
+                    object_action_indices=object_action_indices_by_object,
+                    allowed_action_indices=object_action_indices,
+                    num_object_classes=self.hparams.get(
+                        "num_object_classes",
+                        NUM_OBJECT_CLASSES,
+                    ),
                     hidden_dim=int(
                         self.hparams.get("actor_object_relation_hidden_dim", 512)
                     ),
-                    num_layers=int(
-                        self.hparams.get("actor_object_relation_layers", 2)
-                    ),
-                    num_heads=int(
-                        self.hparams.get("actor_object_relation_heads", 8)
-                    ),
                     relevance_gate_init=float(
                         self.hparams.get("actor_object_relevance_gate_init", -2.0)
+                    ),
+                    compatibility_eps=float(
+                        self.hparams.get("actor_object_compatibility_eps", 0.05)
+                    ),
+                    compatibility_scale=float(
+                        self.hparams.get("actor_object_compatibility_scale", 1.0)
+                    ),
+                    pair_residual_scale=float(
+                        self.hparams.get("actor_object_pair_residual_scale", 1.0)
                     ),
                 )
                 if self.scene_object_tokens
@@ -644,6 +618,45 @@ class POGUISE(pl.LightningModule):
                 use_dropout=False,
                 # dropout=0.5,
             )
+
+    def _toyota_action_settings(self):
+        task_type = self.hparams.get("task_type", "CS")
+        action_taxonomy = self.hparams.get("toyota_action_taxonomy", "toyota_31")
+        return task_type, action_taxonomy
+
+    def _object_action_indices(self):
+        if self.hparams.get("dataset", None) != "toyotasm":
+            return []
+        task_type, action_taxonomy = self._toyota_action_settings()
+        action_to_index = toyota_action_to_index(task_type, action_taxonomy)
+        action_object_map = toyota_action_object_map(task_type, action_taxonomy)
+        output = []
+        for action_name in action_object_map:
+            action_idx = action_to_index.get(action_name)
+            if action_idx is not None:
+                output.append(int(action_idx))
+        return sorted(set(output))
+
+    def _object_action_indices_by_object(self):
+        if self.hparams.get("dataset", None) != "toyotasm":
+            return {}
+        task_type, action_taxonomy = self._toyota_action_settings()
+        action_to_index = toyota_action_to_index(task_type, action_taxonomy)
+        action_object_map = toyota_action_object_map(task_type, action_taxonomy)
+        output = {}
+        for action_name, object_names in action_object_map.items():
+            action_idx = action_to_index.get(action_name)
+            if action_idx is None:
+                continue
+            for object_name in object_names:
+                object_id = OBJECT_TO_ID.get(object_name)
+                if object_id is None:
+                    continue
+                output.setdefault(int(object_id), set()).add(int(action_idx))
+        return {
+            object_id: sorted(action_indices)
+            for object_id, action_indices in output.items()
+        }
 
     def _freeze_backbone(self):
         print("Freezing backbone")
@@ -833,33 +846,51 @@ class POGUISE(pl.LightningModule):
             self.last_actor_object_relation_delta = None
             self.last_actor_object_relevance_logits = None
             self.last_actor_object_relation_mass = None
+            self.last_actor_object_compatibility = None
+            self.last_actor_object_compatibility_prior = None
+            self.last_actor_object_pair_residual_logits = None
+            self.last_actor_object_compatibility_adjustment = None
             self.last_actor_motion_logits = None
             if self.actor_motion_head is not None:
                 self.last_actor_motion_logits = self.actor_motion_head(x_actor)
-            action_actor = x_actor
+            if self.hparams.ret_feat:
+                return x_actor
+            base_action_logits = self.actor_head(x_actor)
+            self.last_actor_action_logits = base_action_logits
+            action_logits = base_action_logits
             if self.actor_object_relation is not None:
                 if object_valid is None:
                     raise ValueError(
                         "object_valid is required when scene_object_tokens is enabled"
                     )
-                relation_output = self.actor_object_relation(
+                if object_classes is None:
+                    raise ValueError(
+                        "object_classes is required when scene_object_tokens is enabled"
+                    )
+                expert_output = self.actor_object_relation(
                     x_actor,
                     x_object,
                     object_valid.to(device=x_actor.device, dtype=torch.bool),
                     object_selection_logits,
-                    actor_boxes=boxes,
-                    object_boxes=object_boxes,
-                    object_confs=object_confs,
+                    object_classes=object_classes,
+                    base_logits=base_action_logits,
                 )
-                action_actor, relevance_logits, relation_mass = relation_output
-                self.last_actor_object_relation_delta = action_actor - x_actor
-                self.last_actor_object_relevance_logits = relevance_logits
-                self.last_actor_object_relation_mass = relation_mass
-            if self.hparams.ret_feat:
-                return action_actor
-            self.last_actor_action_logits = None
-            action_logits = self.actor_head(action_actor)
-            self.last_actor_action_logits = action_logits
+                action_logits = expert_output["logits"]
+                self.last_actor_object_relevance_logits = expert_output[
+                    "relevance_logits"
+                ]
+                self.last_actor_object_relation_mass = expert_output["object_mass"]
+                self.last_actor_object_compatibility = expert_output["compatibility"]
+                self.last_actor_object_compatibility_prior = expert_output[
+                    "compatibility_prior"
+                ]
+                self.last_actor_object_pair_residual_logits = expert_output[
+                    "pair_residual"
+                ]
+                self.last_actor_object_compatibility_adjustment = expert_output[
+                    "adjustment"
+                ]
+                self.last_actor_object_relation_delta = expert_output["adjustment"]
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
                 if object_selection_logits is not None:
@@ -935,8 +966,6 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--scene_object_tokens", type=int, default=0)
         parser.add_argument("--num_scene_object_tokens", type=int, default=32)
         parser.add_argument("--num_object_classes", type=int, default=19)
-        parser.add_argument("--actor_object_relation_layers", type=int, default=2)
-        parser.add_argument("--actor_object_relation_heads", type=int, default=8)
         parser.add_argument(
             "--actor_object_relation_hidden_dim",
             type=int,
@@ -946,6 +975,21 @@ class POGUISE(pl.LightningModule):
             "--actor_object_relevance_gate_init",
             type=float,
             default=-2.0,
+        )
+        parser.add_argument(
+            "--actor_object_compatibility_eps",
+            type=float,
+            default=0.05,
+        )
+        parser.add_argument(
+            "--actor_object_compatibility_scale",
+            type=float,
+            default=1.0,
+        )
+        parser.add_argument(
+            "--actor_object_pair_residual_scale",
+            type=float,
+            default=1.0,
         )
         parser.add_argument("--trt_safe_attention", type=int, default=0)
         parser.add_argument("--interaction_unfreeze_last_blocks", type=int, default=0)

@@ -86,6 +86,13 @@ CORE_COLUMNS = [
     "val_selected_laptop_Uselaptop_minus_confuser_logit_margin",
     "val_selected_laptop_Uselaptop_minus_confuser_prob_margin",
     "val_selected_laptop_Uselaptop_minus_Readbook_logit_margin",
+    "val_actor_object_compat_adjust_abs_mean",
+    "val_actor_object_compat_adjust_l2_mean",
+    "val_actor_object_compatibility_scale",
+    "val_actor_object_compatibility_prior_abs_mean",
+    "val_actor_object_compatibility_prior_signed_mean",
+    "val_actor_object_pair_residual_abs_mean",
+    "val_actor_object_pair_residual_scale",
     "val_actor_object_relation_delta_abs_mean",
     "val_actor_object_relation_delta_l2_mean",
     "val_actor_object_relation_scale",
@@ -702,6 +709,16 @@ def print_decision(epoch_df):
         latest,
         "val_deploy_selected_laptop_uselaptop_u_minus_read_margin",
     )
+    compat_abs = metric(latest, "val_actor_object_compat_adjust_abs_mean")
+    compat_l2 = metric(latest, "val_actor_object_compat_adjust_l2_mean")
+    compat_scale = metric(latest, "val_actor_object_compatibility_scale")
+    compat_prior_abs = metric(latest, "val_actor_object_compatibility_prior_abs_mean")
+    compat_prior_signed = metric(
+        latest,
+        "val_actor_object_compatibility_prior_signed_mean",
+    )
+    pair_residual_abs = metric(latest, "val_actor_object_pair_residual_abs_mean")
+    pair_residual_scale = metric(latest, "val_actor_object_pair_residual_scale")
     relation_abs = metric(latest, "val_actor_object_relation_delta_abs_mean")
     relation_l2 = metric(latest, "val_actor_object_relation_delta_l2_mean")
     relation_scale = metric(latest, "val_actor_object_relation_scale")
@@ -771,7 +788,20 @@ def print_decision(epoch_df):
             f"coverage {fmt(deploy_laptop_use_coverage)}, "
             f"u_minus_read {fmt(deploy_laptop_use_margin)}"
         )
-    if pd.notna(relation_abs):
+    if pd.notna(compat_abs):
+        print(
+            "actor-object compatibility: "
+            f"adjust_abs {fmt(compat_abs)}, "
+            f"adjust_l2 {fmt(compat_l2)}, "
+            f"scale {fmt(compat_scale)}, "
+            f"prior_abs {fmt(compat_prior_abs)}, "
+            f"prior_signed {fmt(compat_prior_signed)}, "
+            f"pair_abs {fmt(pair_residual_abs)}, "
+            f"pair_scale {fmt(pair_residual_scale)}, "
+            f"relevance {fmt(relation_relevance)}, "
+            f"mass {fmt(relation_mass)}"
+        )
+    if pd.isna(compat_abs) and pd.notna(relation_abs):
         print(
             "actor-object relation: "
             f"delta_abs {fmt(relation_abs)}, "
@@ -919,7 +949,23 @@ def print_row(title, row):
             "u_minus_read "
             f"{metric(row, 'val_deploy_selected_laptop_uselaptop_u_minus_read_margin'):.4f}"
         )
-    if pd.notna(metric(row, "val_actor_object_relation_delta_abs_mean")):
+    if pd.notna(metric(row, "val_actor_object_compat_adjust_abs_mean")):
+        print(
+            "actor-object compatibility: "
+            f"adjust_abs {metric(row, 'val_actor_object_compat_adjust_abs_mean'):.4f}, "
+            f"adjust_l2 {metric(row, 'val_actor_object_compat_adjust_l2_mean'):.4f}, "
+            f"scale {metric(row, 'val_actor_object_compatibility_scale'):.4f}, "
+            f"prior_abs {metric(row, 'val_actor_object_compatibility_prior_abs_mean'):.4f}, "
+            "prior_signed "
+            f"{metric(row, 'val_actor_object_compatibility_prior_signed_mean'):.4f}, "
+            f"pair_abs {metric(row, 'val_actor_object_pair_residual_abs_mean'):.4f}, "
+            f"pair_scale {metric(row, 'val_actor_object_pair_residual_scale'):.4f}, "
+            f"relevance {metric(row, 'val_actor_object_relevance_mean'):.4f}, "
+            f"mass {metric(row, 'val_actor_object_relation_mass_mean'):.4f}"
+        )
+    if pd.isna(metric(row, "val_actor_object_compat_adjust_abs_mean")) and pd.notna(
+        metric(row, "val_actor_object_relation_delta_abs_mean")
+    ):
         print(
             "actor-object relation: "
             f"delta_abs {metric(row, 'val_actor_object_relation_delta_abs_mean'):.4f}, "

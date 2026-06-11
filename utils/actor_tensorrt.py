@@ -92,6 +92,12 @@ class TensorRTActorEngine:
                 self.scene_object_tokens,
             )
         )
+        self.actor_object_compatibility_expert = bool(
+            self.metadata.get(
+                "actor_object_compatibility_expert",
+                self.actor_object_relation,
+            )
+        )
         expected_inputs = base_inputs | (object_inputs if self.scene_object_tokens else set())
         expected_outputs = {"logits", "presence"} | (
             {"object_selection"} if self.scene_object_tokens else set()

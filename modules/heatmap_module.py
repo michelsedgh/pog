@@ -1246,11 +1246,18 @@ class HeatmapModule(pl.LightningModule):
     def _log_actor_object_relation_diagnostics(self, stage, valid):
         if stage == "train" or not self.scene_object_tokens:
             return
-        relation_delta = getattr(
+        adjustment = getattr(
             self.model,
-            "last_actor_object_relation_delta",
+            "last_actor_object_compatibility_adjustment",
             None,
         )
+        relation_delta = adjustment
+        if relation_delta is None:
+            relation_delta = getattr(
+                self.model,
+                "last_actor_object_relation_delta",
+                None,
+            )
         if relation_delta is None:
             return
         valid = valid.to(device=relation_delta.device, dtype=torch.bool)
@@ -1258,6 +1265,17 @@ class HeatmapModule(pl.LightningModule):
             return
         valid_delta = relation_delta[valid].float()
         count = int(valid_delta.shape[0])
+        self._log_scalar(
+            f"{stage}_actor_object_compat_adjust_abs_mean",
+            valid_delta.abs().mean(),
+            count,
+        )
+        self._log_scalar(
+            f"{stage}_actor_object_compat_adjust_l2_mean",
+            valid_delta.norm(dim=-1).mean(),
+            count,
+        )
+        # Keep the old metric names populated for run-to-run comparisons.
         self._log_scalar(
             f"{stage}_actor_object_relation_delta_abs_mean",
             valid_delta.abs().mean(),
@@ -1269,11 +1287,64 @@ class HeatmapModule(pl.LightningModule):
             count,
         )
         relation = getattr(self.model, "actor_object_relation", None)
+        compatibility_scale = getattr(relation, "compatibility_scale", None)
+        if compatibility_scale is not None:
+            self._log_scalar(
+                f"{stage}_actor_object_compatibility_scale",
+                torch.as_tensor(
+                    compatibility_scale,
+                    device=relation_delta.device,
+                    dtype=torch.float32,
+                ),
+                count,
+            )
+        pair_residual_scale = getattr(relation, "pair_residual_scale", None)
+        if pair_residual_scale is not None:
+            self._log_scalar(
+                f"{stage}_actor_object_pair_residual_scale",
+                torch.as_tensor(
+                    pair_residual_scale,
+                    device=relation_delta.device,
+                    dtype=torch.float32,
+                ),
+                count,
+            )
         relation_scale = getattr(relation, "relation_scale", None)
         if relation_scale is not None:
             self._log_scalar(
                 f"{stage}_actor_object_relation_scale",
                 relation_scale.detach().float(),
+                count,
+            )
+        compatibility_prior = getattr(
+            self.model,
+            "last_actor_object_compatibility_prior",
+            None,
+        )
+        if compatibility_prior is not None:
+            compatibility_prior = compatibility_prior.to(device=relation_delta.device)
+            valid_prior = compatibility_prior[valid].float()
+            self._log_scalar(
+                f"{stage}_actor_object_compatibility_prior_abs_mean",
+                valid_prior.abs().mean(),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_actor_object_compatibility_prior_signed_mean",
+                valid_prior.mean(),
+                count,
+            )
+        pair_residual = getattr(
+            self.model,
+            "last_actor_object_pair_residual_logits",
+            None,
+        )
+        if pair_residual is not None:
+            pair_residual = pair_residual.to(device=relation_delta.device)
+            valid_pair_residual = pair_residual[valid].float()
+            self._log_scalar(
+                f"{stage}_actor_object_pair_residual_abs_mean",
+                valid_pair_residual.abs().mean(),
                 count,
             )
         relevance_logits = getattr(

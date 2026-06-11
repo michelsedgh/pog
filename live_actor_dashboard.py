@@ -575,6 +575,10 @@ class TorchActorBackend:
         self.actor_object_relation = bool(
             getattr(self.model, "actor_object_relation", None) is not None
         )
+        self.actor_object_compatibility_expert = bool(
+            getattr(self.model, "actor_object_relation", None) is not None
+            and hasattr(self.model.actor_object_relation, "allowed_action_mask")
+        )
         self.num_scene_object_tokens = (
             int(self.hparams.get("num_scene_object_tokens", 0))
             if self.scene_object_tokens
@@ -644,6 +648,13 @@ class TensorRTLiveActorBackend:
         )
         self.actor_object_relation = bool(
             getattr(self.engine, "actor_object_relation", self.scene_object_tokens)
+        )
+        self.actor_object_compatibility_expert = bool(
+            getattr(
+                self.engine,
+                "actor_object_compatibility_expert",
+                self.actor_object_relation,
+            )
         )
         self.num_scene_object_tokens = int(self.engine.num_scene_object_tokens)
         if self.clip_frames != TRAINING_CLIP_FRAMES:
@@ -726,6 +737,9 @@ def run_actor_smoke(args, actor):
                 actor.actor_object_conditioned_action
             ),
             "actor_object_relation": bool(actor.actor_object_relation),
+            "actor_object_compatibility_expert": bool(
+                actor.actor_object_compatibility_expert
+            ),
             "num_scene_object_tokens": int(actor.num_scene_object_tokens),
             "clip_frames": TRAINING_CLIP_FRAMES,
             "span_frames": TRAINING_SPAN_FRAMES,
@@ -759,6 +773,7 @@ class DashboardState:
             "actor_object_logit_residual": None,
             "actor_object_conditioned_action": None,
             "actor_object_relation": None,
+            "actor_object_compatibility_expert": None,
             "num_scene_object_tokens": None,
             "detector_backend": None,
             "last_detector_ms": None,
