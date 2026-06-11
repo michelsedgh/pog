@@ -7,9 +7,9 @@ query attends over explanation slots:
     NULL, UNKNOWN, object_1, ..., object_K
 
 Objectless actions can attend only to NULL.  Objectful actions can attend to
-UNKNOWN and valid object slots.  The final action logits are produced directly
-from the actor token, action query, and action-conditioned relation summary; the
-motion-only actor head is kept outside this module as an auxiliary head.
+UNKNOWN and valid object slots.  The decoder produces a bounded relation energy
+that is added to the motion-only actor logits, so training starts from the
+motion model and learns actor-object evidence as a residual energy term.
 """
 
 from __future__ import annotations
@@ -92,6 +92,7 @@ class ActorObjectActionQueryDecoder(nn.Module):
         unknown_bias: float = -0.10,
         unknown_mismatch_penalty: float = 1.0,
         quality_init_bias: float = -3.0,
+        relation_logit_scale_init: float = -2.0,
         neg_inf: float = -1.0e4,
     ) -> None:
         super().__init__()
@@ -105,6 +106,7 @@ class ActorObjectActionQueryDecoder(nn.Module):
         self.unknown_bias = float(unknown_bias)
         self.unknown_mismatch_penalty = float(unknown_mismatch_penalty)
         self.quality_init_bias = float(quality_init_bias)
+        self.relation_logit_scale_init = float(relation_logit_scale_init)
         self.neg_inf = float(neg_inf)
 
         for name, tensor in spec.build_buffers().items():
@@ -137,6 +139,9 @@ class ActorObjectActionQueryDecoder(nn.Module):
         self.relation_proj = nn.Linear(dim, dim)
         self.action_proj = nn.Linear(dim, dim)
         self.logit_head = nn.Linear(dim, 1)
+        self.relation_logit_scale = nn.Parameter(
+            torch.tensor(self.relation_logit_scale_init, dtype=torch.float32)
+        )
 
         self.quality_head = nn.Linear(dim, 1)
         self._reset_parameters()
@@ -145,6 +150,8 @@ class ActorObjectActionQueryDecoder(nn.Module):
         nn.init.normal_(self.null_slot, std=0.02)
         nn.init.normal_(self.unknown_slot, std=0.02)
         nn.init.normal_(self.action_embed, std=0.02)
+        nn.init.zeros_(self.logit_head.weight)
+        nn.init.zeros_(self.logit_head.bias)
         nn.init.zeros_(self.quality_head.weight)
         nn.init.constant_(self.quality_head.bias, self.quality_init_bias)
 
@@ -426,9 +433,22 @@ class ActorObjectActionQueryDecoder(nn.Module):
             self.num_actions,
             dim,
         )
-        logits = self.logit_head(
+        relation_logits = self.logit_head(
             torch.tanh(actor_term + relation_term + action_term)
         ).squeeze(-1)
+        relation_logits = torch.tanh(relation_logits)
+        relation_scale = torch.sigmoid(self.relation_logit_scale).to(dtype=dtype)
+        if motion_logits is not None:
+            expected_shape = (batch, actors, self.num_actions)
+            if tuple(motion_logits.shape) != expected_shape:
+                raise ValueError(
+                    "motion_logits must have shape "
+                    f"{expected_shape}, got {tuple(motion_logits.shape)}"
+                )
+            motion_logits = motion_logits.to(device=device, dtype=dtype)
+            logits = motion_logits + relation_scale * relation_logits
+        else:
+            logits = relation_scale * relation_logits
         invalid_actor = (~actor_valid).to(dtype=dtype) * self.neg_inf
         logits = logits + invalid_actor[:, :, None]
         if motion_logits is not None:
@@ -437,6 +457,8 @@ class ActorObjectActionQueryDecoder(nn.Module):
         return {
             "logits": logits,
             "motion_logits": motion_logits,
+            "relation_logits": relation_logits,
+            "relation_logit_scale": relation_scale,
             "slot_delta": slot_scores,
             "slot_posterior": slot_posterior,
             "best_slot": slot_posterior.argmax(dim=-1),
@@ -521,7 +543,16 @@ def action_slot_target_loss(
                 if 0 <= object_slot < num_object_slots and bool(
                     object_valid[bi, object_slot].item()
                 ):
-                    target[bi, ai, object_slot + 2] = 1.0
+                    object_class = int(object_classes[bi, object_slot].item())
+                    if object_class in allowed:
+                        target[bi, ai, object_slot + 2] = 1.0
+                    else:
+                        # The teacher says this proposal is the interaction
+                        # object, but the detector class conflicts with the
+                        # action taxonomy.  Preserve some geometry supervision
+                        # while making UNKNOWN the primary explanation.
+                        target[bi, ai, 1] = 0.7
+                        target[bi, ai, object_slot + 2] = 0.3
                     continue
                 target[bi, ai, 1] = 1.0
                 continue
@@ -566,6 +597,7 @@ if __name__ == "__main__":
     obj_valid = torch.ones(batch, objects, dtype=torch.bool)
     heatmap_scores = torch.zeros(batch, actors, objects)
     actor_valid = torch.ones(batch, actors, dtype=torch.bool)
+    motion = torch.randn(batch, actors, actions)
     out = head(
         actor_tokens=actor,
         actor_boxes=actor_boxes,
@@ -575,7 +607,10 @@ if __name__ == "__main__":
         object_confs=obj_confs,
         object_valid=obj_valid,
         object_heatmap_scores=heatmap_scores,
+        motion_logits=motion,
     )
+    max_motion_delta = (out["logits"] - motion).abs().max().item()
+    assert max_motion_delta < 1.0e-6, max_motion_delta
     loss = action_slot_target_loss(
         out["slot_delta"],
         torch.randint(0, actions, (batch, actors)),
@@ -584,4 +619,9 @@ if __name__ == "__main__":
         spec,
         valid=actor_valid,
     )
-    print(out["logits"].shape, out["slot_delta"].shape, float(loss.detach()))
+    print(
+        out["logits"].shape,
+        out["slot_delta"].shape,
+        float(loss.detach()),
+        max_motion_delta,
+    )

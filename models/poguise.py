@@ -330,6 +330,12 @@ class POGUISE(pl.LightningModule):
                     quality_init_bias=float(
                         self.hparams.get("actor_object_slot_quality_init_bias", -3.0)
                     ),
+                    relation_logit_scale_init=float(
+                        self.hparams.get(
+                            "actor_object_slot_relation_logit_scale_init",
+                            -2.0,
+                        )
+                    ),
                 )
             else:
                 self.actor_object_slot_head = None
@@ -583,6 +589,7 @@ class POGUISE(pl.LightningModule):
             self.last_actor_object_mismatch = None
             self.last_actor_object_unknown_delta = None
             self.last_actor_object_object_slot_delta = None
+            self.last_actor_object_slot_relation_scale = None
             self.last_actor_motion_logits = None
             if self.actor_motion_head is not None:
                 self.last_actor_motion_logits = self.actor_motion_head(x_actor)
@@ -623,6 +630,7 @@ class POGUISE(pl.LightningModule):
                         device=x_actor.device,
                         dtype=x_actor.dtype,
                     )
+                object_heatmap_scores = object_heatmap_scores.detach()
                 slot_output = self.actor_object_slot_head(
                     actor_tokens=x_actor,
                     actor_boxes=boxes,
@@ -650,6 +658,9 @@ class POGUISE(pl.LightningModule):
                 self.last_actor_object_unknown_delta = slot_output["unknown_delta"]
                 self.last_actor_object_object_slot_delta = slot_output[
                     "object_slot_delta"
+                ]
+                self.last_actor_object_slot_relation_scale = slot_output[
+                    "relation_logit_scale"
                 ]
                 self.last_actor_object_slot_logit_delta = (
                     action_logits - motion_action_logits
@@ -746,6 +757,11 @@ class POGUISE(pl.LightningModule):
             "--actor_object_slot_quality_init_bias",
             type=float,
             default=-3.0,
+        )
+        parser.add_argument(
+            "--actor_object_slot_relation_logit_scale_init",
+            type=float,
+            default=-2.0,
         )
         parser.add_argument("--trt_safe_attention", type=int, default=0)
         parser.add_argument("--interaction_unfreeze_last_blocks", type=int, default=0)

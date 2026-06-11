@@ -1243,6 +1243,17 @@ class HeatmapModule(pl.LightningModule):
                 valid_delta.norm(dim=-1).mean(),
                 count,
             )
+        relation_scale = getattr(
+            self.model,
+            "last_actor_object_slot_relation_scale",
+            None,
+        )
+        if relation_scale is not None:
+            self._log_scalar(
+                f"{stage}_actor_object_slot_relation_scale",
+                relation_scale.to(device=device).float(),
+                int(valid.sum().item()),
+            )
 
         quality = getattr(self.model, "last_actor_object_quality", None)
         if quality is not None:

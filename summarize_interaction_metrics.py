@@ -93,6 +93,7 @@ CORE_COLUMNS = [
     "val_objectless_with_phone_visible_count",
     "val_actor_object_slot_delta_abs_mean",
     "val_actor_object_slot_delta_l2_mean",
+    "val_actor_object_slot_relation_scale",
 ]
 
 GROUPS = [
@@ -289,6 +290,7 @@ def print_compact_epoch_summary(epoch_df):
         "val_object_slot_quality_neg_acc",
         "val_object_slot_Uselaptop_laptop_rate",
         "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
+        "val_actor_object_slot_relation_scale",
         "val_object_counterfactual_teacher_logit_drop",
         "val_interaction_heatmap_positive_mean",
         "val_interaction_heatmap_pred_max",
@@ -339,6 +341,7 @@ def print_compact_best(epoch_df):
         "val_object_slot_quality_neg_acc",
         "val_object_slot_Uselaptop_laptop_rate",
         "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
+        "val_actor_object_slot_relation_scale",
         "val_object_counterfactual_teacher_logit_drop",
         "val_action_Uselaptop_acc",
         "val_action_Readbook_acc",
@@ -692,6 +695,7 @@ def print_decision(epoch_df):
     slot_incompatible = metric(latest, "val_object_slot_true_incompatible_rate")
     slot_objectless_null = metric(latest, "val_object_slot_objectless_null_rate")
     slot_quality = metric(latest, "val_object_slot_quality_max_mean")
+    slot_relation_scale = metric(latest, "val_actor_object_slot_relation_scale")
     slot_quality_pos_acc = metric(latest, "val_object_slot_quality_pos_acc")
     slot_quality_neg_acc = metric(latest, "val_object_slot_quality_neg_acc")
     slot_mismatch = metric(latest, "val_object_slot_mismatch_mean")
@@ -742,6 +746,7 @@ def print_decision(epoch_df):
             f"unknown {fmt(slot_unknown)}, null {fmt(slot_null)}, "
             f"incompatible {fmt(slot_incompatible)}, "
             f"objectless_null {fmt(slot_objectless_null)}, "
+            f"relation_scale {fmt(slot_relation_scale)}, "
             f"quality_loss {fmt(slot_quality_loss)}, "
             f"quality_pos_acc {fmt(slot_quality_pos_acc)}, "
             f"quality_neg_acc {fmt(slot_quality_neg_acc)}, "

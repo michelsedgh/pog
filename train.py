@@ -423,8 +423,8 @@ def build_parser():
     parser.add_argument("--model_name", type=str, default="poguise_actor_prompt")
     parser.add_argument("--default_root_dir", type=str, default="./checkpoints")
     parser.add_argument("--save_top_k", type=int, default=3)
-    parser.add_argument("--checkpoint_monitor", type=str, default="val_loss")
-    parser.add_argument("--checkpoint_mode", type=str, default="min")
+    parser.add_argument("--checkpoint_monitor", type=str, default="val_deploy_score")
+    parser.add_argument("--checkpoint_mode", type=str, default="max")
     parser.add_argument(
         "--checkpoint_filename",
         type=str,
