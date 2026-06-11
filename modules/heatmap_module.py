@@ -28,6 +28,10 @@ from datasets.toyota_action_taxonomy import (
     toyota_label_dict,
     toyota_objectless_action_names,
 )
+from models.trt_actor_object_slot_head import (
+    ActionObjectSlotSpec,
+    action_slot_target_loss,
+)
 
 try:
     from grad_weights.nash_mtl import NashMTL
@@ -73,8 +77,19 @@ class HeatmapModule(pl.LightningModule):
             hparams.get("actor_interaction_heatmaps", 0)
         )
         self.scene_object_tokens = bool(hparams.get("scene_object_tokens", 0))
+        self.actor_object_slot_head = bool(hparams.get("actor_object_slot_head", 0))
+        self.uses_object_proposals = (
+            self.scene_object_tokens or self.actor_object_slot_head
+        )
         if self.scene_object_tokens and not self.actor_prompt:
             raise ValueError("scene_object_tokens requires actor_prompt")
+        if self.actor_object_slot_head and not self.actor_prompt:
+            raise ValueError("actor_object_slot_head requires actor_prompt")
+        if self.actor_object_slot_head and self.scene_object_tokens:
+            raise ValueError(
+                "actor_object_slot_head and scene_object_tokens are mutually "
+                "exclusive"
+            )
         self.actor_poguiseplus_loss = self.actor_prompt and self.actor_interaction_heatmaps
         self.poguiseplus_heatmap_loss_weight = float(
             hparams.get("poguiseplus_heatmap_loss_weight", 1.0)
@@ -137,6 +152,14 @@ class HeatmapModule(pl.LightningModule):
         )
         if self.object_action_confuser_margin < 0:
             raise ValueError("object_action_confuser_margin must be >= 0")
+        self.object_slot_target_loss_weight = float(
+            hparams.get("object_slot_target_loss_weight", 0.5)
+        )
+        if self.object_slot_target_loss_weight < 0:
+            raise ValueError("object_slot_target_loss_weight must be >= 0")
+        self.object_slot_ignore_missing_object = bool(
+            hparams.get("object_slot_ignore_missing_object", 0)
+        )
         self.num_classes = hparams.num_classes
         self.dataset_name = hparams.dataset_artifact
         self.is_toyota = str(self.dataset_name).lower() == "toyotasm"
@@ -247,6 +270,11 @@ class HeatmapModule(pl.LightningModule):
             "objectless",
             torch.empty(0, dtype=torch.long),
         )
+        self.actor_object_slot_spec = (
+            self._build_actor_object_slot_spec()
+            if self.is_toyota and self.actor_object_slot_head
+            else None
+        )
         self.hard_negative_object_ids = {
             int(OBJECT_TO_ID[object_name]): object_name
             for object_names in self.action_object_map.values()
@@ -282,6 +310,7 @@ class HeatmapModule(pl.LightningModule):
                 "model.presence_head",
                 "model.object_selection_head",
                 "model.actor_object_relation",
+                "model.actor_object_slot_head",
             ]
             if self.model.hparams.get("use_register_tokens", 0):
                 allowed_missing.append("model.net.register_tokens")
@@ -321,6 +350,7 @@ class HeatmapModule(pl.LightningModule):
         object_classes=None,
         object_confs=None,
         object_valid=None,
+        object_heatmap_scores=None,
     ):
         # Forward function that is run when visualizing the graph
         return self.model(
@@ -332,6 +362,7 @@ class HeatmapModule(pl.LightningModule):
             object_classes=object_classes,
             object_confs=object_confs,
             object_valid=object_valid,
+            object_heatmap_scores=object_heatmap_scores,
         )
 
     def _actor_prompt_param_name(self, name):
@@ -417,6 +448,11 @@ class HeatmapModule(pl.LightningModule):
             and getattr(self.model, "actor_object_relation", None) is not None
         ):
             params += list(self.model.actor_object_relation.parameters())
+        if (
+            self.actor_object_slot_head
+            and getattr(self.model, "actor_object_slot_head", None) is not None
+        ):
+            params += list(self.model.actor_object_slot_head.parameters())
         for name, param in self.model.net.named_parameters():
             if self.scene_object_tokens and self._object_prompt_param_name(name):
                 params.append(param)
@@ -469,6 +505,22 @@ class HeatmapModule(pl.LightningModule):
                     dtype=torch.long,
                 )
         return action_object_ids
+
+    def _build_actor_object_slot_spec(self):
+        action_to_object_ids = {
+            int(action_idx): tuple(int(x) for x in object_ids.tolist())
+            for action_idx, object_ids in self.action_object_ids_by_index.items()
+        }
+        return ActionObjectSlotSpec(
+            num_actions=int(self.num_classes),
+            num_object_classes=int(
+                self.model.hparams.get("num_object_classes", NUM_OBJECT_CLASSES)
+            ),
+            objectless_action_indices=tuple(
+                int(x) for x in self.objectless_action_indices.tolist()
+            ),
+            action_to_object_ids=action_to_object_ids,
+        )
 
     def _build_action_confuser_indices(self):
         confuser_indices = {}
@@ -871,7 +923,7 @@ class HeatmapModule(pl.LightningModule):
         }
 
     def _object_inputs_from_target(self, target, device):
-        if not self.scene_object_tokens:
+        if not self.uses_object_proposals:
             return {}
         required = (
             "object_boxes",
@@ -882,7 +934,7 @@ class HeatmapModule(pl.LightningModule):
         missing = [key for key in required if key not in target]
         if missing:
             raise RuntimeError(
-                "scene_object_tokens requires dataset object-token targets; "
+                "Object-proposal action heads require dataset object targets; "
                 f"missing {missing}"
             )
         return {
@@ -903,6 +955,39 @@ class HeatmapModule(pl.LightningModule):
                 dtype=torch.bool,
             ),
         }
+
+    def _object_slot_target_loss(self, stage, actions, valid, target):
+        if (
+            not self.actor_object_slot_head
+            or self.object_slot_target_loss_weight <= 0
+            or self.actor_object_slot_spec is None
+        ):
+            return None
+        slot_delta = getattr(self.model, "last_actor_object_slot_delta", None)
+        if slot_delta is None:
+            return None
+        required = ("object_classes", "object_valid")
+        if any(key not in target for key in required):
+            return None
+        loss = action_slot_target_loss(
+            slot_delta=slot_delta,
+            labels=actions,
+            object_classes=target["object_classes"],
+            object_valid=target["object_valid"],
+            spec=self.actor_object_slot_spec,
+            valid=valid,
+            ignore_missing_object=self.object_slot_ignore_missing_object,
+        )
+        self.log(
+            f"{stage}_loss_object_slot_target",
+            loss,
+            on_step=stage == "train",
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+        )
+        return loss
 
     def _object_selection_loss(self, object_selection_logits, target, valid, stage):
         if object_selection_logits is None:
@@ -1056,7 +1141,7 @@ class HeatmapModule(pl.LightningModule):
         object_inputs,
         stage,
     ):
-        if not self.scene_object_tokens:
+        if not self.uses_object_proposals:
             return None
         if stage == "train":
             return None
@@ -1369,10 +1454,270 @@ class HeatmapModule(pl.LightningModule):
                 count,
             )
 
+    def _log_actor_object_slot_diagnostics(
+        self,
+        stage,
+        full_preds,
+        actions,
+        valid,
+        target,
+    ):
+        if stage == "train" or not self.actor_object_slot_head:
+            return
+        slot_delta = getattr(self.model, "last_actor_object_slot_delta", None)
+        best_slot = getattr(self.model, "last_actor_object_best_slot", None)
+        if slot_delta is None or best_slot is None:
+            return
+        if "object_classes" not in target or "object_valid" not in target:
+            return
+
+        device = slot_delta.device
+        valid = valid.to(device=device, dtype=torch.bool)
+        if not valid.any():
+            return
+        actions = actions.to(device=device, dtype=torch.long)
+        object_classes = target["object_classes"].to(device=device, dtype=torch.long)
+        object_valid = target["object_valid"].to(device=device, dtype=torch.bool)
+        full_preds = full_preds.to(device=device)
+
+        true_best_slot = best_slot.gather(
+            dim=-1,
+            index=actions.unsqueeze(-1),
+        ).squeeze(-1)
+        object_slot = true_best_slot >= 2
+        object_slot_index = (true_best_slot - 2).clamp_min(0)
+        object_slot_index = object_slot_index.clamp_max(object_classes.shape[1] - 1)
+        true_object_class = object_classes.gather(1, object_slot_index)
+        true_object_valid = object_valid.gather(1, object_slot_index) & object_slot
+
+        known_object_action = torch.zeros_like(valid, dtype=torch.bool)
+        compatible_object_slot = torch.zeros_like(valid, dtype=torch.bool)
+        for action_idx, object_ids in self.action_object_ids_by_index.items():
+            action_mask = actions == int(action_idx)
+            known_object_action |= action_mask
+            object_ids = object_ids.to(device=device, dtype=torch.long)
+            object_match = (
+                true_object_class.unsqueeze(-1) == object_ids.view(1, 1, -1)
+            ).any(dim=-1)
+            compatible_object_slot |= action_mask & true_object_valid & object_match
+
+        objectless = self._labels_in_indices(actions, self.objectless_action_indices)
+        objectless_mask = valid & objectless
+        known_object_mask = valid & known_object_action
+        if known_object_mask.any():
+            count = int(known_object_mask.sum().item())
+            unknown = known_object_mask & (true_best_slot == 1)
+            null = known_object_mask & (true_best_slot == 0)
+            incompatible = known_object_mask & true_object_valid & ~compatible_object_slot
+            self._log_scalar(
+                f"{stage}_object_slot_true_compatible_rate",
+                compatible_object_slot[known_object_mask].float().mean(),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_object_slot_true_unknown_rate",
+                unknown[known_object_mask].float().mean(),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_object_slot_true_null_rate",
+                null[known_object_mask].float().mean(),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_object_slot_true_incompatible_rate",
+                incompatible[known_object_mask].float().mean(),
+                count,
+            )
+            self._log_count(
+                f"{stage}_object_slot_known_action_count",
+                known_object_mask.float().sum(),
+            )
+        if objectless_mask.any():
+            count = int(objectless_mask.sum().item())
+            self._log_scalar(
+                f"{stage}_object_slot_objectless_null_rate",
+                (true_best_slot[objectless_mask] == 0).float().mean(),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_object_slot_objectless_nonnull_rate",
+                (true_best_slot[objectless_mask] != 0).float().mean(),
+                count,
+            )
+
+        relation_delta = getattr(self.model, "last_actor_object_relation_delta", None)
+        if relation_delta is not None:
+            valid_delta = relation_delta.to(device=device)[valid].float()
+            count = int(valid_delta.shape[0])
+            self._log_scalar(
+                f"{stage}_actor_object_slot_delta_abs_mean",
+                valid_delta.abs().mean(),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_actor_object_slot_delta_l2_mean",
+                valid_delta.norm(dim=-1).mean(),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_actor_object_relation_delta_abs_mean",
+                valid_delta.abs().mean(),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_actor_object_relation_delta_l2_mean",
+                valid_delta.norm(dim=-1).mean(),
+                count,
+            )
+
+        quality = getattr(self.model, "last_actor_object_quality", None)
+        if quality is not None:
+            valid_quality = quality.to(device=device)[valid].float()
+            if valid_quality.numel() > 0:
+                self._log_scalar(
+                    f"{stage}_object_slot_quality_mean",
+                    valid_quality.mean(),
+                    int(valid_quality.numel()),
+                )
+                self._log_scalar(
+                    f"{stage}_object_slot_quality_max_mean",
+                    valid_quality.amax(dim=-1).mean(),
+                    int(valid_quality.shape[0]),
+                )
+        mismatch = getattr(self.model, "last_actor_object_mismatch", None)
+        if mismatch is not None:
+            valid_mismatch = mismatch.to(device=device)[valid].float()
+            if valid_mismatch.numel() > 0:
+                self._log_scalar(
+                    f"{stage}_object_slot_mismatch_mean",
+                    valid_mismatch.mean(),
+                    int(valid_mismatch.numel()),
+                )
+
+        motion_logits = getattr(self.model, "last_actor_motion_logits", None)
+        tracked = {
+            "Uselaptop": ("laptop", ("Readbook", "Usetelephone", "WatchTV")),
+            "Readbook": ("book", ("Uselaptop", "Usetelephone", "WatchTV")),
+            "Usetelephone": ("phone", ("Uselaptop", "Readbook", "WatchTV")),
+            "WatchTV": ("tv_monitor", ("Uselaptop", "Readbook", "Usetelephone")),
+        }
+        for action_name, (object_name, confuser_names) in tracked.items():
+            action_idx = self._action_index(action_name)
+            object_id = OBJECT_TO_ID.get(object_name)
+            if action_idx is None or object_id is None:
+                continue
+            mask = valid & (actions == int(action_idx))
+            if not mask.any():
+                continue
+            action_best_slot = best_slot[..., int(action_idx)]
+            action_slot_is_object = action_best_slot >= 2
+            action_slot_idx = (action_best_slot - 2).clamp_min(0)
+            action_slot_idx = action_slot_idx.clamp_max(object_classes.shape[1] - 1)
+            action_slot_class = object_classes.gather(1, action_slot_idx)
+            action_slot_valid = object_valid.gather(1, action_slot_idx)
+            compatible = (
+                action_slot_is_object
+                & action_slot_valid
+                & (action_slot_class == int(object_id))
+            )
+            incompatible = action_slot_is_object & action_slot_valid & ~compatible
+            count = int(mask.sum().item())
+            self._log_scalar(
+                f"{stage}_object_slot_{action_name}_{object_name}_rate",
+                compatible[mask].float().mean(),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_object_slot_{action_name}_unknown_rate",
+                (action_best_slot[mask] == 1).float().mean(),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_object_slot_{action_name}_null_rate",
+                (action_best_slot[mask] == 0).float().mean(),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_object_slot_{action_name}_incompatible_rate",
+                incompatible[mask].float().mean(),
+                count,
+            )
+            for confuser_name in confuser_names:
+                confuser_idx = self._action_index(confuser_name)
+                if confuser_idx is None:
+                    continue
+                final_margin = (
+                    full_preds[..., int(action_idx)]
+                    - full_preds[..., int(confuser_idx)]
+                )[mask].float()
+                self._log_scalar(
+                    f"{stage}_object_slot_{action_name}_minus_{confuser_name}_logit_margin",
+                    final_margin.mean(),
+                    count,
+                )
+                if motion_logits is not None:
+                    motion_margin = (
+                        motion_logits[..., int(action_idx)]
+                        - motion_logits[..., int(confuser_idx)]
+                    )[mask].float()
+                    self._log_scalar(
+                        f"{stage}_object_slot_motion_{action_name}_minus_{confuser_name}_logit_margin",
+                        motion_margin.mean(),
+                        count,
+                    )
+                    self._log_scalar(
+                        f"{stage}_object_slot_delta_{action_name}_minus_{confuser_name}_logit_margin",
+                        (final_margin - motion_margin).mean(),
+                        count,
+                    )
+
     def _object_action_confuser_loss(self, stage, preds, actions, valid, target):
         if self.object_action_confuser_loss_weight <= 0:
             return None
-        if not self.is_toyota or not self.scene_object_tokens:
+        if not self.is_toyota:
+            return None
+        if self.actor_object_slot_head:
+            valid = valid.to(device=preds.device, dtype=torch.bool)
+            actions = actions.to(device=preds.device, dtype=torch.long)
+            if not valid.any():
+                return None
+            violations = []
+            sample_count = 0
+            for action_idx, confuser_indices in self.action_confuser_indices.items():
+                confuser_indices = confuser_indices.to(device=preds.device)
+                mask = valid & (actions == int(action_idx))
+                if not mask.any():
+                    continue
+                true_logits = preds[..., int(action_idx)][mask]
+                confuser_logits = preds[mask][:, confuser_indices]
+                margin_error = (
+                    confuser_logits
+                    + float(self.object_action_confuser_margin)
+                    - true_logits.unsqueeze(1)
+                )
+                violations.append(F.relu(margin_error).reshape(-1))
+                sample_count += int(mask.sum().item())
+            if not violations:
+                return None
+            violation_values = torch.cat(violations, dim=0)
+            loss = violation_values.mean()
+            self.log(
+                f"{stage}_loss_object_action_confuser",
+                loss,
+                on_step=stage == "train",
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+            self._log_scalar(
+                f"{stage}_object_action_confuser_violation_rate",
+                (violation_values > 0).float().mean(),
+                max(sample_count, 1),
+            )
+            return loss
+        if not self.scene_object_tokens:
             return None
         if (
             "interaction_object_index" not in target
@@ -1869,6 +2214,16 @@ class HeatmapModule(pl.LightningModule):
             grounding_aux_terms.append(
                 loss_object_selection * self.aux_object_selection_loss_weight
             )
+        loss_object_slot = self._object_slot_target_loss(
+            stage,
+            actions,
+            valid,
+            target,
+        )
+        if loss_object_slot is not None and self.object_slot_target_loss_weight > 0:
+            grounding_aux_terms.append(
+                loss_object_slot * self.object_slot_target_loss_weight
+            )
 
         self._log_object_counterfactual_eval(
             imgs,
@@ -1887,6 +2242,13 @@ class HeatmapModule(pl.LightningModule):
             valid,
             target,
             object_selection_logits,
+        )
+        self._log_actor_object_slot_diagnostics(
+            stage,
+            preds,
+            actions,
+            valid,
+            target,
         )
         loss_kp = None
         loss_pose_frobenius = None
@@ -2245,7 +2607,7 @@ class HeatmapModule(pl.LightningModule):
         valid,
         target,
     ):
-        if not self.scene_object_tokens or "object_classes" not in target:
+        if not self.uses_object_proposals or "object_classes" not in target:
             return None
         if full_preds is None:
             return None
@@ -2486,7 +2848,7 @@ class HeatmapModule(pl.LightningModule):
         diag_valid[:, 0] = True
         object_inputs = (
             self._empty_object_inputs(batch_size, imgs.device)
-            if self.scene_object_tokens
+            if self.uses_object_proposals
             else {}
         )
         data = self.model(
@@ -2523,7 +2885,7 @@ class HeatmapModule(pl.LightningModule):
         )
         object_inputs = (
             self._empty_object_inputs(batch_size, imgs.device)
-            if self.scene_object_tokens
+            if self.uses_object_proposals
             else {}
         )
         data = self.model(
@@ -2649,7 +3011,7 @@ class HeatmapModule(pl.LightningModule):
             pair_imgs, pair_boxes, pair_valid, pair_labels = batch
             object_inputs = (
                 self._empty_object_inputs(pair_imgs.shape[0], pair_imgs.device)
-                if self.scene_object_tokens
+                if self.uses_object_proposals
                 else {}
             )
             data = self.model(

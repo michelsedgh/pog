@@ -96,7 +96,10 @@ def default_output_paths(args, hparams):
         if args.max_objects is not None
         else hparams.get("num_scene_object_tokens", 0)
     )
-    object_suffix = f"_o{max_objects}" if int(hparams.get("scene_object_tokens", 0)) else ""
+    uses_object_proposals = bool(hparams.get("scene_object_tokens", 0)) or bool(
+        hparams.get("actor_object_slot_head", 0)
+    )
+    object_suffix = f"_o{max_objects}" if uses_object_proposals else ""
     fixed = (
         f"{stem}_b{args.batch_size}_t{clip_frames}_k{max_actors}"
         f"{object_suffix}_{args.input_size}"
@@ -124,7 +127,7 @@ def make_dummy_inputs(
     max_actors,
     max_objects,
     num_object_classes,
-    scene_object_tokens,
+    uses_object_proposals,
     device,
     mask_input_dtype="bool",
 ):
@@ -144,7 +147,7 @@ def make_dummy_inputs(
     mask_dtype = torch.bool if mask_input_dtype == "bool" else torch.int32
     valid = torch.zeros((batch_size, max_actors), dtype=mask_dtype, device=device)
     valid[:, 0] = 1
-    if not scene_object_tokens:
+    if not uses_object_proposals:
         return (video, boxes, valid), ["video", "boxes", "valid"]
 
     object_boxes = torch.zeros(
@@ -205,6 +208,8 @@ def export_onnx(model, onnx_out, args, clip_frames, max_actors, max_objects, hpa
     import torch
 
     scene_object_tokens = bool(hparams.get("scene_object_tokens", 0))
+    actor_object_slot_head = bool(hparams.get("actor_object_slot_head", 0))
+    uses_object_proposals = scene_object_tokens or actor_object_slot_head
     num_object_classes = int(hparams.get("num_object_classes", 19))
 
     class ActorExport(torch.nn.Module):
@@ -226,7 +231,7 @@ def export_onnx(model, onnx_out, args, clip_frames, max_actors, max_objects, hpa
                 "boxes": boxes,
                 "valid": valid,
             }
-            if scene_object_tokens:
+            if uses_object_proposals:
                 kwargs.update(
                     {
                         "object_boxes": object_boxes,
@@ -266,7 +271,7 @@ def export_onnx(model, onnx_out, args, clip_frames, max_actors, max_objects, hpa
         max_actors,
         max_objects,
         num_object_classes,
-        scene_object_tokens,
+        uses_object_proposals,
         device,
         args.mask_input_dtype,
     )
@@ -374,6 +379,11 @@ def checkpoint_payload(checkpoint_path, hparam_overrides=None):
         ),
         "interaction_heatmap_channels": "per_actor_interacted_object",
         "scene_object_tokens": int(hparams.get("scene_object_tokens", 0)),
+        "actor_object_slot_head": int(hparams.get("actor_object_slot_head", 0)),
+        "uses_object_proposals": int(
+            bool(hparams.get("scene_object_tokens", 0))
+            or bool(hparams.get("actor_object_slot_head", 0))
+        ),
         "num_scene_object_tokens": int(hparams.get("num_scene_object_tokens", 0)),
         "num_object_classes": int(hparams.get("num_object_classes", 19)),
         "actor_object_logit_residual": 0,
@@ -381,6 +391,9 @@ def checkpoint_payload(checkpoint_path, hparam_overrides=None):
         "actor_object_relation": int(bool(hparams.get("scene_object_tokens", 0))),
         "actor_object_compatibility_expert": int(
             bool(hparams.get("scene_object_tokens", 0))
+        ),
+        "actor_object_explanation_slot_head": int(
+            bool(hparams.get("actor_object_slot_head", 0))
         ),
         "n_frames": int(hparams.get("n_frames", 16)),
         "num_actor_tokens": int(hparams.get("num_actor_tokens", 0)),
@@ -437,7 +450,10 @@ def internal_export(args):
             f"--max-actors={args.max_actors} does not match checkpoint "
             f"num_actor_tokens={checkpoint_actors}."
         )
-    if bool(hparams.get("scene_object_tokens", 0)):
+    uses_object_proposals = bool(hparams.get("scene_object_tokens", 0)) or bool(
+        hparams.get("actor_object_slot_head", 0)
+    )
+    if uses_object_proposals:
         checkpoint_objects = int(hparams.get("num_scene_object_tokens", 0))
         if args.max_objects is not None and args.max_objects != checkpoint_objects:
             raise ValueError(
@@ -550,13 +566,15 @@ def main():
         )
     checkpoint_objects = int(hparams.get("num_scene_object_tokens", 0))
     scene_object_tokens = bool(hparams.get("scene_object_tokens", 0))
+    actor_object_slot_head = bool(hparams.get("actor_object_slot_head", 0))
+    uses_object_proposals = scene_object_tokens or actor_object_slot_head
     max_objects = int(args.max_objects if args.max_objects is not None else checkpoint_objects)
-    if scene_object_tokens and max_objects != checkpoint_objects:
+    if uses_object_proposals and max_objects != checkpoint_objects:
         raise ValueError(
             f"--max-objects={max_objects} does not match checkpoint "
             f"num_scene_object_tokens={checkpoint_objects}."
         )
-    if not scene_object_tokens:
+    if not uses_object_proposals:
         max_objects = 0
     require_writable(onnx_out, args.force)
     require_writable(engine_out, args.force)
@@ -599,6 +617,9 @@ def main():
             "keep_rate_merge": float(hparams.get("keep_rate_merge", 1.0)),
             "merge_type": str(hparams.get("merge_type", "")),
             "trt_safe_attention": int(hparams.get("trt_safe_attention", 0)),
+            "scene_object_tokens": int(hparams.get("scene_object_tokens", 0)),
+            "actor_object_slot_head": int(hparams.get("actor_object_slot_head", 0)),
+            "uses_object_proposals": int(uses_object_proposals),
         },
         "input_shapes": {
             "video": [args.batch_size, clip_frames, 3, args.input_size, args.input_size],
@@ -617,7 +638,7 @@ def main():
         "benchmark_command": benchmark_command,
         "elapsed_sec": round(time.time() - started, 3),
     }
-    if scene_object_tokens:
+    if uses_object_proposals:
         metadata["input_shapes"].update(
             {
                 "object_boxes": [args.batch_size, max_objects, 4],
@@ -626,11 +647,12 @@ def main():
                 "object_valid": [args.batch_size, max_objects],
             }
         )
-        metadata["outputs"]["object_selection"] = [
-            args.batch_size,
-            max_actors,
-            max_objects + 1,
-        ]
+        if scene_object_tokens:
+            metadata["outputs"]["object_selection"] = [
+                args.batch_size,
+                max_actors,
+                max_objects + 1,
+            ]
     metadata_out.write_text(json.dumps(metadata, indent=2) + "\n")
     print(f"Wrote metadata: {metadata_out}", flush=True)
 

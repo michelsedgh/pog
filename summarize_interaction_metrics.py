@@ -43,6 +43,28 @@ CORE_COLUMNS = [
     "val_loss_objectless_object_action_suppression",
     "val_loss_object_action_confuser",
     "val_object_action_confuser_violation_rate",
+    "val_loss_object_slot_target",
+    "val_object_slot_true_compatible_rate",
+    "val_object_slot_true_unknown_rate",
+    "val_object_slot_true_null_rate",
+    "val_object_slot_true_incompatible_rate",
+    "val_object_slot_known_action_count",
+    "val_object_slot_objectless_null_rate",
+    "val_object_slot_objectless_nonnull_rate",
+    "val_object_slot_quality_mean",
+    "val_object_slot_quality_max_mean",
+    "val_object_slot_mismatch_mean",
+    "val_object_slot_Uselaptop_laptop_rate",
+    "val_object_slot_Uselaptop_unknown_rate",
+    "val_object_slot_Uselaptop_null_rate",
+    "val_object_slot_Uselaptop_incompatible_rate",
+    "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
+    "val_object_slot_motion_Uselaptop_minus_Readbook_logit_margin",
+    "val_object_slot_delta_Uselaptop_minus_Readbook_logit_margin",
+    "val_object_slot_Readbook_book_rate",
+    "val_object_slot_Readbook_unknown_rate",
+    "val_object_slot_Readbook_incompatible_rate",
+    "val_object_slot_Readbook_minus_Uselaptop_logit_margin",
     "val_loss_motion_aux",
     "val_motion_aux_acc",
     "val_loss_object_relevance",
@@ -95,6 +117,8 @@ CORE_COLUMNS = [
     "val_actor_object_pair_residual_scale",
     "val_actor_object_relation_delta_abs_mean",
     "val_actor_object_relation_delta_l2_mean",
+    "val_actor_object_slot_delta_abs_mean",
+    "val_actor_object_slot_delta_l2_mean",
     "val_actor_object_relation_scale",
     "val_actor_object_relevance_mean",
     "val_actor_object_relation_mass_mean",
@@ -291,6 +315,10 @@ def print_compact_epoch_summary(epoch_df):
         "val_object_selection_acc",
         "val_object_selection_object_acc",
         "val_object_selection_true_prob",
+        "val_object_slot_true_compatible_rate",
+        "val_object_slot_true_unknown_rate",
+        "val_object_slot_Uselaptop_laptop_rate",
+        "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
         "val_object_counterfactual_selected_logit_drop",
         "val_interaction_heatmap_positive_mean",
         "val_interaction_heatmap_pred_max",
@@ -338,6 +366,10 @@ def print_compact_best(epoch_df):
         "val_object_selection_acc",
         "val_object_selection_object_acc",
         "val_object_selection_true_prob",
+        "val_object_slot_true_compatible_rate",
+        "val_object_slot_objectless_null_rate",
+        "val_object_slot_Uselaptop_laptop_rate",
+        "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
         "val_object_counterfactual_selected_logit_drop",
         "val_action_Uselaptop_acc",
         "val_action_Readbook_acc",
@@ -375,6 +407,14 @@ def print_object_use_epoch_table(epoch_df):
         "val_object_selection_true_prob",
         "val_object_selection_none_teacher_count",
         "val_object_selection_object_teacher_count",
+        "val_object_slot_true_compatible_rate",
+        "val_object_slot_true_unknown_rate",
+        "val_object_slot_true_incompatible_rate",
+        "val_object_slot_objectless_null_rate",
+        "val_object_slot_Uselaptop_laptop_rate",
+        "val_object_slot_Uselaptop_unknown_rate",
+        "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
+        "val_object_slot_delta_Uselaptop_minus_Readbook_logit_margin",
         "val_object_counterfactual_selected_logit_drop",
         "val_object_counterfactual_selected_prob_drop",
     ]
@@ -394,6 +434,14 @@ def print_object_use_epoch_table(epoch_df):
         "val_object_selection_true_prob",
         "val_object_counterfactual_selected_logit_drop",
         "val_object_counterfactual_selected_prob_drop",
+        "val_object_slot_true_compatible_rate",
+        "val_object_slot_true_unknown_rate",
+        "val_object_slot_true_incompatible_rate",
+        "val_object_slot_objectless_null_rate",
+        "val_object_slot_Uselaptop_laptop_rate",
+        "val_object_slot_Uselaptop_unknown_rate",
+        "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
+        "val_object_slot_delta_Uselaptop_minus_Readbook_logit_margin",
     ]
     display_cols = [col for col in cols if col in epoch_df.columns]
     if len(display_cols) <= 1:
@@ -724,6 +772,32 @@ def print_decision(epoch_df):
     relation_scale = metric(latest, "val_actor_object_relation_scale")
     relation_relevance = metric(latest, "val_actor_object_relevance_mean")
     relation_mass = metric(latest, "val_actor_object_relation_mass_mean")
+    slot_loss = metric(latest, "val_loss_object_slot_target")
+    slot_compatible = metric(latest, "val_object_slot_true_compatible_rate")
+    slot_unknown = metric(latest, "val_object_slot_true_unknown_rate")
+    slot_null = metric(latest, "val_object_slot_true_null_rate")
+    slot_incompatible = metric(latest, "val_object_slot_true_incompatible_rate")
+    slot_objectless_null = metric(latest, "val_object_slot_objectless_null_rate")
+    slot_quality = metric(latest, "val_object_slot_quality_max_mean")
+    slot_mismatch = metric(latest, "val_object_slot_mismatch_mean")
+    slot_laptop_rate = metric(latest, "val_object_slot_Uselaptop_laptop_rate")
+    slot_laptop_unknown = metric(latest, "val_object_slot_Uselaptop_unknown_rate")
+    slot_laptop_incompatible = metric(
+        latest,
+        "val_object_slot_Uselaptop_incompatible_rate",
+    )
+    slot_u_minus_read = metric(
+        latest,
+        "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
+    )
+    slot_motion_u_minus_read = metric(
+        latest,
+        "val_object_slot_motion_Uselaptop_minus_Readbook_logit_margin",
+    )
+    slot_delta_u_minus_read = metric(
+        latest,
+        "val_object_slot_delta_Uselaptop_minus_Readbook_logit_margin",
+    )
     print("\nDECISION:\n")
     print(f"latest epoch: {latest_epoch}")
     if pd.notna(deploy_score):
@@ -752,6 +826,24 @@ def print_decision(epoch_df):
             "action groups: "
             f"object_mapped {fmt(object_mapped_acc)}, "
             f"objectless {fmt(objectless_acc)}"
+        )
+    if pd.notna(slot_compatible) or pd.notna(slot_laptop_rate):
+        print(
+            "object slot explanations: "
+            f"loss {fmt(slot_loss)}, compatible {fmt(slot_compatible)}, "
+            f"unknown {fmt(slot_unknown)}, null {fmt(slot_null)}, "
+            f"incompatible {fmt(slot_incompatible)}, "
+            f"objectless_null {fmt(slot_objectless_null)}, "
+            f"quality_max {fmt(slot_quality)}, mismatch {fmt(slot_mismatch)}"
+        )
+        print(
+            "Uselaptop slot: "
+            f"laptop {fmt(slot_laptop_rate)}, "
+            f"unknown {fmt(slot_laptop_unknown)}, "
+            f"incompatible {fmt(slot_laptop_incompatible)}, "
+            f"u_minus_read {fmt(slot_u_minus_read)}, "
+            f"motion_margin {fmt(slot_motion_u_minus_read)}, "
+            f"slot_delta_margin {fmt(slot_delta_u_minus_read)}"
         )
     if pd.notna(hard_objectless):
         print(

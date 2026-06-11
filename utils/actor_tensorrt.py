@@ -76,7 +76,29 @@ class TensorRTActorEngine:
             "object_valid",
         }
         input_set = set(self.input_names)
-        self.scene_object_tokens = object_inputs.issubset(input_set)
+        output_set = set(self.output_names)
+        self.uses_object_proposals = object_inputs.issubset(input_set)
+        export_hparams = self.metadata.get("export_hparams", {})
+        self.scene_object_tokens = bool(
+            export_hparams.get(
+                "scene_object_tokens",
+                self.metadata.get("scene_object_tokens", "object_selection" in output_set),
+            )
+        )
+        self.actor_object_slot_head = bool(
+            export_hparams.get(
+                "actor_object_slot_head",
+                self.metadata.get(
+                    "actor_object_slot_head",
+                    self.uses_object_proposals and "object_selection" not in output_set,
+                ),
+            )
+        )
+        if self.scene_object_tokens and self.actor_object_slot_head:
+            raise RuntimeError(
+                "TensorRT actor engine cannot be both scene_object_tokens and "
+                "actor_object_slot_head."
+            )
         self.actor_object_logit_residual = bool(
             self.metadata.get("actor_object_logit_residual", False)
         )
@@ -98,7 +120,9 @@ class TensorRTActorEngine:
                 self.actor_object_relation,
             )
         )
-        expected_inputs = base_inputs | (object_inputs if self.scene_object_tokens else set())
+        expected_inputs = base_inputs | (
+            object_inputs if self.uses_object_proposals else set()
+        )
         expected_outputs = {"logits", "presence"} | (
             {"object_selection"} if self.scene_object_tokens else set()
         )
@@ -134,12 +158,11 @@ class TensorRTActorEngine:
         self.num_actor_tokens = boxes_shape[1]
         self.num_classes = logits_shape[2]
         self.num_scene_object_tokens = 0
-        if self.scene_object_tokens:
+        if self.uses_object_proposals:
             object_boxes_shape = self.shapes["object_boxes"]
             object_classes_shape = self.shapes["object_classes"]
             object_confs_shape = self.shapes["object_confs"]
             object_valid_shape = self.shapes["object_valid"]
-            object_selection_shape = self.shapes["object_selection"]
             if object_boxes_shape[0] != self.batch_size or object_boxes_shape[-1] != 4:
                 raise RuntimeError(f"Unsupported object_boxes shape: {object_boxes_shape}")
             if (
@@ -154,16 +177,18 @@ class TensorRTActorEngine:
                     f"object_confs={object_confs_shape}, "
                     f"object_valid={object_valid_shape}"
                 )
-            if object_selection_shape != (
-                self.batch_size,
-                self.num_actor_tokens,
-                object_boxes_shape[1] + 1,
-            ):
-                raise RuntimeError(
-                    "Inconsistent object_selection shape: "
-                    f"{object_selection_shape}, expected "
-                    f"{(self.batch_size, self.num_actor_tokens, object_boxes_shape[1] + 1)}"
-                )
+            if self.scene_object_tokens:
+                object_selection_shape = self.shapes["object_selection"]
+                if object_selection_shape != (
+                    self.batch_size,
+                    self.num_actor_tokens,
+                    object_boxes_shape[1] + 1,
+                ):
+                    raise RuntimeError(
+                        "Inconsistent object_selection shape: "
+                        f"{object_selection_shape}, expected "
+                        f"{(self.batch_size, self.num_actor_tokens, object_boxes_shape[1] + 1)}"
+                    )
             self.num_scene_object_tokens = object_boxes_shape[1]
         self.stream = torch.cuda.Stream()
 
@@ -182,7 +207,7 @@ class TensorRTActorEngine:
         video = self._prepare_input(video, "video")
         boxes = self._prepare_input(boxes, "boxes")
         valid = self._prepare_input(valid, "valid")
-        if self.scene_object_tokens:
+        if self.uses_object_proposals:
             if object_inputs is None:
                 raise RuntimeError(
                     "This TensorRT actor engine requires object inputs: "
@@ -234,16 +259,17 @@ class TensorRTActorEngine:
             "logits": logits,
             "presence": presence,
         }
-        if self.scene_object_tokens:
+        if self.uses_object_proposals:
             tensors.update(
                 {
                     "object_boxes": object_boxes,
                     "object_classes": object_classes,
                     "object_confs": object_confs,
                     "object_valid": object_valid,
-                    "object_selection": object_selection,
                 }
             )
+            if self.scene_object_tokens:
+                tensors["object_selection"] = object_selection
         current_stream = torch.cuda.current_stream()
         self.stream.wait_stream(current_stream)
         with torch.cuda.stream(self.stream):

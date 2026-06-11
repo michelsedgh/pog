@@ -112,6 +112,9 @@ class ActorStageExport(torch.nn.Module):
                 f"{stage} exceeds network depth {self.net.depth}."
             )
         self.scene_object_tokens = bool(actor_model.scene_object_tokens)
+        self.actor_object_slot_head = bool(
+            getattr(actor_model, "actor_object_slot_head_enabled", False)
+        )
 
     def _token_prefix(
         self,
@@ -345,6 +348,30 @@ class ActorStageExport(torch.nn.Module):
                 base_logits=action_logits,
             )
             action_logits = expert_output["logits"]
+        actor_object_slot_head = getattr(self.actor_model, "actor_object_slot_head", None)
+        if actor_object_slot_head is not None:
+            if object_boxes is None or object_classes is None:
+                raise RuntimeError("actor_object_slot_head requires object inputs")
+            object_heatmap_scores = torch.zeros(
+                (
+                    x_actor.shape[0],
+                    x_actor.shape[1],
+                    object_boxes.shape[1],
+                ),
+                device=x_actor.device,
+                dtype=x_actor.dtype,
+            )
+            slot_output = actor_object_slot_head(
+                actor_tokens=x_actor,
+                motion_logits=action_logits,
+                actor_boxes=boxes,
+                object_boxes=object_boxes,
+                object_classes=object_classes,
+                object_confs=object_confs,
+                object_valid=object_valid,
+                object_heatmap_scores=object_heatmap_scores,
+            )
+            action_logits = slot_output["logits"]
         presence = self.actor_model.presence_head(x_actor).squeeze(-1)
         if object_selection_logits is None:
             return action_logits, presence
@@ -513,6 +540,8 @@ def main():
         hparam_overrides=hparam_overrides(args),
     )
     scene_object_tokens = bool(hparams.get("scene_object_tokens", 0))
+    actor_object_slot_head = bool(hparams.get("actor_object_slot_head", 0))
+    uses_object_proposals = scene_object_tokens or actor_object_slot_head
     clip_frames = int(args.clip_frames or hparams.get("n_frames", 16))
     max_actors = int(args.max_actors or hparams.get("num_actor_tokens", 0))
     max_objects = int(
@@ -520,7 +549,7 @@ def main():
         if args.max_objects is not None
         else hparams.get("num_scene_object_tokens", 0)
     )
-    if not scene_object_tokens:
+    if not uses_object_proposals:
         max_objects = 0
     wrapped = ActorStageExport(model, args.stage).eval()
     dummy_inputs, input_names = make_dummy_inputs(
@@ -530,14 +559,14 @@ def main():
         max_actors=max_actors,
         max_objects=max_objects,
         num_object_classes=int(hparams.get("num_object_classes", 19)),
-        scene_object_tokens=scene_object_tokens,
+        uses_object_proposals=uses_object_proposals,
         device=torch.device("cpu"),
         mask_input_dtype="bool",
     )
     inputs = {name: tensor for name, tensor in zip(input_names, dummy_inputs)}
     if args.all_valid:
         inputs["valid"].fill_(True)
-        if scene_object_tokens:
+        if uses_object_proposals:
             inputs["object_valid"].fill_(True)
     dummy_inputs = tuple(inputs[name] for name in input_names)
 

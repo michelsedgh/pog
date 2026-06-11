@@ -71,9 +71,10 @@ def cli_hparam_overrides(args):
 
 
 class ActorExport(torch.nn.Module):
-    def __init__(self, actor_model, scene_object_tokens):
+    def __init__(self, actor_model, uses_object_proposals, scene_object_tokens):
         super().__init__()
         self.actor_model = actor_model
+        self.uses_object_proposals = bool(uses_object_proposals)
         self.scene_object_tokens = bool(scene_object_tokens)
 
     def forward(
@@ -87,7 +88,7 @@ class ActorExport(torch.nn.Module):
         object_valid=None,
     ):
         kwargs = {"boxes": boxes, "valid": valid}
-        if self.scene_object_tokens:
+        if self.uses_object_proposals:
             kwargs.update(
                 {
                     "object_boxes": object_boxes,
@@ -196,12 +197,19 @@ def main():
         hparam_overrides=hparam_overrides,
     )
     scene_object_tokens = bool(hparams.get("scene_object_tokens", 0))
+    actor_object_slot_head = bool(hparams.get("actor_object_slot_head", 0))
+    uses_object_proposals = scene_object_tokens or actor_object_slot_head
     if scene_object_tokens != bool(engine.scene_object_tokens):
         raise RuntimeError(
             "Checkpoint/engine scene_object_tokens mismatch: "
             f"checkpoint={scene_object_tokens}, engine={engine.scene_object_tokens}"
         )
-    wrapped = ActorExport(model, scene_object_tokens).eval()
+    if uses_object_proposals != bool(engine.uses_object_proposals):
+        raise RuntimeError(
+            "Checkpoint/engine object-proposal input mismatch: "
+            f"checkpoint={uses_object_proposals}, engine={engine.uses_object_proposals}"
+        )
+    wrapped = ActorExport(model, uses_object_proposals, scene_object_tokens).eval()
 
     dummy_inputs, input_names = make_dummy_inputs(
         batch_size=engine.batch_size,
@@ -210,7 +218,7 @@ def main():
         max_actors=engine.num_actor_tokens,
         max_objects=engine.num_scene_object_tokens,
         num_object_classes=int(hparams.get("num_object_classes", 19)),
-        scene_object_tokens=scene_object_tokens,
+        uses_object_proposals=uses_object_proposals,
         device=torch.device("cpu"),
         mask_input_dtype="int32" if engine.dtypes["valid"] == torch.int32 else "bool",
     )
@@ -228,7 +236,7 @@ def main():
     onnx_outputs = run_onnx(args.onnx, inputs)
 
     object_inputs = None
-    if scene_object_tokens:
+    if uses_object_proposals:
         object_inputs = {
             "object_boxes": inputs["object_boxes"],
             "object_classes": inputs["object_classes"],
@@ -254,6 +262,8 @@ def main():
         "onnx": str(Path(args.onnx)),
         "engine": str(Path(args.engine)),
         "scene_object_tokens": scene_object_tokens,
+        "actor_object_slot_head": actor_object_slot_head,
+        "uses_object_proposals": uses_object_proposals,
         "hparam_overrides": hparam_overrides,
         "num_actor_tokens": int(engine.num_actor_tokens),
         "num_scene_object_tokens": int(engine.num_scene_object_tokens),

@@ -317,6 +317,16 @@ def _validate_active_actor_action_path(module):
             raise RuntimeError(
                 "scene_object_tokens is not using the structured compatibility expert."
             )
+    if getattr(model, "actor_object_slot_head_enabled", False):
+        slot_head = getattr(model, "actor_object_slot_head", None)
+        if slot_head is None:
+            raise RuntimeError(
+                "actor_object_slot_head is enabled but the slot head was not built."
+            )
+        if getattr(model, "scene_object_tokens", False):
+            raise RuntimeError(
+                "actor_object_slot_head must not be combined with scene_object_tokens."
+            )
 
 
 def _adapt_heatmap_final_layer_checkpoint(module, checkpoint):
@@ -521,6 +531,8 @@ def build_parser():
     )
     parser.add_argument("--object_action_confuser_loss_weight", type=float, default=0.25)
     parser.add_argument("--object_action_confuser_margin", type=float, default=0.5)
+    parser.add_argument("--object_slot_target_loss_weight", type=float, default=0.5)
+    parser.add_argument("--object_slot_ignore_missing_object", type=int, default=0)
     parser.add_argument("--deepspeed_optim", type=int, default=0)
     parser.add_argument("--kp_only", type=int, default=0)
 
@@ -548,6 +560,14 @@ def main():
         raise ValueError("scene_object_tokens requires actor_prompt")
     if hparams.scene_object_tokens and not hparams.object_detector_cache:
         raise ValueError("scene_object_tokens requires --object_detector_cache")
+    if hparams.actor_object_slot_head and not hparams.actor_prompt:
+        raise ValueError("actor_object_slot_head requires actor_prompt")
+    if hparams.actor_object_slot_head and hparams.scene_object_tokens:
+        raise ValueError(
+            "actor_object_slot_head and scene_object_tokens are mutually exclusive"
+        )
+    if hparams.actor_object_slot_head and not hparams.object_detector_cache:
+        raise ValueError("actor_object_slot_head requires --object_detector_cache")
 
     seed_everything(hparams.seed)
     dataset = _dataset_class(hparams.dataset)

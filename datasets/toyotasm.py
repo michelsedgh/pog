@@ -114,6 +114,12 @@ class ToyotaSMDataset(Dataset):
         self.scene_object_tokens = bool(kwargs.get("scene_object_tokens", 0))
         if self.scene_object_tokens and not self.actor_prompt:
             raise ValueError("scene_object_tokens requires actor_prompt")
+        self.actor_object_slot_head = bool(kwargs.get("actor_object_slot_head", 0))
+        if self.actor_object_slot_head and not self.actor_prompt:
+            raise ValueError("actor_object_slot_head requires actor_prompt")
+        self.requires_object_proposals = (
+            self.scene_object_tokens or self.actor_object_slot_head
+        )
         self.num_scene_object_tokens = int(kwargs.get("num_scene_object_tokens", 32))
         if self.num_scene_object_tokens <= 0:
             raise ValueError("num_scene_object_tokens must be positive")
@@ -325,7 +331,7 @@ class ToyotaSMDataset(Dataset):
         self.data_df["label"] -= 1
         self.y = torch.tensor(self.data_df.label.values, dtype=torch.long)
         self._object_cache = {}
-        if self.interaction_teacher_enabled or self.scene_object_tokens:
+        if self.interaction_teacher_enabled or self.requires_object_proposals:
             self._object_cache = self._load_object_cache(set(self.data_df.file_id))
         self.class_to_indices = {
             int(label): np.flatnonzero(self.y.numpy() == int(label))
@@ -857,7 +863,7 @@ class ToyotaSMDataset(Dataset):
     ):
         if not (
             self.objectless_hard_negative_sampling
-            and self.scene_object_tokens
+            and self.requires_object_proposals
             and action_name in self.objectless_action_names
             and self.objectless_hard_negative_min_sampled_object_frames > 0
         ):
@@ -1086,7 +1092,7 @@ class ToyotaSMDataset(Dataset):
             )
             action_name = (
                 raw_action_name
-                if (self.interaction_teacher_enabled or self.scene_object_tokens)
+                if (self.interaction_teacher_enabled or self.requires_object_proposals)
                 else None
             )
             if self.interaction_teacher_enabled and self.interaction_guided_sampling:
@@ -1106,7 +1112,7 @@ class ToyotaSMDataset(Dataset):
                 )
             object_entries = (
                 self._sample_object_entries(file_id, frames_idx, action_name)
-                if (self.interaction_teacher_enabled or self.scene_object_tokens)
+                if (self.interaction_teacher_enabled or self.requires_object_proposals)
                 else []
             )
             object_keypoints = (
@@ -1167,7 +1173,7 @@ class ToyotaSMDataset(Dataset):
                     if i_try < self._num_retries - 1:
                         continue
                     raise ValueError(f"No valid actor box found for {file_id}")
-                if self.interaction_teacher_enabled or self.scene_object_tokens:
+                if self.interaction_teacher_enabled or self.requires_object_proposals:
                     actor_target.update(
                         self._build_interaction_target(
                             object_entries,
@@ -1484,7 +1490,7 @@ class ToyotaSMDataset(Dataset):
                     canvas_width,
                 )
             )
-        if self.scene_object_tokens:
+        if self.requires_object_proposals:
             output.update(
                 self._compose_synthetic_scene_object_target(
                     targets,
@@ -2131,7 +2137,7 @@ class ToyotaSMDataset(Dataset):
         object_tracks = self._object_tracks(object_entries)
         scene_object_target = {}
         track_to_object_slot = {}
-        if self.scene_object_tokens:
+        if self.requires_object_proposals:
             scene_object_target, track_to_object_slot = self._build_scene_object_target(
                 object_tracks,
                 height,
@@ -2153,7 +2159,7 @@ class ToyotaSMDataset(Dataset):
             width,
             action_names_by_slot=action_names_by_slot,
         )
-        if self.scene_object_tokens:
+        if self.requires_object_proposals:
             scene_object_target = self._augment_scene_object_target(scene_object_target)
 
         output = {

@@ -568,6 +568,8 @@ class TorchActorBackend:
         self.input_size = MODEL_INPUT_SIZE
         self.backend_name = "pytorch"
         self.scene_object_tokens = bool(self.hparams.get("scene_object_tokens", 0))
+        self.actor_object_slot_head = bool(self.hparams.get("actor_object_slot_head", 0))
+        self.uses_object_proposals = self.scene_object_tokens or self.actor_object_slot_head
         self.actor_object_logit_residual = False
         self.actor_object_conditioned_action = bool(
             getattr(self.model, "actor_object_conditioned_action", False)
@@ -581,29 +583,29 @@ class TorchActorBackend:
         )
         self.num_scene_object_tokens = (
             int(self.hparams.get("num_scene_object_tokens", 0))
-            if self.scene_object_tokens
+            if self.uses_object_proposals
             else 0
         )
         if self.clip_frames != TRAINING_CLIP_FRAMES:
             raise RuntimeError(
                 f"Checkpoint n_frames={self.clip_frames}; live inference is fixed to "
-                f"{TRAINING_CLIP_FRAMES} frames to match the trained object-token model."
+                f"{TRAINING_CLIP_FRAMES} frames to match the trained actor model."
             )
-        if not self.scene_object_tokens:
+        if not self.uses_object_proposals:
             raise RuntimeError(
-                "This dashboard is fixed to object-token checkpoints and requires "
-                "scene_object_tokens=1."
+                "This dashboard requires actor checkpoints with object proposal "
+                "inputs: scene_object_tokens=1 or actor_object_slot_head=1."
             )
         if self.num_scene_object_tokens <= 0:
-            raise RuntimeError("Checkpoint scene object token count must be positive.")
+            raise RuntimeError("Checkpoint object proposal count must be positive.")
 
     def __call__(self, clip, boxes, valid, object_inputs=None):
         model_kwargs = {"boxes": boxes, "valid": valid}
-        if self.scene_object_tokens:
+        if self.uses_object_proposals:
             if object_inputs is None:
                 raise RuntimeError(
-                    "This checkpoint has scene_object_tokens=1, so live inference "
-                    "must pass object_boxes, object_classes, object_confs, and object_valid."
+                    "This checkpoint requires object proposal inputs: "
+                    "object_boxes, object_classes, object_confs, and object_valid."
                 )
             expected_keys = {
                 "object_boxes",
@@ -616,7 +618,9 @@ class TorchActorBackend:
                 raise RuntimeError(f"Missing object input keys: {missing}")
             model_kwargs.update(object_inputs)
         elif object_inputs is not None:
-            raise RuntimeError("Object inputs were passed to a checkpoint without object tokens.")
+            raise RuntimeError(
+                "Object inputs were passed to a checkpoint without object proposals."
+            )
 
         with torch.inference_mode():
             output = self.model(clip, **model_kwargs)
@@ -642,6 +646,12 @@ class TensorRTLiveActorBackend:
         self.input_size = int(self.engine.input_size)
         self.backend_name = "tensorrt"
         self.scene_object_tokens = bool(self.engine.scene_object_tokens)
+        self.actor_object_slot_head = bool(
+            getattr(self.engine, "actor_object_slot_head", False)
+        )
+        self.uses_object_proposals = bool(
+            getattr(self.engine, "uses_object_proposals", self.scene_object_tokens)
+        )
         self.actor_object_logit_residual = bool(self.engine.actor_object_logit_residual)
         self.actor_object_conditioned_action = bool(
             getattr(self.engine, "actor_object_conditioned_action", False)
@@ -667,13 +677,13 @@ class TensorRTLiveActorBackend:
                 f"Actor engine input_size={self.input_size}; live inference is fixed "
                 f"to {MODEL_INPUT_SIZE}."
             )
-        if not self.scene_object_tokens:
+        if not self.uses_object_proposals:
             raise RuntimeError(
-                "This dashboard is fixed to object-token checkpoints and requires "
-                "a TensorRT engine with object token inputs."
+                "This dashboard requires a TensorRT actor engine with object "
+                "proposal inputs."
             )
         if self.num_scene_object_tokens <= 0:
-            raise RuntimeError("TensorRT actor engine object token count must be positive.")
+            raise RuntimeError("TensorRT actor engine object proposal count must be positive.")
 
     def __call__(self, clip, boxes, valid, object_inputs=None):
         return self.engine(clip, boxes, valid, object_inputs)
@@ -732,6 +742,12 @@ def run_actor_smoke(args, actor):
             "precision": actor.precision,
             "device": str(actor.device),
             "scene_object_tokens": bool(actor.scene_object_tokens),
+            "actor_object_slot_head": bool(
+                getattr(actor, "actor_object_slot_head", False)
+            ),
+            "uses_object_proposals": bool(
+                getattr(actor, "uses_object_proposals", actor.scene_object_tokens)
+            ),
             "actor_object_logit_residual": bool(actor.actor_object_logit_residual),
             "actor_object_conditioned_action": bool(
                 actor.actor_object_conditioned_action
@@ -957,6 +973,12 @@ class LiveRunner:
             actor_precision=self.actor.precision,
             actor_device=str(self.actor.device),
             scene_object_tokens=bool(self.actor.scene_object_tokens),
+            actor_object_slot_head=bool(
+                getattr(self.actor, "actor_object_slot_head", False)
+            ),
+            uses_object_proposals=bool(
+                getattr(self.actor, "uses_object_proposals", self.actor.scene_object_tokens)
+            ),
             actor_object_logit_residual=bool(self.actor.actor_object_logit_residual),
             actor_object_conditioned_action=bool(
                 self.actor.actor_object_conditioned_action

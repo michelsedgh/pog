@@ -12,6 +12,11 @@ from datasets.object_vocab import NUM_OBJECT_CLASSES, OBJECT_TO_ID
 from datasets.toyota_action_taxonomy import (
     toyota_action_object_map,
     toyota_action_to_index,
+    toyota_objectless_action_names,
+)
+from models.trt_actor_object_slot_head import (
+    ActionObjectSlotSpec,
+    TRTFriendlyActorObjectSlotHead,
 )
 
 
@@ -430,10 +435,21 @@ class POGUISE(pl.LightningModule):
             self.hparams.get("actor_interaction_heatmaps", 0)
         )
         self.scene_object_tokens = bool(self.hparams.get("scene_object_tokens", 0))
+        self.actor_object_slot_head_enabled = bool(
+            self.hparams.get("actor_object_slot_head", 0)
+        )
         self.actor_object_logit_residual = False
         self.actor_object_conditioned_action = False
         if self.scene_object_tokens and not self.actor_prompt:
             raise ValueError("scene_object_tokens requires actor_prompt")
+        if self.actor_object_slot_head_enabled and not self.actor_prompt:
+            raise ValueError("actor_object_slot_head requires actor_prompt")
+        if self.actor_object_slot_head_enabled and self.scene_object_tokens:
+            raise ValueError(
+                "actor_object_slot_head and scene_object_tokens are mutually "
+                "exclusive. The slot head is a late sidecar and detector object "
+                "tokens must not enter the main transformer trunk."
+            )
         if self.actor_interaction_heatmaps and not self.actor_prompt:
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
         if "interaction_object_classes" in self.hparams:
@@ -559,7 +575,10 @@ class POGUISE(pl.LightningModule):
             )
             self.actor_motion_head = (
                 nn.Linear(self.net.num_features, self.hparams.num_classes)
-                if float(self.hparams.get("motion_aux_loss_weight", 0.25)) > 0.0
+                if (
+                    not self.actor_object_slot_head_enabled
+                    and float(self.hparams.get("motion_aux_loss_weight", 0.25)) > 0.0
+                )
                 else None
             )
             self.presence_head = (
@@ -608,6 +627,52 @@ class POGUISE(pl.LightningModule):
                 if self.scene_object_tokens
                 else None
             )
+            if self.actor_object_slot_head_enabled:
+                slot_spec = self._actor_object_slot_spec()
+                if not slot_spec.action_to_object_ids:
+                    raise ValueError(
+                        "actor_object_slot_head requires a Toyota action-object "
+                        "taxonomy mapping."
+                    )
+                self.actor_object_slot_head = TRTFriendlyActorObjectSlotHead(
+                    self.net.num_features,
+                    spec=slot_spec,
+                    hidden_dim=int(
+                        self.hparams.get("actor_object_slot_hidden_dim", 256)
+                    ),
+                    relation_rank=int(
+                        self.hparams.get("actor_object_slot_relation_rank", 64)
+                    ),
+                    prior_compatible=float(
+                        self.hparams.get("actor_object_slot_prior_compatible", 1.25)
+                    ),
+                    prior_incompatible=float(
+                        self.hparams.get("actor_object_slot_prior_incompatible", -1.25)
+                    ),
+                    unknown_init_bias=float(
+                        self.hparams.get("actor_object_slot_unknown_init_bias", -0.25)
+                    ),
+                    unknown_mismatch_penalty=float(
+                        self.hparams.get(
+                            "actor_object_slot_unknown_mismatch_penalty",
+                            1.0,
+                        )
+                    ),
+                    relation_scale=float(
+                        self.hparams.get("actor_object_slot_relation_scale", 1.0)
+                    ),
+                    quality_scale=float(
+                        self.hparams.get("actor_object_slot_quality_scale", 0.5)
+                    ),
+                    use_hard_incompatible_mask=bool(
+                        self.hparams.get(
+                            "actor_object_slot_hard_incompatible_mask",
+                            0,
+                        )
+                    ),
+                )
+            else:
+                self.actor_object_slot_head = None
         if self.hparams.get("linear_probe", 0):
             self._freeze_backbone()
             self.head = Classifier(
@@ -657,6 +722,42 @@ class POGUISE(pl.LightningModule):
             object_id: sorted(action_indices)
             for object_id, action_indices in output.items()
         }
+
+    def _actor_object_slot_spec(self):
+        if self.hparams.get("dataset", None) != "toyotasm":
+            raise ValueError("actor_object_slot_head currently requires toyotasm")
+        task_type, action_taxonomy = self._toyota_action_settings()
+        action_to_index = toyota_action_to_index(task_type, action_taxonomy)
+        action_object_map = toyota_action_object_map(task_type, action_taxonomy)
+        objectless_names = toyota_objectless_action_names(task_type, action_taxonomy)
+
+        objectless_indices = []
+        for action_name in objectless_names:
+            action_idx = action_to_index.get(action_name)
+            if action_idx is not None:
+                objectless_indices.append(int(action_idx))
+
+        action_to_object_ids = {}
+        for action_name, object_names in action_object_map.items():
+            action_idx = action_to_index.get(action_name)
+            if action_idx is None:
+                continue
+            object_ids = []
+            for object_name in object_names:
+                object_id = OBJECT_TO_ID.get(object_name)
+                if object_id is not None:
+                    object_ids.append(int(object_id))
+            if object_ids:
+                action_to_object_ids[int(action_idx)] = tuple(sorted(set(object_ids)))
+
+        return ActionObjectSlotSpec(
+            num_actions=int(self.hparams.num_classes),
+            num_object_classes=int(
+                self.hparams.get("num_object_classes", NUM_OBJECT_CLASSES)
+            ),
+            objectless_action_indices=tuple(sorted(set(objectless_indices))),
+            action_to_object_ids=action_to_object_ids,
+        )
 
     def _freeze_backbone(self):
         print("Freezing backbone")
@@ -708,6 +809,9 @@ class POGUISE(pl.LightningModule):
                     param.requires_grad = True
             if self.actor_object_relation is not None:
                 for param in self.actor_object_relation.parameters():
+                    param.requires_grad = True
+            if self.actor_object_slot_head is not None:
+                for param in self.actor_object_slot_head.parameters():
                     param.requires_grad = True
         interaction_unfreeze_last_blocks = int(
             self.hparams.get("interaction_unfreeze_last_blocks", 0) or 0
@@ -764,6 +868,9 @@ class POGUISE(pl.LightningModule):
                 if self.actor_object_relation is not None:
                     for param in self.actor_object_relation.parameters():
                         param.requires_grad = True
+                if self.actor_object_slot_head is not None:
+                    for param in self.actor_object_slot_head.parameters():
+                        param.requires_grad = True
 
     def _freeze_stages(self):
         if self.frozen_stages >= 0:
@@ -791,6 +898,7 @@ class POGUISE(pl.LightningModule):
         object_valid=None,
         interaction_object_index=None,
         interaction_object_index_valid=None,
+        object_heatmap_scores=None,
     ):
         # convert to b c t h w
         x = x.permute(0, 2, 1, 3, 4)
@@ -850,6 +958,13 @@ class POGUISE(pl.LightningModule):
             self.last_actor_object_compatibility_prior = None
             self.last_actor_object_pair_residual_logits = None
             self.last_actor_object_compatibility_adjustment = None
+            self.last_actor_object_slot_delta = None
+            self.last_actor_object_slot_posterior = None
+            self.last_actor_object_best_slot = None
+            self.last_actor_object_quality = None
+            self.last_actor_object_mismatch = None
+            self.last_actor_object_unknown_delta = None
+            self.last_actor_object_object_slot_delta = None
             self.last_actor_motion_logits = None
             if self.actor_motion_head is not None:
                 self.last_actor_motion_logits = self.actor_motion_head(x_actor)
@@ -858,6 +973,55 @@ class POGUISE(pl.LightningModule):
             base_action_logits = self.actor_head(x_actor)
             self.last_actor_action_logits = base_action_logits
             action_logits = base_action_logits
+            if self.actor_object_slot_head is not None:
+                self.last_actor_motion_logits = base_action_logits
+                if boxes is None:
+                    raise ValueError("actor_object_slot_head requires actor boxes")
+                if object_boxes is None or object_classes is None:
+                    raise ValueError(
+                        "actor_object_slot_head requires object_boxes and "
+                        "object_classes"
+                    )
+                if object_confs is None or object_valid is None:
+                    raise ValueError(
+                        "actor_object_slot_head requires object_confs and "
+                        "object_valid"
+                    )
+                if object_heatmap_scores is None:
+                    object_heatmap_scores = torch.zeros(
+                        (
+                            x_actor.shape[0],
+                            x_actor.shape[1],
+                            object_boxes.shape[1],
+                        ),
+                        device=x_actor.device,
+                        dtype=x_actor.dtype,
+                    )
+                slot_output = self.actor_object_slot_head(
+                    actor_tokens=x_actor,
+                    motion_logits=base_action_logits,
+                    actor_boxes=boxes,
+                    object_boxes=object_boxes,
+                    object_classes=object_classes,
+                    object_confs=object_confs,
+                    object_valid=object_valid,
+                    object_heatmap_scores=object_heatmap_scores,
+                )
+                action_logits = slot_output["logits"]
+                self.last_actor_object_slot_delta = slot_output["slot_delta"]
+                self.last_actor_object_slot_posterior = slot_output[
+                    "slot_posterior"
+                ]
+                self.last_actor_object_best_slot = slot_output["best_slot"]
+                self.last_actor_object_quality = slot_output["object_quality"]
+                self.last_actor_object_mismatch = slot_output["mismatch"]
+                self.last_actor_object_unknown_delta = slot_output["unknown_delta"]
+                self.last_actor_object_object_slot_delta = slot_output[
+                    "object_slot_delta"
+                ]
+                self.last_actor_object_relation_delta = (
+                    action_logits - base_action_logits
+                )
             if self.actor_object_relation is not None:
                 if object_valid is None:
                     raise ValueError(
@@ -966,6 +1130,44 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--scene_object_tokens", type=int, default=0)
         parser.add_argument("--num_scene_object_tokens", type=int, default=32)
         parser.add_argument("--num_object_classes", type=int, default=19)
+        parser.add_argument("--actor_object_slot_head", type=int, default=0)
+        parser.add_argument("--actor_object_slot_hidden_dim", type=int, default=256)
+        parser.add_argument("--actor_object_slot_relation_rank", type=int, default=64)
+        parser.add_argument(
+            "--actor_object_slot_prior_compatible",
+            type=float,
+            default=1.25,
+        )
+        parser.add_argument(
+            "--actor_object_slot_prior_incompatible",
+            type=float,
+            default=-1.25,
+        )
+        parser.add_argument(
+            "--actor_object_slot_unknown_init_bias",
+            type=float,
+            default=-0.25,
+        )
+        parser.add_argument(
+            "--actor_object_slot_unknown_mismatch_penalty",
+            type=float,
+            default=1.0,
+        )
+        parser.add_argument(
+            "--actor_object_slot_relation_scale",
+            type=float,
+            default=1.0,
+        )
+        parser.add_argument(
+            "--actor_object_slot_quality_scale",
+            type=float,
+            default=0.5,
+        )
+        parser.add_argument(
+            "--actor_object_slot_hard_incompatible_mask",
+            type=int,
+            default=0,
+        )
         parser.add_argument(
             "--actor_object_relation_hidden_dim",
             type=int,
