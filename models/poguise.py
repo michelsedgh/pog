@@ -330,6 +330,12 @@ class POGUISE(pl.LightningModule):
                     quality_init_bias=float(
                         self.hparams.get("actor_object_slot_quality_init_bias", -3.0)
                     ),
+                    prior_quality_floor=float(
+                        self.hparams.get(
+                            "actor_object_slot_prior_quality_floor",
+                            0.20,
+                        )
+                    ),
                     relation_logit_scale_init=float(
                         self.hparams.get(
                             "actor_object_slot_relation_logit_scale_init",
@@ -757,6 +763,11 @@ class POGUISE(pl.LightningModule):
             "--actor_object_slot_quality_init_bias",
             type=float,
             default=-3.0,
+        )
+        parser.add_argument(
+            "--actor_object_slot_prior_quality_floor",
+            type=float,
+            default=0.20,
         )
         parser.add_argument(
             "--actor_object_slot_relation_logit_scale_init",

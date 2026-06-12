@@ -92,6 +92,7 @@ class ActorObjectActionQueryDecoder(nn.Module):
         unknown_bias: float = -0.10,
         unknown_mismatch_penalty: float = 1.0,
         quality_init_bias: float = -3.0,
+        prior_quality_floor: float = 0.20,
         relation_logit_scale_init: float = -2.0,
         neg_inf: float = -1.0e4,
     ) -> None:
@@ -106,8 +107,11 @@ class ActorObjectActionQueryDecoder(nn.Module):
         self.unknown_bias = float(unknown_bias)
         self.unknown_mismatch_penalty = float(unknown_mismatch_penalty)
         self.quality_init_bias = float(quality_init_bias)
+        self.prior_quality_floor = float(prior_quality_floor)
         self.relation_logit_scale_init = float(relation_logit_scale_init)
         self.neg_inf = float(neg_inf)
+        if self.prior_quality_floor < 0:
+            raise ValueError("prior_quality_floor must be >= 0")
 
         for name, tensor in spec.build_buffers().items():
             self.register_buffer(name, tensor, persistent=False)
@@ -288,9 +292,7 @@ class ActorObjectActionQueryDecoder(nn.Module):
         )
         quality_logits = self.quality_head(object_slots).squeeze(-1)
         quality = torch.sigmoid(quality_logits)
-        quality = quality * object_valid_f[:, None, :] * object_confs[:, None, :]
-        quality = quality * (1.0 + object_heatmap_scores).clamp(1.0, 2.0)
-        quality = quality.clamp(0.0, 1.0)
+        quality = quality * object_valid_f[:, None, :]
         return self.relation_norm(slots), quality_logits, quality
 
     def _slot_bias(
@@ -333,8 +335,9 @@ class ActorObjectActionQueryDecoder(nn.Module):
             * has_known.view(1, 1, self.num_actions)
             * self.incompatible_bias
         )
-        compat_prior = compat_prior[:, None, :, :] * quality.detach()[:, :, :, None]
-        compat_prior = compat_prior * object_confs[:, None, :, None]
+        prior_gate = quality.detach().clamp_min(self.prior_quality_floor)
+        prior_gate = prior_gate * object_valid_f[:, None, :]
+        compat_prior = compat_prior[:, None, :, :] * prior_gate[:, :, :, None]
         object_prior = compat_prior.permute(0, 1, 3, 2)
 
         invalid_objects = (1.0 - object_valid_f)[:, None, None, :] * self.neg_inf

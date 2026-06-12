@@ -141,6 +141,31 @@ class HeatmapModule(pl.LightningModule):
         )
         if self.object_slot_quality_loss_weight < 0:
             raise ValueError("object_slot_quality_loss_weight must be >= 0")
+        self.object_slot_quality_pos_weight = float(
+            hparams.get("object_slot_quality_pos_weight", 1.0)
+        )
+        if self.object_slot_quality_pos_weight < 0:
+            raise ValueError("object_slot_quality_pos_weight must be >= 0")
+        self.object_slot_quality_neg_weight = float(
+            hparams.get("object_slot_quality_neg_weight", 0.25)
+        )
+        if self.object_slot_quality_neg_weight < 0:
+            raise ValueError("object_slot_quality_neg_weight must be >= 0")
+        self.object_slot_quality_exact_neg_topk = int(
+            hparams.get("object_slot_quality_exact_neg_topk", 4)
+        )
+        if self.object_slot_quality_exact_neg_topk < 0:
+            raise ValueError("object_slot_quality_exact_neg_topk must be >= 0")
+        self.object_slot_quality_objectless_neg_topk = int(
+            hparams.get("object_slot_quality_objectless_neg_topk", 8)
+        )
+        if self.object_slot_quality_objectless_neg_topk < 0:
+            raise ValueError("object_slot_quality_objectless_neg_topk must be >= 0")
+        self.object_slot_unknown_exact_loss_weight = float(
+            hparams.get("object_slot_unknown_exact_loss_weight", 0.0)
+        )
+        if self.object_slot_unknown_exact_loss_weight < 0:
+            raise ValueError("object_slot_unknown_exact_loss_weight must be >= 0")
         self.num_classes = hparams.num_classes
         self.dataset_name = hparams.dataset_artifact
         self.is_toyota = str(self.dataset_name).lower() == "toyotasm"
@@ -900,6 +925,95 @@ class HeatmapModule(pl.LightningModule):
             ),
         }
 
+    def _exact_teacher_object_info(self, actions, valid, target, device):
+        required = (
+            "object_classes",
+            "object_valid",
+            "interaction_object_index",
+            "interaction_object_index_valid",
+        )
+        if any(key not in target for key in required):
+            return None
+        if not self.action_object_ids_by_index:
+            return None
+
+        actions = actions.to(device=device, dtype=torch.long)
+        valid = valid.to(device=device, dtype=torch.bool)
+        valid = valid & (actions >= 0) & (actions < int(self.num_classes))
+        object_classes = target["object_classes"].to(device=device, dtype=torch.long)
+        object_valid = target["object_valid"].to(device=device, dtype=torch.bool)
+        selected_indices = target["interaction_object_index"].to(
+            device=device,
+            dtype=torch.long,
+        )
+        selected_valid = target["interaction_object_index_valid"].to(
+            device=device,
+            dtype=torch.bool,
+        )
+        if object_classes.ndim != 2 or object_valid.shape != object_classes.shape:
+            return None
+
+        num_objects = int(object_classes.shape[1])
+        if num_objects <= 0:
+            return None
+
+        idx_1based = (selected_indices - 1).clamp(0, num_objects - 1)
+        idx_0based = selected_indices.clamp(0, num_objects - 1)
+        in_range_1based = (
+            selected_valid
+            & (selected_indices > 0)
+            & ((selected_indices - 1) < num_objects)
+        )
+        in_range_0based = (
+            selected_valid
+            & (selected_indices >= 0)
+            & (selected_indices < num_objects)
+        )
+        class_1based = object_classes.gather(1, idx_1based)
+        class_0based = object_classes.gather(1, idx_0based)
+        valid_1based = in_range_1based & object_valid.gather(1, idx_1based)
+        valid_0based = in_range_0based & object_valid.gather(1, idx_0based)
+
+        known_action = torch.zeros_like(valid, dtype=torch.bool)
+        any_compatible = torch.zeros_like(valid, dtype=torch.bool)
+        compatible_1based = torch.zeros_like(valid, dtype=torch.bool)
+        compatible_0based = torch.zeros_like(valid, dtype=torch.bool)
+        for action_idx, object_ids in self.action_object_ids_by_index.items():
+            action_mask = valid & (actions == int(action_idx))
+            if not action_mask.any():
+                known_action |= action_mask
+                continue
+            known_action |= action_mask
+            object_ids = object_ids.to(device=device, dtype=torch.long)
+            object_match = (
+                object_classes.unsqueeze(-1) == object_ids.view(1, 1, -1)
+            ).any(dim=-1) & object_valid
+            any_compatible |= action_mask & object_match.any(dim=1, keepdim=True)
+            class_match_1based = (
+                class_1based.unsqueeze(-1) == object_ids.view(1, 1, -1)
+            ).any(dim=-1)
+            class_match_0based = (
+                class_0based.unsqueeze(-1) == object_ids.view(1, 1, -1)
+            ).any(dim=-1)
+            compatible_1based |= action_mask & valid_1based & class_match_1based
+            compatible_0based |= action_mask & valid_0based & class_match_0based
+
+        return {
+            "actions": actions,
+            "valid": valid,
+            "object_classes": object_classes,
+            "object_valid": object_valid,
+            "selected_indices": selected_indices,
+            "idx_1based": idx_1based,
+            "idx_0based": idx_0based,
+            "valid_1based": valid_1based,
+            "valid_0based": valid_0based,
+            "known_action": known_action,
+            "any_compatible": any_compatible,
+            "compatible_1based": compatible_1based,
+            "compatible_0based": compatible_0based,
+        }
+
     def _object_slot_target_loss(self, stage, actions, valid, target):
         if (
             not self.actor_object_slot_head
@@ -971,28 +1085,117 @@ class HeatmapModule(pl.LightningModule):
             dtype=torch.bool,
         )
 
+        num_objects = int(quality_logits.shape[-1])
+        if num_objects <= 0:
+            return None
+
         objectless = self._labels_in_indices(actions, self.objectless_action_indices)
-        exact_object = valid & selected_valid & (selected_indices > 0)
-        supervised = (valid & objectless) | exact_object
-        if not supervised.any():
-            return None
-
-        mask = supervised[:, :, None] & object_valid[:, None, :]
-        if not mask.any():
-            return None
-
-        target_quality = torch.zeros_like(quality_logits, dtype=torch.float32)
+        selected_object_slots = selected_indices - 1
+        selected_in_range = (
+            selected_valid
+            & (selected_indices > 0)
+            & (selected_object_slots >= 0)
+            & (selected_object_slots < num_objects)
+        )
+        safe_selected_slots = selected_object_slots.clamp(0, max(num_objects - 1, 0))
+        selected_object_valid = selected_in_range & object_valid.gather(
+            1,
+            safe_selected_slots,
+        )
+        object_valid_slots = object_valid[:, None, :].expand_as(quality_logits)
+        exact_object = valid & selected_object_valid & ~objectless
+        teacher_slot_mask = torch.zeros_like(quality_logits, dtype=torch.bool)
         rows = torch.nonzero(exact_object, as_tuple=False)
         if rows.numel() > 0:
-            object_slots = selected_indices[exact_object] - 1
-            object_slots = object_slots.clamp(0, quality_logits.shape[-1] - 1)
-            target_quality[rows[:, 0], rows[:, 1], object_slots] = 1.0
+            object_slots = safe_selected_slots[exact_object]
+            teacher_slot_mask[rows[:, 0], rows[:, 1], object_slots] = True
+
+        pos_mask = teacher_slot_mask
+        exact_neg_mask = (
+            exact_object[:, :, None]
+            & object_valid_slots
+            & ~teacher_slot_mask
+        )
+        objectless_neg_mask = (
+            (valid & objectless)[:, :, None]
+            & object_valid_slots
+        )
+
+        if not (pos_mask.any() or exact_neg_mask.any() or objectless_neg_mask.any()):
+            return None
 
         logits = quality_logits.float()
-        loss = F.binary_cross_entropy_with_logits(
-            logits[mask],
-            target_quality[mask],
+
+        def _topk_masked_values(values, mask, topk):
+            if topk <= 0 or not mask.any():
+                return values.new_empty((0,))
+            k = min(int(topk), int(values.shape[-1]))
+            masked = values.masked_fill(~mask, float("-inf"))
+            top_values = masked.topk(k, dim=-1).values
+            return top_values[torch.isfinite(top_values)]
+
+        loss_terms = []
+        if pos_mask.any() and self.object_slot_quality_pos_weight > 0:
+            pos_loss = F.binary_cross_entropy_with_logits(
+                logits[pos_mask],
+                torch.ones_like(logits[pos_mask]),
+            )
+            loss_terms.append(pos_loss * self.object_slot_quality_pos_weight)
+            self.log(
+                f"{stage}_loss_object_slot_quality_pos",
+                pos_loss,
+                on_step=stage == "train",
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+        exact_neg_values = _topk_masked_values(
+            logits,
+            exact_neg_mask,
+            self.object_slot_quality_exact_neg_topk,
         )
+        objectless_neg_values = _topk_masked_values(
+            logits,
+            objectless_neg_mask,
+            self.object_slot_quality_objectless_neg_topk,
+        )
+        neg_parts = [
+            values
+            for values in (exact_neg_values, objectless_neg_values)
+            if values.numel() > 0
+        ]
+        neg_values = (
+            torch.cat(neg_parts)
+            if neg_parts
+            else logits.new_empty((0,))
+        )
+        if neg_values.numel() > 0 and self.object_slot_quality_neg_weight > 0:
+            neg_loss = F.binary_cross_entropy_with_logits(
+                neg_values,
+                torch.zeros_like(neg_values),
+            )
+            loss_terms.append(neg_loss * self.object_slot_quality_neg_weight)
+            self.log(
+                f"{stage}_loss_object_slot_quality_neg",
+                neg_loss,
+                on_step=stage == "train",
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+            self._log_count(
+                f"{stage}_object_slot_quality_exact_neg_count",
+                logits.new_tensor(float(exact_neg_values.numel())),
+            )
+            self._log_count(
+                f"{stage}_object_slot_quality_objectless_neg_count",
+                logits.new_tensor(float(objectless_neg_values.numel())),
+            )
+        if not loss_terms:
+            return None
+        loss = torch.stack(loss_terms).sum()
         self.log(
             f"{stage}_loss_object_slot_quality",
             loss,
@@ -1005,8 +1208,6 @@ class HeatmapModule(pl.LightningModule):
 
         with torch.no_grad():
             probs = torch.sigmoid(logits)
-            pos_mask = mask & (target_quality > 0.5)
-            neg_mask = mask & (target_quality <= 0.5)
             if pos_mask.any():
                 self._log_scalar(
                     f"{stage}_object_slot_quality_pos_acc",
@@ -1018,17 +1219,60 @@ class HeatmapModule(pl.LightningModule):
                     probs[pos_mask].mean(),
                     int(pos_mask.sum().item()),
                 )
-            if neg_mask.any():
+            if neg_values.numel() > 0:
+                neg_probs = torch.sigmoid(neg_values)
                 self._log_scalar(
                     f"{stage}_object_slot_quality_neg_acc",
-                    (probs[neg_mask] < 0.5).float().mean(),
-                    int(neg_mask.sum().item()),
+                    (neg_probs < 0.5).float().mean(),
+                    int(neg_values.numel()),
                 )
                 self._log_scalar(
                     f"{stage}_object_slot_quality_neg_mean",
-                    probs[neg_mask].mean(),
-                    int(neg_mask.sum().item()),
+                    neg_probs.mean(),
+                    int(neg_values.numel()),
                 )
+        return loss
+
+    def _object_slot_unknown_exact_loss(self, stage, actions, valid, target):
+        if (
+            not self.actor_object_slot_head
+            or self.object_slot_unknown_exact_loss_weight <= 0
+        ):
+            return None
+        slot_delta = getattr(self.model, "last_actor_object_slot_delta", None)
+        if slot_delta is None:
+            return None
+
+        device = slot_delta.device
+        info = self._exact_teacher_object_info(actions, valid, target, device)
+        if info is None:
+            return None
+
+        actions = info["actions"]
+        exact_compatible = info["known_action"] & info["compatible_1based"]
+        if not exact_compatible.any():
+            return None
+
+        rows = torch.nonzero(exact_compatible, as_tuple=False)
+        true_actions = actions[exact_compatible]
+        true_slot_logits = slot_delta[rows[:, 0], rows[:, 1], true_actions]
+        unknown_prob = torch.softmax(true_slot_logits.float(), dim=-1)[:, 1]
+        loss = -torch.log1p(-unknown_prob.clamp(max=1.0 - 1.0e-6)).mean()
+        self.log(
+            f"{stage}_loss_object_slot_unknown_exact",
+            loss,
+            on_step=stage == "train",
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+        )
+        if stage == "train":
+            self._log_scalar(
+                f"{stage}_object_slot_exact_unknown_prob",
+                unknown_prob.mean(),
+                int(exact_compatible.sum().item()),
+            )
         return loss
 
     def _teacher_object_removed_inputs(
@@ -1220,6 +1464,153 @@ class HeatmapModule(pl.LightningModule):
                 f"{stage}_object_slot_known_action_count",
                 known_object_mask.float().sum(),
             )
+
+        exact_info = self._exact_teacher_object_info(actions, valid, target, device)
+        if exact_info is not None:
+            exact_known = valid & exact_info["known_action"]
+            if exact_known.any():
+                count = int(exact_known.sum().item())
+                self._log_scalar(
+                    f"{stage}_object_slot_exact_teacher_valid_rate_1based",
+                    exact_info["valid_1based"][exact_known].float().mean(),
+                    count,
+                )
+                self._log_scalar(
+                    f"{stage}_object_slot_exact_teacher_valid_rate_0based",
+                    exact_info["valid_0based"][exact_known].float().mean(),
+                    count,
+                )
+                self._log_scalar(
+                    f"{stage}_object_slot_exact_compatible_rate_1based",
+                    exact_info["compatible_1based"][exact_known].float().mean(),
+                    count,
+                )
+                self._log_scalar(
+                    f"{stage}_object_slot_exact_compatible_rate_0based",
+                    exact_info["compatible_0based"][exact_known].float().mean(),
+                    count,
+                )
+                self._log_scalar(
+                    f"{stage}_object_slot_any_compatible_proposal_rate",
+                    exact_info["any_compatible"][exact_known].float().mean(),
+                    count,
+                )
+            exact_compatible = (
+                valid
+                & exact_info["known_action"]
+                & exact_info["compatible_1based"]
+            )
+            teacher_missing = (
+                valid
+                & exact_info["known_action"]
+                & ~exact_info["valid_1based"]
+            )
+            teacher_mismatch = (
+                valid
+                & exact_info["known_action"]
+                & exact_info["valid_1based"]
+                & ~exact_info["compatible_1based"]
+            )
+            if exact_compatible.any():
+                exact_count = int(exact_compatible.sum().item())
+                self._log_scalar(
+                    f"{stage}_object_slot_unknown_rate_given_exact_compatible",
+                    (true_best_slot[exact_compatible] == 1).float().mean(),
+                    exact_count,
+                )
+                self._log_scalar(
+                    f"{stage}_object_slot_object_rate_given_exact_compatible",
+                    (true_best_slot[exact_compatible] >= 2).float().mean(),
+                    exact_count,
+                )
+            if teacher_missing.any():
+                missing_count = int(teacher_missing.sum().item())
+                self._log_count(
+                    f"{stage}_object_slot_mapped_missing_count",
+                    teacher_missing.float().sum(),
+                )
+                self._log_scalar(
+                    f"{stage}_object_slot_unknown_rate_given_missing",
+                    (true_best_slot[teacher_missing] == 1).float().mean(),
+                    missing_count,
+                )
+            if teacher_mismatch.any():
+                mismatch_count = int(teacher_mismatch.sum().item())
+                self._log_count(
+                    f"{stage}_object_slot_mapped_mismatch_count",
+                    teacher_mismatch.float().sum(),
+                )
+                self._log_scalar(
+                    f"{stage}_object_slot_unknown_rate_given_mismatch",
+                    (true_best_slot[teacher_mismatch] == 1).float().mean(),
+                    mismatch_count,
+                )
+            if exact_compatible.any():
+                expected_slot = exact_info["idx_1based"] + 2
+                exact_count = int(exact_compatible.sum().item())
+                self._log_count(
+                    f"{stage}_object_slot_exact_compatible_count",
+                    exact_compatible.float().sum(),
+                )
+                self._log_scalar(
+                    f"{stage}_object_slot_exact_correct_object_rate",
+                    (true_best_slot[exact_compatible] == expected_slot[exact_compatible])
+                    .float()
+                    .mean(),
+                    exact_count,
+                )
+                rows = torch.nonzero(exact_compatible, as_tuple=False)
+                exact_logits = slot_delta[
+                    rows[:, 0],
+                    rows[:, 1],
+                    safe_actions[exact_compatible],
+                ].float()
+                exact_prob = exact_logits.softmax(dim=-1)
+                expected_prob = exact_prob.gather(
+                    1,
+                    expected_slot[exact_compatible].unsqueeze(1),
+                ).squeeze(1)
+                self._log_scalar(
+                    f"{stage}_object_slot_exact_correct_object_prob",
+                    expected_prob.mean(),
+                    exact_count,
+                )
+                self._log_scalar(
+                    f"{stage}_object_slot_exact_unknown_prob",
+                    exact_prob[:, 1].mean(),
+                    exact_count,
+                )
+                quality = getattr(self.model, "last_actor_object_quality", None)
+                if quality is not None:
+                    quality = quality.to(device=device).float()
+                    teacher_quality = quality.gather(
+                        2,
+                        exact_info["idx_1based"].unsqueeze(-1),
+                    ).squeeze(-1)
+                    self._log_scalar(
+                        f"{stage}_object_slot_exact_quality_pos_mean",
+                        teacher_quality[exact_compatible].mean(),
+                        exact_count,
+                    )
+                    valid_quality = quality.masked_fill(
+                        ~exact_info["object_valid"][:, None, :],
+                        float("-inf"),
+                    )
+                    better_count = (
+                        valid_quality
+                        > teacher_quality.unsqueeze(-1)
+                    ).sum(dim=-1)
+                    teacher_rank = better_count + 1
+                    self._log_scalar(
+                        f"{stage}_object_slot_exact_quality_teacher_rank_mean",
+                        teacher_rank[exact_compatible].float().mean(),
+                        exact_count,
+                    )
+                    self._log_scalar(
+                        f"{stage}_object_slot_exact_quality_teacher_top1_rate",
+                        (teacher_rank[exact_compatible] == 1).float().mean(),
+                        exact_count,
+                    )
         if objectless_mask.any():
             count = int(objectless_mask.sum().item())
             self._log_scalar(
@@ -1730,6 +2121,19 @@ class HeatmapModule(pl.LightningModule):
             grounding_aux_terms.append(
                 loss_object_slot_quality * self.object_slot_quality_loss_weight
             )
+        loss_unknown_exact = self._object_slot_unknown_exact_loss(
+            stage,
+            actions,
+            valid,
+            target,
+        )
+        if (
+            loss_unknown_exact is not None
+            and self.object_slot_unknown_exact_loss_weight > 0
+        ):
+            grounding_aux_terms.append(
+                loss_unknown_exact * self.object_slot_unknown_exact_loss_weight
+            )
 
         self._log_object_counterfactual_eval(
             imgs,
@@ -1833,6 +2237,52 @@ class HeatmapModule(pl.LightningModule):
                         f"{tuple(heatmap_valid.shape)}"
                     )
                 heatmap_valid = heatmap_valid & valid
+                heatmap_info = self._exact_teacher_object_info(
+                    actions,
+                    valid,
+                    target,
+                    valid.device,
+                )
+                if heatmap_info is not None:
+                    heatmap_actions = heatmap_info["actions"]
+                    heatmap_objectless = self._labels_in_indices(
+                        heatmap_actions,
+                        self.objectless_action_indices,
+                    )
+                    known_object = valid & heatmap_info["known_action"]
+                    teacher_missing = known_object & ~heatmap_info["valid_1based"]
+                    teacher_mismatch = (
+                        known_object
+                        & heatmap_info["valid_1based"]
+                        & ~heatmap_info["compatible_1based"]
+                    )
+                    exact_compatible = known_object & heatmap_info["compatible_1based"]
+
+                    heatmap_valid = (heatmap_valid & ~teacher_missing) | (
+                        valid & heatmap_objectless
+                    )
+
+                    if known_object.any():
+                        known_count = int(known_object.sum().item())
+                        self._log_scalar(
+                            f"{stage}_interaction_heatmap_missing_object_masked_rate",
+                            teacher_missing[known_object].float().mean(),
+                            known_count,
+                        )
+                        self._log_scalar(
+                            f"{stage}_interaction_heatmap_exact_compatible_valid_rate",
+                            exact_compatible[known_object].float().mean(),
+                            known_count,
+                        )
+                        self._log_scalar(
+                            f"{stage}_interaction_heatmap_mismatch_valid_rate",
+                            teacher_mismatch[known_object].float().mean(),
+                            known_count,
+                        )
+                        self._log_count(
+                            f"{stage}_interaction_heatmap_missing_object_masked_count",
+                            teacher_missing.float().sum(),
+                        )
                 positive_heatmap_valid = target.get(
                     "interaction_heatmap_positive_valid",
                     target["interaction_heatmap_valid"],

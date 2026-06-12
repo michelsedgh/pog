@@ -478,6 +478,19 @@ def build_parser():
     parser.add_argument("--object_slot_target_loss_weight", type=float, default=1.0)
     parser.add_argument("--object_slot_ignore_missing_object", type=int, default=0)
     parser.add_argument("--object_slot_quality_loss_weight", type=float, default=0.5)
+    parser.add_argument("--object_slot_quality_pos_weight", type=float, default=1.0)
+    parser.add_argument("--object_slot_quality_neg_weight", type=float, default=0.25)
+    parser.add_argument("--object_slot_quality_exact_neg_topk", type=int, default=4)
+    parser.add_argument(
+        "--object_slot_quality_objectless_neg_topk",
+        type=int,
+        default=8,
+    )
+    parser.add_argument(
+        "--object_slot_unknown_exact_loss_weight",
+        type=float,
+        default=0.0,
+    )
     parser.add_argument("--deepspeed_optim", type=int, default=0)
     parser.add_argument("--kp_only", type=int, default=0)
 

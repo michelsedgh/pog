@@ -41,11 +41,32 @@ CORE_COLUMNS = [
     "val_object_action_confuser_violation_rate",
     "val_loss_object_slot_target",
     "val_loss_object_slot_quality",
+    "val_loss_object_slot_quality_pos",
+    "val_loss_object_slot_quality_neg",
+    "val_loss_object_slot_unknown_exact",
     "val_object_slot_true_compatible_rate",
     "val_object_slot_true_unknown_rate",
     "val_object_slot_true_null_rate",
     "val_object_slot_true_incompatible_rate",
     "val_object_slot_known_action_count",
+    "val_object_slot_exact_teacher_valid_rate_1based",
+    "val_object_slot_exact_teacher_valid_rate_0based",
+    "val_object_slot_exact_compatible_rate_1based",
+    "val_object_slot_exact_compatible_rate_0based",
+    "val_object_slot_any_compatible_proposal_rate",
+    "val_object_slot_exact_compatible_count",
+    "val_object_slot_exact_correct_object_rate",
+    "val_object_slot_exact_correct_object_prob",
+    "val_object_slot_exact_unknown_prob",
+    "val_object_slot_exact_quality_pos_mean",
+    "val_object_slot_mapped_missing_count",
+    "val_object_slot_mapped_mismatch_count",
+    "val_object_slot_unknown_rate_given_exact_compatible",
+    "val_object_slot_object_rate_given_exact_compatible",
+    "val_object_slot_unknown_rate_given_missing",
+    "val_object_slot_unknown_rate_given_mismatch",
+    "val_object_slot_exact_quality_teacher_rank_mean",
+    "val_object_slot_exact_quality_teacher_top1_rate",
     "val_object_slot_objectless_null_rate",
     "val_object_slot_objectless_nonnull_rate",
     "val_object_slot_quality_mean",
@@ -74,6 +95,10 @@ CORE_COLUMNS = [
     "train_nash_weight_grounding_aux",
     "val_interaction_teacher_slot_rate",
     "val_interaction_teacher_slot_count",
+    "val_interaction_heatmap_missing_object_masked_rate",
+    "val_interaction_heatmap_missing_object_masked_count",
+    "val_interaction_heatmap_exact_compatible_valid_rate",
+    "val_interaction_heatmap_mismatch_valid_rate",
     "val_interaction_heatmap_iou",
     "val_interaction_heatmap_soft_iou",
     "val_interaction_heatmap_positive_mean",
@@ -286,6 +311,10 @@ def print_compact_epoch_summary(epoch_df):
         "val_group_drink_acc",
         "val_object_slot_true_compatible_rate",
         "val_object_slot_true_unknown_rate",
+        "val_object_slot_exact_correct_object_rate",
+        "val_object_slot_exact_unknown_prob",
+        "val_object_slot_unknown_rate_given_exact_compatible",
+        "val_object_slot_unknown_rate_given_missing",
         "val_object_slot_quality_pos_acc",
         "val_object_slot_quality_neg_acc",
         "val_object_slot_Uselaptop_laptop_rate",
@@ -336,6 +365,10 @@ def print_compact_best(epoch_df):
         "val_group_laptop_book_tv_acc",
         "val_group_phone_tv_acc",
         "val_object_slot_true_compatible_rate",
+        "val_object_slot_exact_correct_object_rate",
+        "val_object_slot_exact_unknown_prob",
+        "val_object_slot_unknown_rate_given_exact_compatible",
+        "val_object_slot_unknown_rate_given_missing",
         "val_object_slot_objectless_null_rate",
         "val_object_slot_quality_pos_acc",
         "val_object_slot_quality_neg_acc",
@@ -373,9 +406,20 @@ def print_object_use_epoch_table(epoch_df):
         "val_interaction_heatmap_pred_max",
         "val_interaction_heatmap_soft_iou",
         "val_interaction_heatmap_center_l2",
+        "val_interaction_heatmap_missing_object_masked_rate",
         "val_object_slot_true_compatible_rate",
         "val_object_slot_true_unknown_rate",
         "val_object_slot_true_incompatible_rate",
+        "val_object_slot_exact_compatible_rate_1based",
+        "val_object_slot_exact_compatible_rate_0based",
+        "val_object_slot_exact_correct_object_rate",
+        "val_object_slot_exact_unknown_prob",
+        "val_object_slot_unknown_rate_given_exact_compatible",
+        "val_object_slot_object_rate_given_exact_compatible",
+        "val_object_slot_unknown_rate_given_missing",
+        "val_object_slot_unknown_rate_given_mismatch",
+        "val_object_slot_exact_quality_teacher_rank_mean",
+        "val_object_slot_exact_quality_teacher_top1_rate",
         "val_object_slot_objectless_null_rate",
         "val_object_slot_quality_pos_acc",
         "val_object_slot_quality_neg_acc",
@@ -396,11 +440,24 @@ def print_object_use_epoch_table(epoch_df):
         "val_interaction_heatmap_pred_max",
         "val_interaction_heatmap_soft_iou",
         "val_interaction_heatmap_center_l2",
+        "val_interaction_heatmap_missing_object_masked_rate",
+        "val_interaction_heatmap_exact_compatible_valid_rate",
+        "val_interaction_heatmap_mismatch_valid_rate",
         "val_object_counterfactual_teacher_logit_drop",
         "val_object_counterfactual_teacher_prob_drop",
         "val_object_slot_true_compatible_rate",
         "val_object_slot_true_unknown_rate",
         "val_object_slot_true_incompatible_rate",
+        "val_object_slot_exact_compatible_rate_1based",
+        "val_object_slot_exact_compatible_rate_0based",
+        "val_object_slot_exact_correct_object_rate",
+        "val_object_slot_exact_unknown_prob",
+        "val_object_slot_unknown_rate_given_exact_compatible",
+        "val_object_slot_object_rate_given_exact_compatible",
+        "val_object_slot_unknown_rate_given_missing",
+        "val_object_slot_unknown_rate_given_mismatch",
+        "val_object_slot_exact_quality_teacher_rank_mean",
+        "val_object_slot_exact_quality_teacher_top1_rate",
         "val_object_slot_objectless_null_rate",
         "val_object_slot_quality_pos_acc",
         "val_object_slot_quality_neg_acc",
@@ -693,6 +750,78 @@ def print_decision(epoch_df):
     slot_unknown = metric(latest, "val_object_slot_true_unknown_rate")
     slot_null = metric(latest, "val_object_slot_true_null_rate")
     slot_incompatible = metric(latest, "val_object_slot_true_incompatible_rate")
+    exact_valid_1based = metric(
+        latest,
+        "val_object_slot_exact_teacher_valid_rate_1based",
+    )
+    exact_valid_0based = metric(
+        latest,
+        "val_object_slot_exact_teacher_valid_rate_0based",
+    )
+    exact_compatible_1based = metric(
+        latest,
+        "val_object_slot_exact_compatible_rate_1based",
+    )
+    exact_compatible_0based = metric(
+        latest,
+        "val_object_slot_exact_compatible_rate_0based",
+    )
+    any_compatible_proposal = metric(
+        latest,
+        "val_object_slot_any_compatible_proposal_rate",
+    )
+    exact_correct_rate = metric(
+        latest,
+        "val_object_slot_exact_correct_object_rate",
+    )
+    exact_correct_prob = metric(
+        latest,
+        "val_object_slot_exact_correct_object_prob",
+    )
+    exact_unknown_prob = metric(latest, "val_object_slot_exact_unknown_prob")
+    exact_quality = metric(latest, "val_object_slot_exact_quality_pos_mean")
+    mapped_missing_count = metric(latest, "val_object_slot_mapped_missing_count")
+    mapped_mismatch_count = metric(latest, "val_object_slot_mapped_mismatch_count")
+    unknown_given_exact = metric(
+        latest,
+        "val_object_slot_unknown_rate_given_exact_compatible",
+    )
+    object_given_exact = metric(
+        latest,
+        "val_object_slot_object_rate_given_exact_compatible",
+    )
+    unknown_given_missing = metric(
+        latest,
+        "val_object_slot_unknown_rate_given_missing",
+    )
+    unknown_given_mismatch = metric(
+        latest,
+        "val_object_slot_unknown_rate_given_mismatch",
+    )
+    exact_quality_rank = metric(
+        latest,
+        "val_object_slot_exact_quality_teacher_rank_mean",
+    )
+    exact_quality_top1 = metric(
+        latest,
+        "val_object_slot_exact_quality_teacher_top1_rate",
+    )
+    heatmap_missing_mask_rate = metric(
+        latest,
+        "val_interaction_heatmap_missing_object_masked_rate",
+    )
+    heatmap_missing_mask_count = metric(
+        latest,
+        "val_interaction_heatmap_missing_object_masked_count",
+    )
+    heatmap_exact_valid = metric(
+        latest,
+        "val_interaction_heatmap_exact_compatible_valid_rate",
+    )
+    heatmap_mismatch_valid = metric(
+        latest,
+        "val_interaction_heatmap_mismatch_valid_rate",
+    )
     slot_objectless_null = metric(latest, "val_object_slot_objectless_null_rate")
     slot_quality = metric(latest, "val_object_slot_quality_max_mean")
     slot_relation_scale = metric(latest, "val_actor_object_slot_relation_scale")
@@ -760,6 +889,35 @@ def print_decision(epoch_df):
             f"u_minus_read {fmt(slot_u_minus_read)}, "
             f"motion_margin {fmt(slot_motion_u_minus_read)}, "
             f"slot_delta_margin {fmt(slot_delta_u_minus_read)}"
+        )
+    if pd.notna(exact_correct_rate) or pd.notna(exact_compatible_1based):
+        print(
+            "exact teacher object: "
+            f"valid_1based {fmt(exact_valid_1based)}, "
+            f"valid_0based {fmt(exact_valid_0based)}, "
+            f"compat_1based {fmt(exact_compatible_1based)}, "
+            f"compat_0based {fmt(exact_compatible_0based)}, "
+            f"any_compat {fmt(any_compatible_proposal)}, "
+            f"correct_rate {fmt(exact_correct_rate)}, "
+            f"correct_prob {fmt(exact_correct_prob)}, "
+            f"unknown_prob {fmt(exact_unknown_prob)}, "
+            f"unknown_given_exact {fmt(unknown_given_exact)}, "
+            f"object_given_exact {fmt(object_given_exact)}, "
+            f"unknown_given_missing {fmt(unknown_given_missing)}, "
+            f"unknown_given_mismatch {fmt(unknown_given_mismatch)}, "
+            f"missing_count {fmt(mapped_missing_count, 0)}, "
+            f"mismatch_count {fmt(mapped_mismatch_count, 0)}, "
+            f"quality {fmt(exact_quality)}, "
+            f"quality_rank {fmt(exact_quality_rank)}, "
+            f"quality_top1 {fmt(exact_quality_top1)}"
+        )
+    if pd.notna(heatmap_missing_mask_rate):
+        print(
+            "missing-aware heatmap supervision: "
+            f"masked_rate {fmt(heatmap_missing_mask_rate)}, "
+            f"masked_count {fmt(heatmap_missing_mask_count, 0)}, "
+            f"exact_valid {fmt(heatmap_exact_valid)}, "
+            f"mismatch_valid {fmt(heatmap_mismatch_valid)}"
         )
     if pd.notna(hard_objectless):
         print(
