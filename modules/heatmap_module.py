@@ -2135,6 +2135,13 @@ class HeatmapModule(pl.LightningModule):
                 loss_unknown_exact * self.object_slot_unknown_exact_loss_weight
             )
 
+        self._log_actor_object_slot_diagnostics(
+            stage,
+            preds,
+            actions,
+            valid,
+            target,
+        )
         self._log_object_counterfactual_eval(
             imgs,
             boxes,
@@ -2144,13 +2151,6 @@ class HeatmapModule(pl.LightningModule):
             target,
             object_inputs,
             stage,
-        )
-        self._log_actor_object_slot_diagnostics(
-            stage,
-            preds,
-            actions,
-            valid,
-            target,
         )
         loss_kp = None
         loss_pose_frobenius = None
