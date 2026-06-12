@@ -282,7 +282,9 @@ def run_checked(cmd, label=None):
     subprocess.run(cmd, cwd=REPO_DIR, check=True)
 
 run_checked(["git", "pull", "--ff-only", "origin", "main"], "Pull latest code")
-run_checked(["git", "log", "-1", "--oneline"], "Current commit")
+PINNED_SHA = "ddbcb31ebb83d43efe85920b461440aa59529f6d"
+run_checked(["git", "checkout", PINNED_SHA], f"Checking out pinned commit {PINNED_SHA}")
+run_checked(["git", "log", "-1", "--oneline"], "Pinned commit")
 run_checked([
     sys.executable, "-m", "py_compile",
     "datasets/object_vocab.py",
@@ -298,6 +300,13 @@ run_checked([
     "utils/export_actor_tensorrt.py",
     "utils/actor_model.py",
 ], "Compile check")
+
+heatmap_source = Path("modules/heatmap_module.py").read_text()
+if "safe_actions = actions.clamp(0, best_slot.shape[-1] - 1)" not in heatmap_source:
+    raise RuntimeError(
+        "Pinned commit is missing the validation diagnostic padded-label guard. "
+        "Commit/push the hotfix and update PINNED_SHA before starting this run."
+    )
 
 def latest_metrics_path(run_dir):
     paths = sorted(Path(run_dir).glob("version_*/metrics.csv"), key=lambda p: p.stat().st_mtime)
@@ -399,7 +408,7 @@ def run_training_with_epoch_summaries(cmd, run_name, epoch_dir, poll_secs=20):
     return str(run_dir)
 
 TS = datetime.now().strftime("%Y%m%d_%H%M%S")
-RUN_NAME = f"actor_object_query_v1_deploybalanced_videomae_epoch51_{TS}"
+RUN_NAME = f"actor_object_query_v1_deploybalanced_videomae_epoch90_{TS}"
 EPOCH_DIR = str(Path(DATA_DIR) / "checkpoints" / RUN_NAME / "epoch_checkpoints")
 
 cmd = [
@@ -439,12 +448,12 @@ cmd = [
     "--num_object_classes", "19",
     "--actor_object_slot_hidden_dim", "512",
     "--actor_object_slot_attn_dim", "256",
-    "--actor_object_slot_prior_compatible", "0.75",
-    "--actor_object_slot_prior_incompatible", "-0.75",
+    "--actor_object_slot_prior_compatible", "0.90",
+    "--actor_object_slot_prior_incompatible", "-1.00",
     "--actor_object_slot_unknown_init_bias", "-0.10",
     "--actor_object_slot_unknown_mismatch_penalty", "1.0",
     "--actor_object_slot_quality_init_bias", "-3.0",
-    "--actor_object_slot_relation_logit_scale_init", "-2.0",
+    "--actor_object_slot_relation_logit_scale_init", "-1.50",
 
     "--object_detector_cache", OBJECT_DETECTOR_CACHE,
     "--object_camera_allowlist", "tv_monitor=c05,c06",
@@ -477,9 +486,9 @@ cmd = [
 
     "--keep_rate", "0.6",
     "--keep_rate_merge", "0.3",
-    "--merge_type", "tome",
+    "--merge_type", "sim",
     "--merge_mode", "0",
-    "--sim_metric", "0",
+    "--sim_metric", "1",
     "--topk_type", "1",
 
     "--mixup", "0",
@@ -500,8 +509,8 @@ cmd = [
     "--object_slot_ignore_missing_object", "0",
     "--object_slot_quality_loss_weight", "0.5",
     "--object_action_confuser_loss_weight", "0.5",
-    "--object_action_confuser_margin", "0.75",
-    "--objectless_object_action_suppression_loss_weight", "0.3",
+    "--object_action_confuser_margin", "1.0",
+    "--objectless_object_action_suppression_loss_weight", "0.35",
 
     "--toyota_pose_guided_sampling", "1",
     "--toyota_min_pose_frames", "1",
@@ -514,12 +523,12 @@ cmd = [
     "--batch_size", "32",
     "--accum_grad_batches", "2",
 
-    "--max_epochs", "51",
-    "--t_max_scheduler", "51",
+    "--max_epochs", "90",
+    "--t_max_scheduler", "90",
 
-    "--lr", "3e-5",
-    "--lr_head", "3e-4",
-    "--lr_head_hm", "4e-4",
+    "--lr", "5e-5",
+    "--lr_head", "5e-4",
+    "--lr_head_hm", "5e-4",
 
     "--weight_decay", "0.04",
     "--weight_decay_head", "0.01",
@@ -591,6 +600,12 @@ required_flags = {
     "--objectless_object_action_suppression_loss_weight",
     "--objectless_hard_negative_sampling",
     "--objectless_hard_negative_min_sampled_object_frames",
+    "--merge_type",
+    "--sim_metric",
+    "--t_max_scheduler",
+    "--lr",
+    "--lr_head",
+    "--lr_head_hm",
     "--actor_object_slot_hidden_dim",
     "--actor_object_slot_attn_dim",
     "--actor_object_slot_prior_compatible",
@@ -612,23 +627,29 @@ checks = {
     "--actor_object_slot_head": "1",
     "--checkpoint_monitor": "val_deploy_score",
     "--checkpoint_mode": "max",
-    "--max_epochs": "51",
+    "--max_epochs": "90",
+    "--t_max_scheduler": "90",
+    "--merge_type": "sim",
+    "--sim_metric": "1",
+    "--lr": "5e-5",
+    "--lr_head": "5e-4",
+    "--lr_head_hm": "5e-4",
     "--poguiseplus_normalized_heatmap_loss": "1",
     "--motion_aux_loss_weight": "0.25",
     "--object_slot_target_loss_weight": "1.0",
     "--object_slot_ignore_missing_object": "0",
     "--object_slot_quality_loss_weight": "0.5",
     "--object_action_confuser_loss_weight": "0.5",
-    "--object_action_confuser_margin": "0.75",
-    "--objectless_object_action_suppression_loss_weight": "0.3",
+    "--object_action_confuser_margin": "1.0",
+    "--objectless_object_action_suppression_loss_weight": "0.35",
     "--actor_object_slot_hidden_dim": "512",
     "--actor_object_slot_attn_dim": "256",
-    "--actor_object_slot_prior_compatible": "0.75",
-    "--actor_object_slot_prior_incompatible": "-0.75",
+    "--actor_object_slot_prior_compatible": "0.90",
+    "--actor_object_slot_prior_incompatible": "-1.00",
     "--actor_object_slot_unknown_init_bias": "-0.10",
     "--actor_object_slot_unknown_mismatch_penalty": "1.0",
     "--actor_object_slot_quality_init_bias": "-3.0",
-    "--actor_object_slot_relation_logit_scale_init": "-2.0",
+    "--actor_object_slot_relation_logit_scale_init": "-1.50",
 }
 for flag, expected in checks.items():
     actual = cmd[cmd.index(flag) + 1]

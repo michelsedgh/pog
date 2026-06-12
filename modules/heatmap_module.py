@@ -1159,13 +1159,17 @@ class HeatmapModule(pl.LightningModule):
         if not valid.any():
             return
         actions = actions.to(device=device, dtype=torch.long)
+        valid = valid & (actions >= 0) & (actions < best_slot.shape[-1])
+        if not valid.any():
+            return
+        safe_actions = actions.clamp(0, best_slot.shape[-1] - 1)
         object_classes = target["object_classes"].to(device=device, dtype=torch.long)
         object_valid = target["object_valid"].to(device=device, dtype=torch.bool)
         full_preds = full_preds.to(device=device)
 
         true_best_slot = best_slot.gather(
             dim=-1,
-            index=actions.unsqueeze(-1),
+            index=safe_actions.unsqueeze(-1),
         ).squeeze(-1)
         object_slot = true_best_slot >= 2
         object_slot_index = (true_best_slot - 2).clamp_min(0)
