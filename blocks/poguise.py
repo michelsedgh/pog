@@ -806,9 +806,9 @@ class Block(nn.Module):
                 diag_mask = torch.eye(
                     scores.shape[-1],
                     device=scores.device,
-                    dtype=scores.dtype,
+                    dtype=torch.bool,
                 ).unsqueeze(0)
-                scores = scores * (1.0 - diag_mask)
+                scores = scores.masked_fill(diag_mask, -1.0e4)
                 node_max, node_idx = scores.max(dim=-1)
                 edge_idx = node_max.argsort(dim=-1, descending=True)[..., None]
                 src_idx = edge_idx[..., :r, :]  # Merged Tokens

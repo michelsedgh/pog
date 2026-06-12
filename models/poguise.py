@@ -373,6 +373,12 @@ class POGUISE(pl.LightningModule):
                             0.0,
                         )
                     ),
+                    objectful_presence_init_bias=float(
+                        self.hparams.get(
+                            "actor_object_slot_objectful_presence_init_bias",
+                            2.0,
+                        )
+                    ),
                 )
             else:
                 self.actor_object_slot_head = None
@@ -690,6 +696,22 @@ class POGUISE(pl.LightningModule):
                 visual_tokens = None
                 if x_heatmap_feat is not None:
                     visual_tokens = x_heatmap_feat.flatten(2).transpose(1, 2)
+                if (
+                    int(
+                        self.hparams.get(
+                            "actor_object_slot_num_visual_slots",
+                            0,
+                        )
+                    )
+                    > 0
+                    and visual_tokens is None
+                ):
+                    raise RuntimeError(
+                        "actor_object_slot_num_visual_slots > 0 requires "
+                        "PO-GUISE heatmap feature tokens. Enable actor "
+                        "interaction/heatmap features so the latent visual "
+                        "slot is grounded in video evidence."
+                    )
                 slot_output = self.actor_object_slot_head(
                     actor_tokens=x_actor,
                     actor_boxes=boxes,
@@ -864,6 +886,11 @@ class POGUISE(pl.LightningModule):
             "--actor_object_slot_objectful_presence_beta",
             type=float,
             default=0.0,
+        )
+        parser.add_argument(
+            "--actor_object_slot_objectful_presence_init_bias",
+            type=float,
+            default=2.0,
         )
         parser.add_argument("--trt_safe_attention", type=int, default=0)
         parser.add_argument("--interaction_unfreeze_last_blocks", type=int, default=0)

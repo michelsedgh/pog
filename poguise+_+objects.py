@@ -455,7 +455,8 @@ cmd = [
     "--actor_object_slot_max_relation_scale", "1.5",
     "--actor_object_slot_num_visual_slots", "1",
     "--actor_object_slot_visual_bias", "0.20",
-    "--actor_object_slot_objectful_presence_beta", "0.75",
+    "--actor_object_slot_objectful_presence_beta", "1.0",
+    "--actor_object_slot_objectful_presence_init_bias", "0.0",
 
     "--object_detector_cache", OBJECT_DETECTOR_CACHE,
     "--object_camera_allowlist", "tv_monitor=c05,c06",
@@ -525,7 +526,7 @@ cmd = [
     "--missing_object_confuser_weight", "1.0",
     "--missing_object_confuser_margin", "1.0",
     "--missing_object_visual_slot_loss_weight", "0.5",
-    "--objectful_presence_loss_weight", "0.3",
+    "--objectful_presence_loss_weight", "0.4",
 
     "--toyota_pose_guided_sampling", "1",
     "--toyota_min_pose_frames", "1",
@@ -650,6 +651,7 @@ required_flags = {
     "--actor_object_slot_num_visual_slots",
     "--actor_object_slot_visual_bias",
     "--actor_object_slot_objectful_presence_beta",
+    "--actor_object_slot_objectful_presence_init_bias",
     "--checkpoint_monitor",
 }
 missing = sorted(flag for flag in required_flags if flag not in cmd)
@@ -691,7 +693,7 @@ checks = {
     "--missing_object_confuser_weight": "1.0",
     "--missing_object_confuser_margin": "1.0",
     "--missing_object_visual_slot_loss_weight": "0.5",
-    "--objectful_presence_loss_weight": "0.3",
+    "--objectful_presence_loss_weight": "0.4",
     "--object_token_box_jitter": "0.06",
     "--object_token_confidence_noise": "0.05",
     "--actor_object_slot_hidden_dim": "512",
@@ -707,7 +709,8 @@ checks = {
     "--actor_object_slot_max_relation_scale": "1.5",
     "--actor_object_slot_num_visual_slots": "1",
     "--actor_object_slot_visual_bias": "0.20",
-    "--actor_object_slot_objectful_presence_beta": "0.75",
+    "--actor_object_slot_objectful_presence_beta": "1.0",
+    "--actor_object_slot_objectful_presence_init_bias": "0.0",
 }
 for flag, expected in checks.items():
     actual = cmd[cmd.index(flag) + 1]

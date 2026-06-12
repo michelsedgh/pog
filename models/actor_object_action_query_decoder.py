@@ -118,10 +118,11 @@ class LatentVisualInteractionSlotBuilder(nn.Module):
         ).view(1, 1, self.num_slots, dim)
 
         if visual_tokens is None:
-            slots = self.out_norm(query_seed)
-            quality_logits = self.quality_head(slots).squeeze(-1)
-            empty_attn = actor_tokens.new_zeros(batch, actors, self.num_slots, 0)
-            return slots, quality_logits, empty_attn
+            raise RuntimeError(
+                "Latent visual interaction slots require visual_tokens. "
+                "Disable actor_object_slot_num_visual_slots or enable the "
+                "PO-GUISE heatmap feature path."
+            )
 
         if visual_tokens.ndim == 4:
             visual_tokens = visual_tokens.flatten(2).transpose(1, 2)
@@ -176,6 +177,7 @@ class ActorObjectActionQueryDecoder(nn.Module):
         relation_logit_bound: float = 2.0,
         max_relation_logit_scale: float = 1.5,
         objectful_presence_beta: float = 0.0,
+        objectful_presence_init_bias: float = 2.0,
         neg_inf: float = -1.0e4,
     ) -> None:
         super().__init__()
@@ -197,6 +199,7 @@ class ActorObjectActionQueryDecoder(nn.Module):
         self.relation_logit_bound = float(relation_logit_bound)
         self.max_relation_logit_scale = float(max_relation_logit_scale)
         self.objectful_presence_beta = float(objectful_presence_beta)
+        self.objectful_presence_init_bias = float(objectful_presence_init_bias)
         self.neg_inf = float(neg_inf)
         if self.prior_quality_floor < 0:
             raise ValueError("prior_quality_floor must be >= 0")
@@ -261,7 +264,10 @@ class ActorObjectActionQueryDecoder(nn.Module):
         nn.init.zeros_(self.quality_head.weight)
         nn.init.constant_(self.quality_head.bias, self.quality_init_bias)
         nn.init.zeros_(self.objectful_presence_head.weight)
-        nn.init.constant_(self.objectful_presence_head.bias, 2.0)
+        nn.init.constant_(
+            self.objectful_presence_head.bias,
+            self.objectful_presence_init_bias,
+        )
 
     @staticmethod
     def _box_features(boxes: Tensor, confs: Tensor) -> Tensor:
