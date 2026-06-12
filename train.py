@@ -491,6 +491,14 @@ def build_parser():
         type=float,
         default=0.0,
     )
+    parser.add_argument("--teacher_object_drop_prob", type=float, default=0.0)
+    parser.add_argument("--object_class_dropout_prob", type=float, default=0.0)
+    parser.add_argument("--object_class_wrong_prob", type=float, default=0.0)
+    parser.add_argument("--missing_object_ce_weight", type=float, default=0.0)
+    parser.add_argument("--missing_object_confuser_weight", type=float, default=0.0)
+    parser.add_argument("--missing_object_confuser_margin", type=float, default=1.0)
+    parser.add_argument("--missing_object_visual_slot_loss_weight", type=float, default=0.0)
+    parser.add_argument("--objectful_presence_loss_weight", type=float, default=0.0)
     parser.add_argument("--deepspeed_optim", type=int, default=0)
     parser.add_argument("--kp_only", type=int, default=0)
 

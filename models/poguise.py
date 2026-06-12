@@ -185,6 +185,11 @@ class POGUISE(pl.LightningModule):
                     "interaction_warmup_freeze_actor_path requires freeze_backbone"
                 )
         self.use_register_tokens = bool(self.hparams.get("use_register_tokens", 0))
+        self.actor_object_num_visual_slots = int(
+            self.hparams.get("actor_object_slot_num_visual_slots", 0) or 0
+        )
+        if self.actor_object_num_visual_slots < 0:
+            raise ValueError("actor_object_slot_num_visual_slots must be >= 0")
         self._create_network()
         # freeze backbone if specified
         if self.hparams.freeze_backbone:
@@ -197,6 +202,10 @@ class POGUISE(pl.LightningModule):
             else 0
         )
         if self.hparams.pretrained == "small":
+            return_heatmap_features = bool(
+                self.actor_object_slot_head_enabled
+                and self.actor_object_num_visual_slots > 0
+            )
             self.net = vit_small_patch16_224(
                 drop_rate=self.hparams.drop_rate,
                 attn_drop_rate=self.hparams.attn_drop_rate,
@@ -223,10 +232,14 @@ class POGUISE(pl.LightningModule):
                     "actor_bbox_prior_expand", 1.75
                 ),
                 actor_interaction_heatmaps=self.actor_interaction_heatmaps,
-                return_heatmap_features=False,
+                return_heatmap_features=return_heatmap_features,
                 trt_safe_attention=self.hparams.get("trt_safe_attention", 0),
             )
         else:
+            return_heatmap_features = bool(
+                self.actor_object_slot_head_enabled
+                and self.actor_object_num_visual_slots > 0
+            )
             self.net = vit_base_patch16_224(
                 drop_rate=self.hparams.drop_rate,
                 attn_drop_rate=self.hparams.attn_drop_rate,
@@ -253,7 +266,7 @@ class POGUISE(pl.LightningModule):
                     "actor_bbox_prior_expand", 1.75
                 ),
                 actor_interaction_heatmaps=self.actor_interaction_heatmaps,
-                return_heatmap_features=False,
+                return_heatmap_features=return_heatmap_features,
                 trt_safe_attention=self.hparams.get("trt_safe_attention", 0),
             )
         if self.hparams.pretrained == "DEFAULT":
@@ -336,10 +349,28 @@ class POGUISE(pl.LightningModule):
                             0.20,
                         )
                     ),
+                    num_visual_slots=int(
+                        self.hparams.get("actor_object_slot_num_visual_slots", 0)
+                    ),
+                    visual_slot_bias=float(
+                        self.hparams.get("actor_object_slot_visual_bias", 0.0)
+                    ),
                     relation_logit_scale_init=float(
                         self.hparams.get(
                             "actor_object_slot_relation_logit_scale_init",
                             -2.0,
+                        )
+                    ),
+                    relation_logit_bound=float(
+                        self.hparams.get("actor_object_slot_relation_logit_bound", 2.0)
+                    ),
+                    max_relation_logit_scale=float(
+                        self.hparams.get("actor_object_slot_max_relation_scale", 1.5)
+                    ),
+                    objectful_presence_beta=float(
+                        self.hparams.get(
+                            "actor_object_slot_objectful_presence_beta",
+                            0.0,
                         )
                     ),
                 )
@@ -362,7 +393,20 @@ class POGUISE(pl.LightningModule):
         return task_type, action_taxonomy
 
     def _actor_object_slot_spec(self):
-        if self.hparams.get("dataset", None) != "toyotasm":
+        dataset = self.hparams.get("dataset", None)
+        dataset_name = (
+            dataset
+            if isinstance(dataset, str)
+            else getattr(dataset, "__name__", str(dataset))
+        )
+        dataset_module = "" if isinstance(dataset, str) else getattr(dataset, "__module__", "")
+        is_toyotasm = (
+            dataset_name == "toyotasm"
+            or dataset_name == "ToyotaSMDataset"
+            or dataset_module == "datasets.toyotasm"
+            or self.hparams.get("dataset_artifact", None) == "toyotasm"
+        )
+        if not is_toyotasm:
             raise ValueError("actor_object_slot_head currently requires toyotasm")
         task_type, action_taxonomy = self._toyota_action_settings()
         action_to_index = toyota_action_to_index(task_type, action_taxonomy)
@@ -575,8 +619,9 @@ class POGUISE(pl.LightningModule):
                     boxes=boxes,
                     valid=valid,
                 )
+                x_heatmap_feat = None
                 if len(net_data) == 4:
-                    _, x_actor, x_heatmap, _ = net_data
+                    _, x_actor, x_heatmap, x_heatmap_feat = net_data
                 else:
                     _, x_actor, x_heatmap = net_data
             else:
@@ -587,6 +632,7 @@ class POGUISE(pl.LightningModule):
                 )
                 _, x_actor = data[:2]
                 x_heatmap = 0
+                x_heatmap_feat = None
             self.last_actor_object_slot_logit_delta = None
             self.last_actor_object_slot_delta = None
             self.last_actor_object_slot_posterior = None
@@ -595,6 +641,10 @@ class POGUISE(pl.LightningModule):
             self.last_actor_object_mismatch = None
             self.last_actor_object_unknown_delta = None
             self.last_actor_object_object_slot_delta = None
+            self.last_actor_object_visual_slot_delta = None
+            self.last_actor_object_visual_quality = None
+            self.last_actor_objectful_presence_logits = None
+            self.last_actor_objectful_presence = None
             self.last_actor_object_slot_relation_scale = None
             self.last_actor_motion_logits = None
             if self.actor_motion_head is not None:
@@ -637,6 +687,9 @@ class POGUISE(pl.LightningModule):
                         dtype=x_actor.dtype,
                     )
                 object_heatmap_scores = object_heatmap_scores.detach()
+                visual_tokens = None
+                if x_heatmap_feat is not None:
+                    visual_tokens = x_heatmap_feat.flatten(2).transpose(1, 2)
                 slot_output = self.actor_object_slot_head(
                     actor_tokens=x_actor,
                     actor_boxes=boxes,
@@ -646,6 +699,7 @@ class POGUISE(pl.LightningModule):
                     object_confs=object_confs,
                     object_valid=object_valid,
                     object_heatmap_scores=object_heatmap_scores,
+                    visual_tokens=visual_tokens,
                     motion_logits=motion_action_logits,
                 )
                 action_logits = slot_output["logits"]
@@ -662,9 +716,21 @@ class POGUISE(pl.LightningModule):
                 ]
                 self.last_actor_object_mismatch = slot_output["mismatch"]
                 self.last_actor_object_unknown_delta = slot_output["unknown_delta"]
+                self.last_actor_object_visual_slot_delta = slot_output[
+                    "visual_slot_delta"
+                ]
                 self.last_actor_object_object_slot_delta = slot_output[
                     "object_slot_delta"
                 ]
+                self.last_actor_object_visual_quality = slot_output.get(
+                    "visual_quality"
+                )
+                self.last_actor_objectful_presence_logits = slot_output.get(
+                    "objectful_presence_logits"
+                )
+                self.last_actor_objectful_presence = slot_output.get(
+                    "objectful_presence"
+                )
                 self.last_actor_object_slot_relation_scale = slot_output[
                     "relation_logit_scale"
                 ]
@@ -770,9 +836,34 @@ class POGUISE(pl.LightningModule):
             default=0.20,
         )
         parser.add_argument(
+            "--actor_object_slot_num_visual_slots",
+            type=int,
+            default=0,
+        )
+        parser.add_argument(
+            "--actor_object_slot_visual_bias",
+            type=float,
+            default=0.0,
+        )
+        parser.add_argument(
             "--actor_object_slot_relation_logit_scale_init",
             type=float,
             default=-2.0,
+        )
+        parser.add_argument(
+            "--actor_object_slot_relation_logit_bound",
+            type=float,
+            default=2.0,
+        )
+        parser.add_argument(
+            "--actor_object_slot_max_relation_scale",
+            type=float,
+            default=1.5,
+        )
+        parser.add_argument(
+            "--actor_object_slot_objectful_presence_beta",
+            type=float,
+            default=0.0,
         )
         parser.add_argument("--trt_safe_attention", type=int, default=0)
         parser.add_argument("--interaction_unfreeze_last_blocks", type=int, default=0)

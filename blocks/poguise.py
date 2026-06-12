@@ -16,6 +16,50 @@ from timm.models.registry import register_model
 import math
 
 
+def _adaptive_avg_pool_weights(input_size, output_size):
+    weights = torch.zeros(output_size, input_size, dtype=torch.float32)
+    for out_idx in range(output_size):
+        start = math.floor(out_idx * input_size / output_size)
+        end = math.ceil((out_idx + 1) * input_size / output_size)
+        weights[out_idx, start:end] = 1.0 / max(end - start, 1)
+    return weights
+
+
+class FixedAdaptiveAvgPool2d(nn.Module):
+    def __init__(self, input_size, output_size):
+        super().__init__()
+        input_h, input_w = to_2tuple(input_size)
+        output_h, output_w = to_2tuple(output_size)
+        self.input_h = int(input_h)
+        self.input_w = int(input_w)
+        self.output_h = int(output_h)
+        self.output_w = int(output_w)
+        self.register_buffer(
+            "height_weight",
+            _adaptive_avg_pool_weights(self.input_h, self.output_h),
+            persistent=False,
+        )
+        self.register_buffer(
+            "width_weight",
+            _adaptive_avg_pool_weights(self.input_w, self.output_w),
+            persistent=False,
+        )
+
+    def forward(self, x):
+        batch, channels, height, width = x.shape
+        if height != self.input_h or width != self.input_w:
+            raise ValueError(
+                "FixedAdaptiveAvgPool2d expected input "
+                f"{self.input_h}x{self.input_w}, got {height}x{width}"
+            )
+        height_weight = self.height_weight.to(device=x.device, dtype=x.dtype)
+        width_weight = self.width_weight.to(device=x.device, dtype=x.dtype)
+        y = x.reshape(batch * channels, height, width)
+        y = torch.matmul(height_weight, y)
+        y = torch.matmul(y, width_weight.transpose(0, 1))
+        return y.reshape(batch, channels, self.output_h, self.output_w)
+
+
 class HeatmapHead(nn.Module):
     """
         HeatmapHead(
@@ -44,7 +88,7 @@ class HeatmapHead(nn.Module):
     ):
         super(HeatmapHead, self).__init__()
         if in_size != 14:
-            deconv_layers = [nn.AdaptiveAvgPool2d((14, 14))]
+            deconv_layers = [FixedAdaptiveAvgPool2d(in_size, (14, 14))]
         else:
             deconv_layers = []
         for i in range(len(deconv_out_channels)):
@@ -759,10 +803,12 @@ class Block(nn.Module):
 
             if self.merge_type == "sim":
                 scores = sim_matrixv2_batch(metric, metric)
-                # make diagonal 0
-                scores = scores - torch.diag_embed(
-                    torch.diagonal(scores, dim1=-2, dim2=-1)
-                )
+                diag_mask = torch.eye(
+                    scores.shape[-1],
+                    device=scores.device,
+                    dtype=scores.dtype,
+                ).unsqueeze(0)
+                scores = scores * (1.0 - diag_mask)
                 node_max, node_idx = scores.max(dim=-1)
                 edge_idx = node_max.argsort(dim=-1, descending=True)[..., None]
                 src_idx = edge_idx[..., :r, :]  # Merged Tokens

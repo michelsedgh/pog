@@ -166,6 +166,46 @@ class HeatmapModule(pl.LightningModule):
         )
         if self.object_slot_unknown_exact_loss_weight < 0:
             raise ValueError("object_slot_unknown_exact_loss_weight must be >= 0")
+        self.teacher_object_drop_prob = float(
+            hparams.get("teacher_object_drop_prob", 0.0)
+        )
+        if not 0.0 <= self.teacher_object_drop_prob <= 1.0:
+            raise ValueError("teacher_object_drop_prob must be in [0, 1]")
+        self.object_class_dropout_prob = float(
+            hparams.get("object_class_dropout_prob", 0.0)
+        )
+        if not 0.0 <= self.object_class_dropout_prob <= 1.0:
+            raise ValueError("object_class_dropout_prob must be in [0, 1]")
+        self.object_class_wrong_prob = float(
+            hparams.get("object_class_wrong_prob", 0.0)
+        )
+        if not 0.0 <= self.object_class_wrong_prob <= 1.0:
+            raise ValueError("object_class_wrong_prob must be in [0, 1]")
+        self.missing_object_ce_weight = float(
+            hparams.get("missing_object_ce_weight", 0.0)
+        )
+        if self.missing_object_ce_weight < 0:
+            raise ValueError("missing_object_ce_weight must be >= 0")
+        self.missing_object_confuser_weight = float(
+            hparams.get("missing_object_confuser_weight", 0.0)
+        )
+        if self.missing_object_confuser_weight < 0:
+            raise ValueError("missing_object_confuser_weight must be >= 0")
+        self.missing_object_confuser_margin = float(
+            hparams.get("missing_object_confuser_margin", 1.0)
+        )
+        if self.missing_object_confuser_margin < 0:
+            raise ValueError("missing_object_confuser_margin must be >= 0")
+        self.missing_object_visual_slot_loss_weight = float(
+            hparams.get("missing_object_visual_slot_loss_weight", 0.0)
+        )
+        if self.missing_object_visual_slot_loss_weight < 0:
+            raise ValueError("missing_object_visual_slot_loss_weight must be >= 0")
+        self.objectful_presence_loss_weight = float(
+            hparams.get("objectful_presence_loss_weight", 0.0)
+        )
+        if self.objectful_presence_loss_weight < 0:
+            raise ValueError("objectful_presence_loss_weight must be >= 0")
         self.num_classes = hparams.num_classes
         self.dataset_name = hparams.dataset_artifact
         self.is_toyota = str(self.dataset_name).lower() == "toyotasm"
@@ -925,6 +965,66 @@ class HeatmapModule(pl.LightningModule):
             ),
         }
 
+    def _detected_slot_offset(self):
+        slot_head = getattr(self.model, "actor_object_slot_head", None)
+        if slot_head is None:
+            return 2
+        return int(getattr(slot_head, "detected_slot_offset", 2))
+
+    def _num_visual_slots(self):
+        return max(0, self._detected_slot_offset() - 2)
+
+    def _object_class_dropout_inputs(self, object_inputs, stage):
+        if stage != "train" or not object_inputs:
+            return object_inputs
+        class_drop = float(self.object_class_dropout_prob)
+        class_wrong = float(self.object_class_wrong_prob)
+        if class_drop <= 0.0 and class_wrong <= 0.0:
+            return object_inputs
+
+        output = {name: value.clone() for name, value in object_inputs.items()}
+        object_valid = output["object_valid"]
+        object_classes = output["object_classes"]
+        if not object_valid.any():
+            return output
+
+        none_id = int(self.model.hparams.get("num_object_classes", NUM_OBJECT_CLASSES))
+        if class_drop > 0.0:
+            drop_mask = (
+                object_valid
+                & (torch.rand_like(output["object_confs"]) < class_drop)
+            )
+            object_classes[drop_mask] = none_id
+            self._log_scalar(
+                "train_object_class_dropout_rate",
+                drop_mask.float().mean(),
+                int(drop_mask.numel()),
+            )
+        if class_wrong > 0.0:
+            wrong_mask = (
+                object_valid
+                & (object_classes != none_id)
+                & (torch.rand_like(output["object_confs"]) < class_wrong)
+            )
+            if wrong_mask.any():
+                num_classes = int(
+                    self.model.hparams.get("num_object_classes", NUM_OBJECT_CLASSES)
+                )
+                replacement = torch.randint(
+                    low=0,
+                    high=num_classes,
+                    size=object_classes.shape,
+                    device=object_classes.device,
+                    dtype=object_classes.dtype,
+                )
+                object_classes[wrong_mask] = replacement[wrong_mask]
+            self._log_scalar(
+                "train_object_class_wrong_rate",
+                wrong_mask.float().mean(),
+                int(wrong_mask.numel()),
+            )
+        return output
+
     def _exact_teacher_object_info(self, actions, valid, target, device):
         required = (
             "object_classes",
@@ -1038,7 +1138,12 @@ class HeatmapModule(pl.LightningModule):
             interaction_object_index_valid=target.get(
                 "interaction_object_index_valid"
             ),
+            interaction_heatmap_valid=target.get("interaction_heatmap_valid"),
             ignore_missing_object=self.object_slot_ignore_missing_object,
+            num_visual_slots=self._num_visual_slots(),
+            missing_object_target=(
+                "visual" if self._num_visual_slots() > 0 else "unknown"
+            ),
         )
         self.log(
             f"{stage}_loss_object_slot_target",
@@ -1275,6 +1380,59 @@ class HeatmapModule(pl.LightningModule):
             )
         return loss
 
+    def _objectful_presence_loss(self, stage, actions, valid):
+        if (
+            not self.actor_object_slot_head
+            or self.objectful_presence_loss_weight <= 0
+            or not self.is_toyota
+        ):
+            return None
+        logits = getattr(self.model, "last_actor_objectful_presence_logits", None)
+        if logits is None:
+            return None
+        device = logits.device
+        valid = valid.to(device=device, dtype=torch.bool)
+        if not valid.any():
+            return None
+        actions = actions.to(device=device, dtype=torch.long)
+        objectless = self._labels_in_indices(actions, self.objectless_action_indices)
+        targets = (~objectless).to(device=device, dtype=logits.dtype)
+        loss = F.binary_cross_entropy_with_logits(
+            logits[valid].float(),
+            targets[valid].float(),
+        )
+        self.log(
+            f"{stage}_loss_objectful_presence",
+            loss,
+            on_step=stage == "train",
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+        )
+        with torch.no_grad():
+            probs = torch.sigmoid(logits.detach())
+            pred = probs > 0.5
+            self._log_scalar(
+                f"{stage}_objectful_presence_acc",
+                (pred[valid] == targets[valid].bool()).float().mean(),
+                int(valid.sum().item()),
+            )
+            if objectless[valid].any():
+                self._log_scalar(
+                    f"{stage}_objectful_presence_objectless_mean",
+                    probs[valid & objectless].mean(),
+                    int((valid & objectless).sum().item()),
+                )
+            objectful_mask = valid & ~objectless
+            if objectful_mask.any():
+                self._log_scalar(
+                    f"{stage}_objectful_presence_objectful_mean",
+                    probs[objectful_mask].mean(),
+                    int(objectful_mask.sum().item()),
+                )
+        return loss
+
     def _teacher_object_removed_inputs(
         self,
         object_inputs,
@@ -1298,6 +1456,178 @@ class HeatmapModule(pl.LightningModule):
         output["object_confs"][batch_idx, object_slots] = 0
         output["object_classes"][batch_idx, object_slots] = none_id
         return output
+
+    def _teacher_object_dropout_losses(
+        self,
+        imgs,
+        boxes,
+        valid,
+        actions,
+        target,
+        object_inputs,
+        loss_fn,
+    ):
+        if (
+            not self.actor_object_slot_head
+            or self.teacher_object_drop_prob <= 0.0
+            or not self.is_toyota
+        ):
+            return None, None
+        if (
+            self.missing_object_ce_weight <= 0.0
+            and self.missing_object_confuser_weight <= 0.0
+            and self.missing_object_visual_slot_loss_weight <= 0.0
+        ):
+            return None, None
+
+        device = imgs.device
+        info = self._exact_teacher_object_info(actions, valid, target, device)
+        if info is None:
+            return None, None
+        exact_compatible = (
+            info["valid"]
+            & info["known_action"]
+            & info["compatible_1based"]
+        )
+        if not exact_compatible.any():
+            return None, None
+
+        drop_mask = exact_compatible & (
+            torch.rand(exact_compatible.shape, device=device)
+            < float(self.teacher_object_drop_prob)
+        )
+        if not drop_mask.any():
+            return None, None
+
+        selected_indices = info["selected_indices"]
+        dropped_inputs = self._teacher_object_removed_inputs(
+            object_inputs,
+            selected_indices,
+            drop_mask,
+        )
+        data = self.model(
+            imgs,
+            boxes=boxes,
+            valid=valid,
+            action_labels=actions,
+            **dropped_inputs,
+        )
+        dropped_preds = self._unpack_model_data(data)[0]
+        true_labels = actions.to(device=device, dtype=torch.long)[drop_mask]
+        dropped_valid_preds = dropped_preds[drop_mask]
+
+        main_terms = []
+        aux_terms = []
+        if self.missing_object_ce_weight > 0.0:
+            ce_loss = loss_fn(dropped_valid_preds, true_labels)
+            main_terms.append(ce_loss * self.missing_object_ce_weight)
+            self.log(
+                "train_loss_missing_object_ce",
+                ce_loss,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+
+        if self.missing_object_confuser_weight > 0.0:
+            violations = []
+            sample_count = 0
+            dropped_actions = actions.to(device=device, dtype=torch.long)
+            for action_idx, confuser_indices in self.action_confuser_indices.items():
+                confuser_indices = confuser_indices.to(device=device)
+                mask = drop_mask & (dropped_actions == int(action_idx))
+                if not mask.any():
+                    continue
+                true_logits = dropped_preds[..., int(action_idx)][mask]
+                confuser_logits = dropped_preds[mask][:, confuser_indices]
+                margin_error = (
+                    confuser_logits
+                    + float(self.missing_object_confuser_margin)
+                    - true_logits.unsqueeze(1)
+                )
+                violations.append(F.relu(margin_error).reshape(-1))
+                sample_count += int(mask.sum().item())
+            if violations:
+                violation_values = torch.cat(violations, dim=0)
+                confuser_loss = violation_values.mean()
+                main_terms.append(confuser_loss * self.missing_object_confuser_weight)
+                self.log(
+                    "train_loss_missing_object_confuser",
+                    confuser_loss,
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                    sync_dist=True,
+                )
+                self._log_scalar(
+                    "train_missing_object_confuser_violation_rate",
+                    (violation_values.detach() > 0).float().mean(),
+                    max(sample_count, 1),
+                )
+
+        slot_delta = getattr(self.model, "last_actor_object_slot_delta", None)
+        num_visual_slots = self._num_visual_slots()
+        if (
+            slot_delta is not None
+            and num_visual_slots > 0
+            and self.missing_object_visual_slot_loss_weight > 0.0
+        ):
+            rows = torch.nonzero(drop_mask, as_tuple=False)
+            true_slot_logits = slot_delta[
+                rows[:, 0],
+                rows[:, 1],
+                true_labels,
+            ].float()
+            slot_prob = true_slot_logits.softmax(dim=-1)
+            visual_prob = slot_prob[:, 2 : 2 + num_visual_slots].sum(dim=-1)
+            visual_loss = -torch.log(visual_prob.clamp_min(1.0e-6)).mean()
+            aux_terms.append(visual_loss * self.missing_object_visual_slot_loss_weight)
+            self.log(
+                "train_loss_missing_object_visual_slot",
+                visual_loss,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+            best_slot = slot_prob.argmax(dim=-1)
+            self._log_scalar(
+                "train_missing_object_visual_slot_rate",
+                ((best_slot >= 2) & (best_slot < 2 + num_visual_slots)).float().mean(),
+                int(best_slot.numel()),
+            )
+            self._log_scalar(
+                "train_missing_object_unknown_slot_rate",
+                (best_slot == 1).float().mean(),
+                int(best_slot.numel()),
+            )
+
+        with torch.no_grad():
+            pred_labels = dropped_valid_preds.argmax(dim=-1)
+            self._log_scalar(
+                "train_missing_object_dropout_acc",
+                (pred_labels == true_labels).float().mean(),
+                int(true_labels.numel()),
+            )
+            watch_idx = self._action_index("WatchTV")
+            if watch_idx is not None:
+                true_logits = dropped_valid_preds.gather(
+                    1,
+                    true_labels.unsqueeze(1),
+                ).squeeze(1)
+                watch_margin = true_logits - dropped_valid_preds[:, int(watch_idx)]
+                self._log_scalar(
+                    "train_missing_object_true_minus_WatchTV_margin",
+                    watch_margin.mean(),
+                    int(watch_margin.numel()),
+                )
+        main_loss = torch.stack(main_terms).sum() if main_terms else None
+        aux_loss = torch.stack(aux_terms).sum() if aux_terms else None
+        return main_loss, aux_loss
 
     def _log_object_counterfactual_eval(
         self,
@@ -1410,13 +1740,16 @@ class HeatmapModule(pl.LightningModule):
         object_classes = target["object_classes"].to(device=device, dtype=torch.long)
         object_valid = target["object_valid"].to(device=device, dtype=torch.bool)
         full_preds = full_preds.to(device=device)
+        detected_slot_offset = self._detected_slot_offset()
+        num_visual_slots = self._num_visual_slots()
 
         true_best_slot = best_slot.gather(
             dim=-1,
             index=safe_actions.unsqueeze(-1),
         ).squeeze(-1)
-        object_slot = true_best_slot >= 2
-        object_slot_index = (true_best_slot - 2).clamp_min(0)
+        visual_slot = (true_best_slot >= 2) & (true_best_slot < detected_slot_offset)
+        object_slot = true_best_slot >= detected_slot_offset
+        object_slot_index = (true_best_slot - detected_slot_offset).clamp_min(0)
         object_slot_index = object_slot_index.clamp_max(object_classes.shape[1] - 1)
         true_object_class = object_classes.gather(1, object_slot_index)
         true_object_valid = object_valid.gather(1, object_slot_index) & object_slot
@@ -1440,6 +1773,12 @@ class HeatmapModule(pl.LightningModule):
             unknown = known_object_mask & (true_best_slot == 1)
             null = known_object_mask & (true_best_slot == 0)
             incompatible = known_object_mask & true_object_valid & ~compatible_object_slot
+            if num_visual_slots > 0:
+                self._log_scalar(
+                    f"{stage}_object_slot_true_visual_rate",
+                    visual_slot[known_object_mask].float().mean(),
+                    count,
+                )
             self._log_scalar(
                 f"{stage}_object_slot_true_compatible_rate",
                 compatible_object_slot[known_object_mask].float().mean(),
@@ -1518,9 +1857,17 @@ class HeatmapModule(pl.LightningModule):
                     (true_best_slot[exact_compatible] == 1).float().mean(),
                     exact_count,
                 )
+                if num_visual_slots > 0:
+                    self._log_scalar(
+                        f"{stage}_object_slot_visual_rate_given_exact_compatible",
+                        visual_slot[exact_compatible].float().mean(),
+                        exact_count,
+                    )
                 self._log_scalar(
                     f"{stage}_object_slot_object_rate_given_exact_compatible",
-                    (true_best_slot[exact_compatible] >= 2).float().mean(),
+                    (true_best_slot[exact_compatible] >= detected_slot_offset)
+                    .float()
+                    .mean(),
                     exact_count,
                 )
             if teacher_missing.any():
@@ -1534,6 +1881,12 @@ class HeatmapModule(pl.LightningModule):
                     (true_best_slot[teacher_missing] == 1).float().mean(),
                     missing_count,
                 )
+                if num_visual_slots > 0:
+                    self._log_scalar(
+                        f"{stage}_object_slot_visual_rate_given_missing",
+                        visual_slot[teacher_missing].float().mean(),
+                        missing_count,
+                    )
             if teacher_mismatch.any():
                 mismatch_count = int(teacher_mismatch.sum().item())
                 self._log_count(
@@ -1545,8 +1898,14 @@ class HeatmapModule(pl.LightningModule):
                     (true_best_slot[teacher_mismatch] == 1).float().mean(),
                     mismatch_count,
                 )
+                if num_visual_slots > 0:
+                    self._log_scalar(
+                        f"{stage}_object_slot_visual_rate_given_mismatch",
+                        visual_slot[teacher_mismatch].float().mean(),
+                        mismatch_count,
+                    )
             if exact_compatible.any():
-                expected_slot = exact_info["idx_1based"] + 2
+                expected_slot = exact_info["idx_1based"] + detected_slot_offset
                 exact_count = int(exact_compatible.sum().item())
                 self._log_count(
                     f"{stage}_object_slot_exact_compatible_count",
@@ -1690,8 +2049,11 @@ class HeatmapModule(pl.LightningModule):
             if not mask.any():
                 continue
             action_best_slot = best_slot[..., int(action_idx)]
-            action_slot_is_object = action_best_slot >= 2
-            action_slot_idx = (action_best_slot - 2).clamp_min(0)
+            action_slot_is_visual = (
+                (action_best_slot >= 2) & (action_best_slot < detected_slot_offset)
+            )
+            action_slot_is_object = action_best_slot >= detected_slot_offset
+            action_slot_idx = (action_best_slot - detected_slot_offset).clamp_min(0)
             action_slot_idx = action_slot_idx.clamp_max(object_classes.shape[1] - 1)
             action_slot_class = object_classes.gather(1, action_slot_idx)
             action_slot_valid = object_valid.gather(1, action_slot_idx)
@@ -1712,6 +2074,12 @@ class HeatmapModule(pl.LightningModule):
                 (action_best_slot[mask] == 1).float().mean(),
                 count,
             )
+            if num_visual_slots > 0:
+                self._log_scalar(
+                    f"{stage}_object_slot_{action_name}_visual_rate",
+                    action_slot_is_visual[mask].float().mean(),
+                    count,
+                )
             self._log_scalar(
                 f"{stage}_object_slot_{action_name}_null_rate",
                 (action_best_slot[mask] == 0).float().mean(),
@@ -2025,12 +2393,13 @@ class HeatmapModule(pl.LightningModule):
             raise ValueError(f"{stage} actor batch has no valid actor slots")
 
         object_inputs = self._object_inputs_from_target(target, imgs.device)
+        model_object_inputs = self._object_class_dropout_inputs(object_inputs, stage)
         data = self.model(
             imgs,
             boxes=boxes,
             valid=valid,
             action_labels=actions,
-            **object_inputs,
+            **model_object_inputs,
         )
         preds, hm_preds, presence_logits = self._unpack_model_data(data)
 
@@ -2068,6 +2437,12 @@ class HeatmapModule(pl.LightningModule):
                 prog_bar=False,
                 logger=True,
                 sync_dist=True,
+            )
+        loss_objectful_presence = self._objectful_presence_loss(stage, actions, valid)
+        if loss_objectful_presence is not None:
+            loss_main_task = (
+                loss_main_task
+                + loss_objectful_presence * self.objectful_presence_loss_weight
             )
 
         loss_hard_objectless = self._objectless_object_action_suppression_loss(
@@ -2134,6 +2509,22 @@ class HeatmapModule(pl.LightningModule):
             grounding_aux_terms.append(
                 loss_unknown_exact * self.object_slot_unknown_exact_loss_weight
             )
+
+        missing_main_loss, missing_aux_loss = (None, None)
+        if stage == "train":
+            missing_main_loss, missing_aux_loss = self._teacher_object_dropout_losses(
+                imgs,
+                boxes,
+                valid,
+                actions,
+                target,
+                model_object_inputs,
+                loss_fn,
+            )
+        if missing_main_loss is not None:
+            loss_main_task = loss_main_task + missing_main_loss
+        if missing_aux_loss is not None:
+            grounding_aux_terms.append(missing_aux_loss)
 
         self._log_actor_object_slot_diagnostics(
             stage,

@@ -4,12 +4,13 @@ This module scores actions from actor tokens and fixed object proposals without
 using a global selected-object bottleneck.  For each actor and action, an action
 query attends over explanation slots:
 
-    NULL, UNKNOWN, object_1, ..., object_K
+    NULL, UNKNOWN, VISUAL_INTERACTION, object_1, ..., object_K
 
 Objectless actions can attend only to NULL.  Objectful actions can attend to
-UNKNOWN and valid object slots.  The decoder produces a bounded relation energy
-that is added to the motion-only actor logits, so training starts from the
-motion model and learns actor-object evidence as a residual energy term.
+UNKNOWN, detector-free visual interaction slots, and valid detected object
+slots.  The decoder produces a bounded relation energy that is added to the
+motion-only actor logits, so training starts from the motion model and learns
+actor-object evidence as a residual energy term.
 """
 
 from __future__ import annotations
@@ -78,6 +79,82 @@ class _MLP(nn.Module):
         return self.net(x)
 
 
+class LatentVisualInteractionSlotBuilder(nn.Module):
+    """Build detector-free actor interaction slots from PO-GUISE+ tokens."""
+
+    def __init__(self, dim: int, num_slots: int, attn_dim: int = 256):
+        super().__init__()
+        self.dim = int(dim)
+        self.num_slots = int(num_slots)
+        self.attn_dim = int(attn_dim)
+        if self.num_slots <= 0:
+            raise ValueError("num_slots must be positive")
+
+        self.slot_embed = nn.Parameter(torch.empty(self.num_slots, self.dim))
+        self.q_proj = nn.Linear(self.dim, self.attn_dim, bias=False)
+        self.k_proj = nn.Linear(self.dim, self.attn_dim, bias=False)
+        self.v_proj = nn.Linear(self.dim, self.dim, bias=False)
+        self.out_norm = nn.LayerNorm(self.dim)
+        self.quality_head = nn.Linear(self.dim, 1)
+        self._reset_parameters()
+
+    def _reset_parameters(self) -> None:
+        nn.init.normal_(self.slot_embed, std=0.02)
+        nn.init.zeros_(self.quality_head.weight)
+        nn.init.zeros_(self.quality_head.bias)
+
+    def forward(
+        self,
+        actor_tokens: Tensor,
+        visual_tokens: Optional[Tensor],
+        visual_valid: Optional[Tensor] = None,
+    ) -> Tuple[Tensor, Tensor, Tensor]:
+        batch, actors, dim = actor_tokens.shape
+        dtype = actor_tokens.dtype
+        device = actor_tokens.device
+        query_seed = actor_tokens[:, :, None, :] + self.slot_embed.to(
+            device=device,
+            dtype=dtype,
+        ).view(1, 1, self.num_slots, dim)
+
+        if visual_tokens is None:
+            slots = self.out_norm(query_seed)
+            quality_logits = self.quality_head(slots).squeeze(-1)
+            empty_attn = actor_tokens.new_zeros(batch, actors, self.num_slots, 0)
+            return slots, quality_logits, empty_attn
+
+        if visual_tokens.ndim == 4:
+            visual_tokens = visual_tokens.flatten(2).transpose(1, 2)
+        if visual_tokens.ndim != 3:
+            raise ValueError("visual_tokens must have shape [B,N,D] or [B,D,H,W]")
+        if visual_tokens.shape[0] != batch or visual_tokens.shape[-1] != dim:
+            raise ValueError(
+                "visual_tokens must match actor batch/dim, got "
+                f"{tuple(visual_tokens.shape)} for actors {tuple(actor_tokens.shape)}"
+            )
+        visual_tokens = visual_tokens.to(device=device, dtype=dtype)
+        visual_count = visual_tokens.shape[1]
+
+        q = self.q_proj(query_seed)
+        k = self.k_proj(visual_tokens)
+        v = self.v_proj(visual_tokens)
+        scores = torch.einsum("bamr,bnr->bamn", q, k)
+        scores = scores / math.sqrt(float(self.attn_dim))
+        if visual_valid is not None:
+            visual_valid = visual_valid.to(device=device, dtype=torch.bool)
+            if visual_valid.shape != (batch, visual_count):
+                raise ValueError(
+                    "visual_valid must have shape "
+                    f"{(batch, visual_count)}, got {tuple(visual_valid.shape)}"
+                )
+            scores = scores.masked_fill(~visual_valid[:, None, None, :], -1.0e4)
+        attn = torch.softmax(scores.float(), dim=-1).to(dtype=dtype)
+        slots = torch.einsum("bamn,bnd->bamd", attn, v)
+        slots = self.out_norm(slots + query_seed)
+        quality_logits = self.quality_head(slots).squeeze(-1)
+        return slots, quality_logits, attn
+
+
 class ActorObjectActionQueryDecoder(nn.Module):
     """Direct action decoder from actor-object relation slots."""
 
@@ -93,7 +170,12 @@ class ActorObjectActionQueryDecoder(nn.Module):
         unknown_mismatch_penalty: float = 1.0,
         quality_init_bias: float = -3.0,
         prior_quality_floor: float = 0.20,
+        num_visual_slots: int = 0,
+        visual_slot_bias: float = 0.0,
         relation_logit_scale_init: float = -2.0,
+        relation_logit_bound: float = 2.0,
+        max_relation_logit_scale: float = 1.5,
+        objectful_presence_beta: float = 0.0,
         neg_inf: float = -1.0e4,
     ) -> None:
         super().__init__()
@@ -108,10 +190,24 @@ class ActorObjectActionQueryDecoder(nn.Module):
         self.unknown_mismatch_penalty = float(unknown_mismatch_penalty)
         self.quality_init_bias = float(quality_init_bias)
         self.prior_quality_floor = float(prior_quality_floor)
+        self.num_visual_slots = int(num_visual_slots)
+        self.detected_slot_offset = 2 + self.num_visual_slots
+        self.visual_slot_bias = float(visual_slot_bias)
         self.relation_logit_scale_init = float(relation_logit_scale_init)
+        self.relation_logit_bound = float(relation_logit_bound)
+        self.max_relation_logit_scale = float(max_relation_logit_scale)
+        self.objectful_presence_beta = float(objectful_presence_beta)
         self.neg_inf = float(neg_inf)
         if self.prior_quality_floor < 0:
             raise ValueError("prior_quality_floor must be >= 0")
+        if self.num_visual_slots < 0:
+            raise ValueError("num_visual_slots must be >= 0")
+        if self.relation_logit_bound <= 0:
+            raise ValueError("relation_logit_bound must be > 0")
+        if self.max_relation_logit_scale < 0:
+            raise ValueError("max_relation_logit_scale must be >= 0")
+        if self.objectful_presence_beta < 0:
+            raise ValueError("objectful_presence_beta must be >= 0")
 
         for name, tensor in spec.build_buffers().items():
             self.register_buffer(name, tensor, persistent=False)
@@ -133,6 +229,11 @@ class ActorObjectActionQueryDecoder(nn.Module):
         self.unknown_slot = nn.Parameter(torch.empty(dim))
         self.null_mlp = _MLP(dim * 2, hidden_dim, dim)
         self.unknown_mlp = _MLP(dim * 2, hidden_dim, dim)
+        self.visual_slot_builder = (
+            LatentVisualInteractionSlotBuilder(dim, self.num_visual_slots, attn_dim)
+            if self.num_visual_slots > 0
+            else None
+        )
 
         self.action_embed = nn.Parameter(torch.empty(self.num_actions, dim))
         self.action_query = nn.Linear(dim, attn_dim, bias=False)
@@ -148,6 +249,7 @@ class ActorObjectActionQueryDecoder(nn.Module):
         )
 
         self.quality_head = nn.Linear(dim, 1)
+        self.objectful_presence_head = nn.Linear(dim, 1)
         self._reset_parameters()
 
     def _reset_parameters(self) -> None:
@@ -158,6 +260,8 @@ class ActorObjectActionQueryDecoder(nn.Module):
         nn.init.zeros_(self.logit_head.bias)
         nn.init.zeros_(self.quality_head.weight)
         nn.init.constant_(self.quality_head.bias, self.quality_init_bias)
+        nn.init.zeros_(self.objectful_presence_head.weight)
+        nn.init.constant_(self.objectful_presence_head.bias, 2.0)
 
     @staticmethod
     def _box_features(boxes: Tensor, confs: Tensor) -> Tensor:
@@ -230,8 +334,12 @@ class ActorObjectActionQueryDecoder(nn.Module):
         )
 
     def _compat_for_objects(self, object_classes: Tensor) -> Tensor:
+        class_valid = (object_classes >= 0) & (
+            object_classes < self.num_object_classes
+        )
         safe_classes = object_classes.clamp(0, self.num_object_classes - 1).long()
-        return F.embedding(safe_classes, self.compat_by_object_action)
+        compat = F.embedding(safe_classes, self.compat_by_object_action)
+        return compat * class_valid.to(dtype=compat.dtype).unsqueeze(-1)
 
     def _build_relation_slots(
         self,
@@ -242,12 +350,18 @@ class ActorObjectActionQueryDecoder(nn.Module):
         object_confs: Tensor,
         object_valid_f: Tensor,
         object_heatmap_scores: Tensor,
-    ) -> Tuple[Tensor, Tensor, Tensor]:
+        visual_tokens: Optional[Tensor],
+        visual_valid: Optional[Tensor],
+    ) -> Tuple[Tensor, Tensor, Tensor, Optional[Tensor], Optional[Tensor], Optional[Tensor]]:
         batch, actors, dim = actor_tokens.shape
         objects = object_boxes.shape[1]
 
         safe_classes = object_classes.clamp(0, self.num_object_classes - 1).long()
+        class_valid = (object_classes >= 0) & (
+            object_classes < self.num_object_classes
+        )
         class_token = self.object_class_embed(safe_classes)
+        class_token = class_token * class_valid.to(dtype=class_token.dtype).unsqueeze(-1)
         object_meta = self._box_features(object_boxes, object_confs)
         object_token = self.object_norm(class_token + self.object_meta_mlp(object_meta))
         object_token = object_token * object_valid_f[:, :, None]
@@ -281,19 +395,36 @@ class ActorObjectActionQueryDecoder(nn.Module):
         unknown_slot = self.unknown_mlp(
             torch.cat((actor_tokens, unknown_seed), dim=-1)
         )
+        visual_slots = None
+        visual_quality_logits = None
+        visual_attention = None
+        if self.visual_slot_builder is not None:
+            visual_slots, visual_quality_logits, visual_attention = (
+                self.visual_slot_builder(
+                    actor_tokens,
+                    visual_tokens=visual_tokens,
+                    visual_valid=visual_valid,
+                )
+            )
 
-        slots = torch.cat(
-            (
-                null_slot.unsqueeze(2),
-                unknown_slot.unsqueeze(2),
-                object_slots,
-            ),
-            dim=2,
-        )
+        slot_parts = [null_slot.unsqueeze(2), unknown_slot.unsqueeze(2)]
+        if visual_slots is not None:
+            slot_parts.append(visual_slots)
+        slot_parts.append(object_slots)
+        slots = torch.cat(slot_parts, dim=2)
         quality_logits = self.quality_head(object_slots).squeeze(-1)
         quality = torch.sigmoid(quality_logits)
         quality = quality * object_valid_f[:, None, :]
-        return self.relation_norm(slots), quality_logits, quality
+        return (
+            self.relation_norm(slots),
+            quality_logits,
+            quality,
+            visual_quality_logits,
+            None
+            if visual_quality_logits is None
+            else torch.sigmoid(visual_quality_logits),
+            visual_attention,
+        )
 
     def _slot_bias(
         self,
@@ -314,7 +445,7 @@ class ActorObjectActionQueryDecoder(nn.Module):
             batch,
             actors,
             self.num_actions,
-            objects + 2,
+            objects + self.detected_slot_offset,
             device=device,
             dtype=dtype,
         )
@@ -327,6 +458,18 @@ class ActorObjectActionQueryDecoder(nn.Module):
             1,
             self.num_actions,
         ) * self.unknown_bias
+        if self.num_visual_slots > 0:
+            visual_objectless_mask = (
+                objectless.view(1, 1, self.num_actions, 1) * self.neg_inf
+            )
+            visual_objectful_bias = (
+                objectful.view(1, 1, self.num_actions, 1) * self.visual_slot_bias
+            )
+            bias[..., 2 : self.detected_slot_offset] = (
+                bias[..., 2 : self.detected_slot_offset]
+                + visual_objectless_mask
+                + visual_objectful_bias
+            )
 
         compat_bkc = self._compat_for_objects(object_classes).to(dtype=dtype)
         compat_prior = compat_bkc * self.compatible_bias
@@ -342,8 +485,14 @@ class ActorObjectActionQueryDecoder(nn.Module):
 
         invalid_objects = (1.0 - object_valid_f)[:, None, None, :] * self.neg_inf
         objectless_object_mask = objectless.view(1, 1, self.num_actions, 1) * self.neg_inf
-        bias[..., 2:] = bias[..., 2:] + object_prior
-        bias[..., 2:] = bias[..., 2:] + invalid_objects + objectless_object_mask
+        bias[..., self.detected_slot_offset :] = (
+            bias[..., self.detected_slot_offset :] + object_prior
+        )
+        bias[..., self.detected_slot_offset :] = (
+            bias[..., self.detected_slot_offset :]
+            + invalid_objects
+            + objectless_object_mask
+        )
 
         compat_bck = compat_bkc.permute(0, 2, 1)
         any_quality = quality.amax(dim=-1, keepdim=True)
@@ -368,6 +517,8 @@ class ActorObjectActionQueryDecoder(nn.Module):
         object_confs: Tensor,
         object_valid: Tensor,
         object_heatmap_scores: Tensor,
+        visual_tokens: Optional[Tensor] = None,
+        visual_valid: Optional[Tensor] = None,
         motion_logits: Optional[Tensor] = None,
     ) -> Dict[str, Tensor]:
         if actor_tokens.ndim != 3:
@@ -387,16 +538,21 @@ class ActorObjectActionQueryDecoder(nn.Module):
         actor_valid = actor_valid.to(device=device, dtype=torch.bool)
 
         object_classes = object_classes.to(device=device)
-        class_valid = (object_classes >= 0) & (object_classes < self.num_object_classes)
         object_valid_f = object_valid.to(device=device, dtype=dtype)
-        object_valid_f = object_valid_f * class_valid.to(dtype=dtype)
         object_boxes = object_boxes.to(device=device, dtype=dtype)
         actor_boxes = actor_boxes.to(device=device, dtype=dtype)
         object_confs = object_confs.to(device=device, dtype=dtype) * object_valid_f
         object_heatmap_scores = object_heatmap_scores.to(device=device, dtype=dtype)
         object_heatmap_scores = object_heatmap_scores * object_valid_f[:, None, :]
 
-        slots, quality_logits, quality = self._build_relation_slots(
+        (
+            slots,
+            quality_logits,
+            quality,
+            visual_quality_logits,
+            visual_quality,
+            visual_attention,
+        ) = self._build_relation_slots(
             actor_tokens,
             actor_boxes,
             object_boxes,
@@ -404,6 +560,8 @@ class ActorObjectActionQueryDecoder(nn.Module):
             object_confs,
             object_valid_f,
             object_heatmap_scores,
+            visual_tokens,
+            visual_valid,
         )
         slot_keys = self.slot_key(slots)
         action_queries = self.action_query(self.action_embed)
@@ -436,11 +594,21 @@ class ActorObjectActionQueryDecoder(nn.Module):
             self.num_actions,
             dim,
         )
-        relation_logits = self.logit_head(
+        raw_relation_logits = self.logit_head(
             torch.tanh(actor_term + relation_term + action_term)
         ).squeeze(-1)
-        relation_logits = torch.tanh(relation_logits)
-        relation_scale = torch.sigmoid(self.relation_logit_scale).to(dtype=dtype)
+        relation_bound = torch.as_tensor(
+            self.relation_logit_bound,
+            device=device,
+            dtype=dtype,
+        )
+        relation_logits = relation_bound * torch.tanh(
+            raw_relation_logits / relation_bound
+        )
+        relation_scale = (
+            self.max_relation_logit_scale
+            * torch.sigmoid(self.relation_logit_scale)
+        ).to(dtype=dtype)
         if motion_logits is not None:
             expected_shape = (batch, actors, self.num_actions)
             if tuple(motion_logits.shape) != expected_shape:
@@ -452,6 +620,15 @@ class ActorObjectActionQueryDecoder(nn.Module):
             logits = motion_logits + relation_scale * relation_logits
         else:
             logits = relation_scale * relation_logits
+        objectful_presence_logits = self.objectful_presence_head(actor_tokens).squeeze(-1)
+        objectful_presence = torch.sigmoid(objectful_presence_logits)
+        if self.objectful_presence_beta > 0:
+            objectful = self.objectful_action.to(device=device, dtype=dtype)
+            objectful_penalty = (
+                self.objectful_presence_beta
+                * (1.0 - objectful_presence).clamp(0.0, 1.0)
+            )
+            logits = logits - objectful_penalty[:, :, None] * objectful.view(1, 1, -1)
         invalid_actor = (~actor_valid).to(dtype=dtype) * self.neg_inf
         logits = logits + invalid_actor[:, :, None]
         if motion_logits is not None:
@@ -468,9 +645,19 @@ class ActorObjectActionQueryDecoder(nn.Module):
             "relation_slots": slots,
             "object_quality": quality,
             "object_quality_logits": quality_logits,
+            "visual_quality": visual_quality,
+            "visual_quality_logits": visual_quality_logits,
+            "visual_attention": visual_attention,
+            "objectful_presence_logits": objectful_presence_logits,
+            "objectful_presence": objectful_presence,
             "mismatch": mismatch,
             "unknown_delta": slot_scores[..., 1],
-            "object_slot_delta": slot_scores[..., 2:],
+            "visual_slot_delta": slot_scores[..., 2 : self.detected_slot_offset],
+            "object_slot_delta": slot_scores[..., self.detected_slot_offset :],
+            "detected_slot_offset": torch.tensor(
+                self.detected_slot_offset,
+                device=device,
+            ),
         }
 
 
@@ -483,13 +670,24 @@ def action_slot_target_loss(
     valid: Optional[Tensor] = None,
     interaction_object_index: Optional[Tensor] = None,
     interaction_object_index_valid: Optional[Tensor] = None,
+    interaction_heatmap_valid: Optional[Tensor] = None,
     ignore_missing_object: bool = False,
+    num_visual_slots: Optional[int] = None,
+    missing_object_target: str = "unknown",
 ) -> Tensor:
     """Supervise p(slot | true_action, actor, video)."""
 
     batch, actors, num_actions, slots = slot_delta.shape
-    num_object_slots = slots - 2
+    if num_visual_slots is None:
+        num_visual_slots = max(0, slots - 2 - int(object_classes.shape[1]))
+    num_visual_slots = int(num_visual_slots)
+    object_slot_offset = 2 + num_visual_slots
+    num_object_slots = slots - object_slot_offset
     device = slot_delta.device
+    if num_object_slots < 0:
+        raise ValueError("slot_delta has fewer slots than NULL/UNKNOWN/visual layout")
+    if missing_object_target not in {"unknown", "visual"}:
+        raise ValueError("missing_object_target must be 'unknown' or 'visual'")
     labels = labels.to(device=device, dtype=torch.long).clamp(0, num_actions - 1)
     object_classes = object_classes.to(device=device, dtype=torch.long)
     object_valid = object_valid.to(device=device, dtype=torch.bool)
@@ -503,6 +701,11 @@ def action_slot_target_loss(
             device=device,
             dtype=torch.bool,
         )
+    if interaction_heatmap_valid is not None:
+        interaction_heatmap_valid = interaction_heatmap_valid.to(
+            device=device,
+            dtype=torch.bool,
+        )
 
     rows = torch.arange(batch, device=device)[:, None].expand(batch, actors)
     actor_idx = torch.arange(actors, device=device)[None, :].expand(batch, actors)
@@ -513,6 +716,12 @@ def action_slot_target_loss(
         device=device,
         dtype=slot_delta.dtype,
     )
+    if num_visual_slots > 0:
+        target = torch.zeros(
+            (batch, actors, slots),
+            device=device,
+            dtype=slot_delta.dtype,
+        )
     valid_loss = torch.ones((batch, actors), device=device, dtype=torch.bool)
     if valid is not None:
         valid_loss &= valid.to(device=device, dtype=torch.bool)
@@ -522,6 +731,15 @@ def action_slot_target_loss(
         int(key): tuple(int(v) for v in values)
         for key, values in spec.action_to_object_ids.items()
     }
+
+    def set_missing_target(bi: int, ai: int) -> None:
+        use_visual = missing_object_target == "visual" and num_visual_slots > 0
+        if use_visual and interaction_heatmap_valid is not None:
+            use_visual = bool(interaction_heatmap_valid[bi, ai].item())
+        if use_visual:
+            target[bi, ai, 2] = 1.0
+        else:
+            target[bi, ai, 1] = 1.0
 
     for bi in range(batch):
         for ai in range(actors):
@@ -548,16 +766,16 @@ def action_slot_target_loss(
                 ):
                     object_class = int(object_classes[bi, object_slot].item())
                     if object_class in allowed:
-                        target[bi, ai, object_slot + 2] = 1.0
+                        target[bi, ai, object_slot + object_slot_offset] = 1.0
                     else:
                         # The teacher says this proposal is the interaction
                         # object, but the detector class conflicts with the
                         # action taxonomy.  Preserve some geometry supervision
                         # while making UNKNOWN the primary explanation.
                         target[bi, ai, 1] = 0.7
-                        target[bi, ai, object_slot + 2] = 0.3
+                        target[bi, ai, object_slot + object_slot_offset] = 0.3
                     continue
-                target[bi, ai, 1] = 1.0
+                set_missing_target(bi, ai)
                 continue
 
             match = torch.zeros(num_object_slots, device=device, dtype=torch.bool)
@@ -565,11 +783,11 @@ def action_slot_target_loss(
                 match |= (object_classes[bi] == int(object_id)) & object_valid[bi]
             if bool(match.any().item()):
                 weights = match.to(dtype=slot_delta.dtype)
-                target[bi, ai, 2:] = weights / weights.sum().clamp_min(1.0)
+                target[bi, ai, object_slot_offset:] = weights / weights.sum().clamp_min(1.0)
             elif ignore_missing_object:
                 valid_loss[bi, ai] = False
             else:
-                target[bi, ai, 1] = 1.0
+                set_missing_target(bi, ai)
 
     logp = F.log_softmax(true_slot_logits.float(), dim=-1).to(dtype=slot_delta.dtype)
     loss = -(target * logp).sum(dim=-1)
@@ -587,7 +805,7 @@ if __name__ == "__main__":
         objectless_action_indices=(0, 1),
         action_to_object_ids={2: (1,), 3: (2,)},
     )
-    head = ActorObjectActionQueryDecoder(dim, spec)
+    head = ActorObjectActionQueryDecoder(dim, spec, num_visual_slots=1)
     actor = torch.randn(batch, actors, dim)
     actor_boxes = torch.rand(batch, actors, 4)
     actor_boxes[..., 2:] = torch.maximum(actor_boxes[..., :2] + 0.05, actor_boxes[..., 2:])
@@ -601,6 +819,7 @@ if __name__ == "__main__":
     heatmap_scores = torch.zeros(batch, actors, objects)
     actor_valid = torch.ones(batch, actors, dtype=torch.bool)
     motion = torch.randn(batch, actors, actions)
+    visual = torch.randn(batch, 16, dim)
     out = head(
         actor_tokens=actor,
         actor_boxes=actor_boxes,
@@ -610,6 +829,7 @@ if __name__ == "__main__":
         object_confs=obj_confs,
         object_valid=obj_valid,
         object_heatmap_scores=heatmap_scores,
+        visual_tokens=visual,
         motion_logits=motion,
     )
     max_motion_delta = (out["logits"] - motion).abs().max().item()
@@ -621,6 +841,7 @@ if __name__ == "__main__":
         obj_valid,
         spec,
         valid=actor_valid,
+        num_visual_slots=head.num_visual_slots,
     )
     print(
         out["logits"].shape,

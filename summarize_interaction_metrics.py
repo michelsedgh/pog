@@ -45,6 +45,7 @@ CORE_COLUMNS = [
     "val_loss_object_slot_quality_neg",
     "val_loss_object_slot_unknown_exact",
     "val_object_slot_true_compatible_rate",
+    "val_object_slot_true_visual_rate",
     "val_object_slot_true_unknown_rate",
     "val_object_slot_true_null_rate",
     "val_object_slot_true_incompatible_rate",
@@ -62,9 +63,12 @@ CORE_COLUMNS = [
     "val_object_slot_mapped_missing_count",
     "val_object_slot_mapped_mismatch_count",
     "val_object_slot_unknown_rate_given_exact_compatible",
+    "val_object_slot_visual_rate_given_exact_compatible",
     "val_object_slot_object_rate_given_exact_compatible",
     "val_object_slot_unknown_rate_given_missing",
+    "val_object_slot_visual_rate_given_missing",
     "val_object_slot_unknown_rate_given_mismatch",
+    "val_object_slot_visual_rate_given_mismatch",
     "val_object_slot_exact_quality_teacher_rank_mean",
     "val_object_slot_exact_quality_teacher_top1_rate",
     "val_object_slot_objectless_null_rate",
@@ -77,6 +81,7 @@ CORE_COLUMNS = [
     "val_object_slot_quality_neg_mean",
     "val_object_slot_mismatch_mean",
     "val_object_slot_Uselaptop_laptop_rate",
+    "val_object_slot_Uselaptop_visual_rate",
     "val_object_slot_Uselaptop_unknown_rate",
     "val_object_slot_Uselaptop_null_rate",
     "val_object_slot_Uselaptop_incompatible_rate",
@@ -119,6 +124,17 @@ CORE_COLUMNS = [
     "val_actor_object_slot_delta_abs_mean",
     "val_actor_object_slot_delta_l2_mean",
     "val_actor_object_slot_relation_scale",
+    "val_loss_objectful_presence",
+    "val_objectful_presence_acc",
+    "val_objectful_presence_objectless_mean",
+    "val_objectful_presence_objectful_mean",
+    "train_loss_missing_object_ce",
+    "train_loss_missing_object_confuser",
+    "train_loss_missing_object_visual_slot",
+    "train_missing_object_dropout_acc",
+    "train_missing_object_visual_slot_rate",
+    "train_missing_object_unknown_slot_rate",
+    "train_missing_object_true_minus_WatchTV_margin",
 ]
 
 GROUPS = [
@@ -310,14 +326,18 @@ def print_compact_epoch_summary(epoch_df):
         "val_group_drink_cup_bottle_glass_acc",
         "val_group_drink_acc",
         "val_object_slot_true_compatible_rate",
+        "val_object_slot_true_visual_rate",
         "val_object_slot_true_unknown_rate",
         "val_object_slot_exact_correct_object_rate",
         "val_object_slot_exact_unknown_prob",
         "val_object_slot_unknown_rate_given_exact_compatible",
+        "val_object_slot_visual_rate_given_exact_compatible",
         "val_object_slot_unknown_rate_given_missing",
+        "val_object_slot_visual_rate_given_missing",
         "val_object_slot_quality_pos_acc",
         "val_object_slot_quality_neg_acc",
         "val_object_slot_Uselaptop_laptop_rate",
+        "val_object_slot_Uselaptop_visual_rate",
         "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
         "val_actor_object_slot_relation_scale",
         "val_object_counterfactual_teacher_logit_drop",
@@ -365,14 +385,18 @@ def print_compact_best(epoch_df):
         "val_group_laptop_book_tv_acc",
         "val_group_phone_tv_acc",
         "val_object_slot_true_compatible_rate",
+        "val_object_slot_true_visual_rate",
         "val_object_slot_exact_correct_object_rate",
         "val_object_slot_exact_unknown_prob",
         "val_object_slot_unknown_rate_given_exact_compatible",
+        "val_object_slot_visual_rate_given_exact_compatible",
         "val_object_slot_unknown_rate_given_missing",
+        "val_object_slot_visual_rate_given_missing",
         "val_object_slot_objectless_null_rate",
         "val_object_slot_quality_pos_acc",
         "val_object_slot_quality_neg_acc",
         "val_object_slot_Uselaptop_laptop_rate",
+        "val_object_slot_Uselaptop_visual_rate",
         "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
         "val_actor_object_slot_relation_scale",
         "val_object_counterfactual_teacher_logit_drop",
@@ -408,6 +432,7 @@ def print_object_use_epoch_table(epoch_df):
         "val_interaction_heatmap_center_l2",
         "val_interaction_heatmap_missing_object_masked_rate",
         "val_object_slot_true_compatible_rate",
+        "val_object_slot_true_visual_rate",
         "val_object_slot_true_unknown_rate",
         "val_object_slot_true_incompatible_rate",
         "val_object_slot_exact_compatible_rate_1based",
@@ -415,15 +440,19 @@ def print_object_use_epoch_table(epoch_df):
         "val_object_slot_exact_correct_object_rate",
         "val_object_slot_exact_unknown_prob",
         "val_object_slot_unknown_rate_given_exact_compatible",
+        "val_object_slot_visual_rate_given_exact_compatible",
         "val_object_slot_object_rate_given_exact_compatible",
         "val_object_slot_unknown_rate_given_missing",
+        "val_object_slot_visual_rate_given_missing",
         "val_object_slot_unknown_rate_given_mismatch",
+        "val_object_slot_visual_rate_given_mismatch",
         "val_object_slot_exact_quality_teacher_rank_mean",
         "val_object_slot_exact_quality_teacher_top1_rate",
         "val_object_slot_objectless_null_rate",
         "val_object_slot_quality_pos_acc",
         "val_object_slot_quality_neg_acc",
         "val_object_slot_Uselaptop_laptop_rate",
+        "val_object_slot_Uselaptop_visual_rate",
         "val_object_slot_Uselaptop_unknown_rate",
         "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
         "val_object_slot_delta_Uselaptop_minus_Readbook_logit_margin",
@@ -446,6 +475,7 @@ def print_object_use_epoch_table(epoch_df):
         "val_object_counterfactual_teacher_logit_drop",
         "val_object_counterfactual_teacher_prob_drop",
         "val_object_slot_true_compatible_rate",
+        "val_object_slot_true_visual_rate",
         "val_object_slot_true_unknown_rate",
         "val_object_slot_true_incompatible_rate",
         "val_object_slot_exact_compatible_rate_1based",
@@ -453,15 +483,19 @@ def print_object_use_epoch_table(epoch_df):
         "val_object_slot_exact_correct_object_rate",
         "val_object_slot_exact_unknown_prob",
         "val_object_slot_unknown_rate_given_exact_compatible",
+        "val_object_slot_visual_rate_given_exact_compatible",
         "val_object_slot_object_rate_given_exact_compatible",
         "val_object_slot_unknown_rate_given_missing",
+        "val_object_slot_visual_rate_given_missing",
         "val_object_slot_unknown_rate_given_mismatch",
+        "val_object_slot_visual_rate_given_mismatch",
         "val_object_slot_exact_quality_teacher_rank_mean",
         "val_object_slot_exact_quality_teacher_top1_rate",
         "val_object_slot_objectless_null_rate",
         "val_object_slot_quality_pos_acc",
         "val_object_slot_quality_neg_acc",
         "val_object_slot_Uselaptop_laptop_rate",
+        "val_object_slot_Uselaptop_visual_rate",
         "val_object_slot_Uselaptop_unknown_rate",
         "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
         "val_object_slot_delta_Uselaptop_minus_Readbook_logit_margin",
@@ -747,6 +781,7 @@ def print_decision(epoch_df):
     slot_loss = metric(latest, "val_loss_object_slot_target")
     slot_quality_loss = metric(latest, "val_loss_object_slot_quality")
     slot_compatible = metric(latest, "val_object_slot_true_compatible_rate")
+    slot_visual = metric(latest, "val_object_slot_true_visual_rate")
     slot_unknown = metric(latest, "val_object_slot_true_unknown_rate")
     slot_null = metric(latest, "val_object_slot_true_null_rate")
     slot_incompatible = metric(latest, "val_object_slot_true_incompatible_rate")
@@ -786,6 +821,10 @@ def print_decision(epoch_df):
         latest,
         "val_object_slot_unknown_rate_given_exact_compatible",
     )
+    visual_given_exact = metric(
+        latest,
+        "val_object_slot_visual_rate_given_exact_compatible",
+    )
     object_given_exact = metric(
         latest,
         "val_object_slot_object_rate_given_exact_compatible",
@@ -794,9 +833,17 @@ def print_decision(epoch_df):
         latest,
         "val_object_slot_unknown_rate_given_missing",
     )
+    visual_given_missing = metric(
+        latest,
+        "val_object_slot_visual_rate_given_missing",
+    )
     unknown_given_mismatch = metric(
         latest,
         "val_object_slot_unknown_rate_given_mismatch",
+    )
+    visual_given_mismatch = metric(
+        latest,
+        "val_object_slot_visual_rate_given_mismatch",
     )
     exact_quality_rank = metric(
         latest,
@@ -829,6 +876,7 @@ def print_decision(epoch_df):
     slot_quality_neg_acc = metric(latest, "val_object_slot_quality_neg_acc")
     slot_mismatch = metric(latest, "val_object_slot_mismatch_mean")
     slot_laptop_rate = metric(latest, "val_object_slot_Uselaptop_laptop_rate")
+    slot_laptop_visual = metric(latest, "val_object_slot_Uselaptop_visual_rate")
     slot_laptop_unknown = metric(latest, "val_object_slot_Uselaptop_unknown_rate")
     slot_laptop_incompatible = metric(
         latest,
@@ -872,7 +920,8 @@ def print_decision(epoch_df):
         print(
             "object slot explanations: "
             f"loss {fmt(slot_loss)}, compatible {fmt(slot_compatible)}, "
-            f"unknown {fmt(slot_unknown)}, null {fmt(slot_null)}, "
+            f"visual {fmt(slot_visual)}, unknown {fmt(slot_unknown)}, "
+            f"null {fmt(slot_null)}, "
             f"incompatible {fmt(slot_incompatible)}, "
             f"objectless_null {fmt(slot_objectless_null)}, "
             f"relation_scale {fmt(slot_relation_scale)}, "
@@ -884,6 +933,7 @@ def print_decision(epoch_df):
         print(
             "Uselaptop slot: "
             f"laptop {fmt(slot_laptop_rate)}, "
+            f"visual {fmt(slot_laptop_visual)}, "
             f"unknown {fmt(slot_laptop_unknown)}, "
             f"incompatible {fmt(slot_laptop_incompatible)}, "
             f"u_minus_read {fmt(slot_u_minus_read)}, "
@@ -902,9 +952,12 @@ def print_decision(epoch_df):
             f"correct_prob {fmt(exact_correct_prob)}, "
             f"unknown_prob {fmt(exact_unknown_prob)}, "
             f"unknown_given_exact {fmt(unknown_given_exact)}, "
+            f"visual_given_exact {fmt(visual_given_exact)}, "
             f"object_given_exact {fmt(object_given_exact)}, "
             f"unknown_given_missing {fmt(unknown_given_missing)}, "
+            f"visual_given_missing {fmt(visual_given_missing)}, "
             f"unknown_given_mismatch {fmt(unknown_given_mismatch)}, "
+            f"visual_given_mismatch {fmt(visual_given_mismatch)}, "
             f"missing_count {fmt(mapped_missing_count, 0)}, "
             f"mismatch_count {fmt(mapped_mismatch_count, 0)}, "
             f"quality {fmt(exact_quality)}, "
@@ -1155,11 +1208,11 @@ def main():
 
     print("\nREAD THIS:")
     print("- Main proof: val_f1/per-action accuracy stay healthy while slot explanations and heatmaps improve.")
-    print("- Objectless actions should use NULL slots; objectful detector misses should use UNKNOWN.")
+    print("- Objectless actions should use NULL slots; objectful detector misses should use VISUAL/UNKNOWN.")
     print("- Teacher-object removal is supporting evidence, not the checkpoint target by itself.")
     print("- Guardrail: val_f1/per-action target accuracy should not collapse while object-use metrics rise.")
     print("- Heatmap/object-channel metrics are secondary; use --verbose when debugging teacher quality.")
-    print("- actor_object_slot_head is the only runtime object-proposal action path.")
+    print("- actor_object_slot_head is the only runtime action-relation path.")
 
 
 if __name__ == "__main__":
