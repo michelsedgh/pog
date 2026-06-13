@@ -1160,9 +1160,9 @@ class VisionTransformer(nn.Module):
             trunc_normal_(self.object_class_embed.weight, std=0.02)
             nn.init.zeros_(self.object_slot_embed)
             nn.init.zeros_(self.object_valid_embed.weight)
-            nn.init.zeros_(self.object_box_mlp[-1].weight)
+            trunc_normal_(self.object_box_mlp[-1].weight, std=0.01)
             nn.init.zeros_(self.object_box_mlp[-1].bias)
-            nn.init.zeros_(self.object_conf_mlp[-1].weight)
+            trunc_normal_(self.object_conf_mlp[-1].weight, std=0.01)
             nn.init.zeros_(self.object_conf_mlp[-1].bias)
         if self.n_heatmap_out_channels > 0:
             self.heatmap_tokens = nn.Parameter(

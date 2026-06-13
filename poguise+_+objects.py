@@ -19,6 +19,7 @@ from google.auth.transport.requests import Request
 
 REPO_URL = "https://github.com/michelsedgh/pog.git"
 REPO_DIR = "/content/pog"
+POGUISE_REVISION = os.environ.get("POGUISE_REVISION", "main").strip()
 
 SCRATCH_ROOT = "/mnt/local-scratch" if os.path.isdir("/mnt/local-scratch") else "/content"
 
@@ -65,14 +66,28 @@ def run(cmd, label=None, cwd=None):
 run(["apt-get", "update"], "Updating apt")
 run(["apt-get", "install", "-y", "aria2", "ffmpeg", "fuse"], "Installing system tools")
 
+if not POGUISE_REVISION:
+    raise RuntimeError("POGUISE_REVISION must be a branch, tag, or commit SHA.")
+
 if os.path.isdir(REPO_DIR):
-    run(["git", "-C", REPO_DIR, "fetch", "origin", "main"], "Fetching repo")
-    run(["git", "-C", REPO_DIR, "checkout", "main"], "Checking out main")
-    run(["git", "-C", REPO_DIR, "pull", "--ff-only", "origin", "main"], "Pulling latest main")
+    run(["git", "-C", REPO_DIR, "fetch", "--tags", "origin"], "Fetching repo")
 else:
-    run(["git", "clone", "--branch", "main", REPO_URL, REPO_DIR], "Cloning repo")
+    run(["git", "clone", REPO_URL, REPO_DIR], "Cloning repo")
+
+checkout_ref = "origin/main" if POGUISE_REVISION == "main" else POGUISE_REVISION
+if POGUISE_REVISION == "main":
+    print(
+        "\nWARNING: POGUISE_REVISION is 'main'. Set POGUISE_REVISION to a commit SHA "
+        "for a fully reproducible run.",
+        flush=True,
+    )
+run(
+    ["git", "-C", REPO_DIR, "checkout", "--detach", checkout_ref],
+    f"Checking out POGUISE_REVISION={POGUISE_REVISION}",
+)
 
 run(["git", "-C", REPO_DIR, "log", "-1", "--oneline"], "Current repo commit")
+run(["git", "-C", REPO_DIR, "status", "--short"], "Current repo status")
 
 run([sys.executable, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], "Upgrading pip tooling")
 
@@ -492,11 +507,15 @@ cmd = [
     "--poguiseplus_heatmap_log_eps", "1e-6",
     "--poguiseplus_normalized_heatmap_loss", "1",
     "--poguiseplus_heatmap_mse_scale", "1000",
+    "--poguiseplus_interaction_heatmap_pos_loss_weight", "0.20",
+    "--poguiseplus_interaction_heatmap_pos_weight", "8.0",
+    "--poguiseplus_interaction_heatmap_center_loss_weight", "0.10",
+    "--poguiseplus_interaction_heatmap_center_temperature", "10.0",
 
-    "--motion_aux_loss_weight", "0.25",
-    "--object_prompt_grounding_loss_weight", "0.5",
-    "--objectless_prompt_consistency_loss_weight", "0.2",
-    "--objectless_object_action_suppression_loss_weight", "0.5",
+    "--motion_aux_loss_weight", "0.35",
+    "--object_prompt_grounding_loss_weight", "0.30",
+    "--objectless_prompt_consistency_loss_weight", "0.30",
+    "--objectless_object_action_suppression_loss_weight", "0.60",
     "--object_class_dropout_prob", "0.0",
     "--object_class_wrong_prob", "0.0",
 
@@ -514,7 +533,7 @@ cmd = [
     "--max_epochs", "15",
     "--t_max_scheduler", "15",
 
-    "--lr", "5e-5",
+    "--lr", "3e-5",
     "--lr_head", "5e-4",
     "--lr_head_hm", "5e-4",
 

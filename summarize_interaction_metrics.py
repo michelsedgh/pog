@@ -48,6 +48,19 @@ CORE_COLUMNS = [
     "val_object_prompt_exact_compatible_count",
     "val_object_prompt_exact_correct_object_rate",
     "val_object_prompt_exact_correct_object_prob",
+    "val_object_prompt_attention_exact_teacher_mean",
+    "val_object_prompt_attention_objectless_visible_mean",
+    "val_object_prompt_attention_objectless_visible_max",
+    "val_object_prompt_attention_objectless_visible_entropy",
+    "val_object_prompt_drop_objectless_pred_match",
+    "val_object_prompt_drop_objectless_true_prob_delta",
+    "val_object_prompt_drop_objectless_kl",
+    "val_object_prompt_drop_objectless_acc",
+    "val_object_prompt_drop_objectless_object_action_pred_rate",
+    "val_object_prompt_drop_exact_true_logit_drop",
+    "val_object_prompt_drop_exact_true_prob_drop",
+    "val_object_prompt_drop_exact_pred_match",
+    "val_object_prompt_drop_exact_acc",
     "val_actor_object_prompt_token_count",
     "val_loss_motion_aux",
     "val_motion_aux_acc",
@@ -81,6 +94,7 @@ CORE_COLUMNS = [
     "val_watchtv_fp_rate_objectless",
     "train_loss_objectless_prompt_consistency",
     "train_objectless_prompt_consistency_pred_match",
+    "train_objectless_prompt_consistency_kl",
 ]
 
 GROUPS = [
@@ -276,6 +290,11 @@ def print_compact_epoch_summary(epoch_df):
         "val_object_prompt_grounding_true_prob",
         "val_object_prompt_exact_correct_object_rate",
         "val_object_prompt_exact_correct_object_prob",
+        "val_object_prompt_attention_exact_teacher_mean",
+        "val_object_prompt_attention_objectless_visible_max",
+        "val_object_prompt_drop_objectless_pred_match",
+        "val_object_prompt_drop_objectless_kl",
+        "val_object_prompt_drop_exact_true_logit_drop",
         "val_actor_object_prompt_token_count",
         "val_interaction_heatmap_positive_mean",
         "val_interaction_heatmap_pred_max",
@@ -325,6 +344,12 @@ def print_compact_best(epoch_df):
         "val_object_prompt_grounding_true_prob",
         "val_object_prompt_exact_correct_object_rate",
         "val_object_prompt_exact_correct_object_prob",
+        "val_object_prompt_attention_exact_teacher_mean",
+        "val_object_prompt_attention_objectless_visible_max",
+        "val_object_prompt_drop_objectless_pred_match",
+        "val_object_prompt_drop_objectless_kl",
+        "val_object_prompt_drop_exact_true_logit_drop",
+        "val_object_prompt_drop_exact_true_prob_drop",
         "val_actor_object_prompt_token_count",
         "val_action_Uselaptop_acc",
         "val_action_Readbook_acc",
@@ -664,6 +689,58 @@ def print_decision(epoch_df):
         latest,
         "val_object_prompt_exact_correct_object_prob",
     )
+    prompt_exact_teacher_attention = metric(
+        latest,
+        "val_object_prompt_attention_exact_teacher_mean",
+    )
+    prompt_objectless_attention_mean = metric(
+        latest,
+        "val_object_prompt_attention_objectless_visible_mean",
+    )
+    prompt_objectless_attention_max = metric(
+        latest,
+        "val_object_prompt_attention_objectless_visible_max",
+    )
+    prompt_objectless_attention_entropy = metric(
+        latest,
+        "val_object_prompt_attention_objectless_visible_entropy",
+    )
+    prompt_drop_objectless_match = metric(
+        latest,
+        "val_object_prompt_drop_objectless_pred_match",
+    )
+    prompt_drop_objectless_prob_delta = metric(
+        latest,
+        "val_object_prompt_drop_objectless_true_prob_delta",
+    )
+    prompt_drop_objectless_kl = metric(
+        latest,
+        "val_object_prompt_drop_objectless_kl",
+    )
+    prompt_drop_objectless_acc = metric(
+        latest,
+        "val_object_prompt_drop_objectless_acc",
+    )
+    prompt_drop_objectless_object_rate = metric(
+        latest,
+        "val_object_prompt_drop_objectless_object_action_pred_rate",
+    )
+    prompt_drop_exact_logit = metric(
+        latest,
+        "val_object_prompt_drop_exact_true_logit_drop",
+    )
+    prompt_drop_exact_prob = metric(
+        latest,
+        "val_object_prompt_drop_exact_true_prob_drop",
+    )
+    prompt_drop_exact_match = metric(
+        latest,
+        "val_object_prompt_drop_exact_pred_match",
+    )
+    prompt_drop_exact_acc = metric(
+        latest,
+        "val_object_prompt_drop_exact_acc",
+    )
     prompt_tokens = metric(latest, "val_actor_object_prompt_token_count")
 
     heatmap_missing_mask_rate = metric(
@@ -731,6 +808,33 @@ def print_decision(epoch_df):
             f"exact_correct {fmt(prompt_exact_correct)}, "
             f"exact_prob {fmt(prompt_exact_prob)}, "
             f"tokens {fmt(prompt_tokens, 0)}"
+        )
+    if (
+        pd.notna(prompt_exact_teacher_attention)
+        or pd.notna(prompt_objectless_attention_max)
+    ):
+        print(
+            "object prompt attention: "
+            f"exact_teacher {fmt(prompt_exact_teacher_attention)}, "
+            f"objectless_mean {fmt(prompt_objectless_attention_mean)}, "
+            f"objectless_max {fmt(prompt_objectless_attention_max)}, "
+            f"objectless_entropy {fmt(prompt_objectless_attention_entropy)}"
+        )
+    if (
+        pd.notna(prompt_drop_objectless_match)
+        or pd.notna(prompt_drop_exact_logit)
+    ):
+        print(
+            "object-prompt drop: "
+            f"objectless_match {fmt(prompt_drop_objectless_match)}, "
+            f"objectless_kl {fmt(prompt_drop_objectless_kl)}, "
+            f"objectless_prob_delta {fmt(prompt_drop_objectless_prob_delta)}, "
+            f"objectless_acc {fmt(prompt_drop_objectless_acc)}, "
+            f"objectless_obj_rate {fmt(prompt_drop_objectless_object_rate)}, "
+            f"exact_logit_drop {fmt(prompt_drop_exact_logit)}, "
+            f"exact_prob_drop {fmt(prompt_drop_exact_prob)}, "
+            f"exact_match {fmt(prompt_drop_exact_match)}, "
+            f"exact_acc {fmt(prompt_drop_exact_acc)}"
         )
     if pd.notna(heatmap_missing_mask_rate):
         print(
@@ -820,6 +924,29 @@ def print_row(title, row):
             "teacher-object counterfactual: "
             f"logit_drop {metric(row, 'val_object_counterfactual_teacher_logit_drop'):.4f}, "
             f"prob_drop {metric(row, 'val_object_counterfactual_teacher_prob_drop'):.4f}"
+        )
+    if pd.notna(metric(row, "val_object_prompt_attention_exact_teacher_mean")):
+        print(
+            "object prompt attention: "
+            f"exact_teacher {metric(row, 'val_object_prompt_attention_exact_teacher_mean'):.4f}, "
+            f"objectless_mean {metric(row, 'val_object_prompt_attention_objectless_visible_mean'):.4f}, "
+            f"objectless_max {metric(row, 'val_object_prompt_attention_objectless_visible_max'):.4f}, "
+            f"objectless_entropy {metric(row, 'val_object_prompt_attention_objectless_visible_entropy'):.4f}"
+        )
+    if pd.notna(metric(row, "val_object_prompt_drop_objectless_pred_match")):
+        print(
+            "object-prompt drop: "
+            f"objectless_match {metric(row, 'val_object_prompt_drop_objectless_pred_match'):.4f}, "
+            f"objectless_kl {metric(row, 'val_object_prompt_drop_objectless_kl'):.4f}, "
+            "objectless_prob_delta "
+            f"{metric(row, 'val_object_prompt_drop_objectless_true_prob_delta'):.4f}, "
+            f"objectless_acc {metric(row, 'val_object_prompt_drop_objectless_acc'):.4f}, "
+            "objectless_obj_rate "
+            f"{metric(row, 'val_object_prompt_drop_objectless_object_action_pred_rate'):.4f}, "
+            f"exact_logit_drop {metric(row, 'val_object_prompt_drop_exact_true_logit_drop'):.4f}, "
+            f"exact_prob_drop {metric(row, 'val_object_prompt_drop_exact_true_prob_drop'):.4f}, "
+            f"exact_match {metric(row, 'val_object_prompt_drop_exact_pred_match'):.4f}, "
+            f"exact_acc {metric(row, 'val_object_prompt_drop_exact_acc'):.4f}"
         )
     if pd.notna(metric(row, "val_objectless_with_object_visible_acc")):
         print(

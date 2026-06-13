@@ -1264,6 +1264,11 @@ class HeatmapModule(pl.LightningModule):
                 (pred_with == pred_without).float().mean(),
                 count,
             )
+            self._log_scalar(
+                "train_objectless_prompt_consistency_kl",
+                loss.detach(),
+                count,
+            )
         return loss
 
     def _teacher_object_removed_inputs(
@@ -1370,6 +1375,190 @@ class HeatmapModule(pl.LightningModule):
         )
         return None
 
+    def _log_object_prompt_drop_eval(
+        self,
+        imgs,
+        boxes,
+        valid,
+        actions,
+        preds,
+        target,
+        stage,
+    ):
+        if not self.uses_object_proposals or stage == "train":
+            return None
+        if "object_valid" not in target:
+            return None
+
+        device = preds.device
+        valid = valid.to(device=device, dtype=torch.bool)
+        actions = actions.to(device=device, dtype=torch.long)
+        object_visible = target["object_valid"].to(device=device, dtype=torch.bool)
+        object_visible = object_visible.any(dim=1)
+        objectless = self._labels_in_indices(actions, self.objectless_action_indices)
+        objectless_visible = valid & objectless & object_visible[:, None]
+
+        exact_compatible = None
+        info = self._exact_teacher_object_info(actions, valid, target, device)
+        if info is not None:
+            exact_compatible = (
+                info["valid"]
+                & info["known_action"]
+                & info["compatible_1based"]
+            )
+
+        has_objectless = bool(objectless_visible.any().item())
+        has_exact = (
+            exact_compatible is not None
+            and bool(exact_compatible.any().item())
+        )
+        if not has_objectless and not has_exact:
+            return None
+
+        saved_attrs = {
+            name: getattr(self.model, name, None)
+            for name in (
+                "last_actor_action_logits",
+                "last_actor_motion_logits",
+                "last_actor_object_prompt_tokens",
+                "last_actor_object_prompt_attention_logits",
+                "last_actor_object_prompt_attention",
+                "last_actor_object_prompt_valid",
+            )
+        }
+        empty_inputs = self._empty_object_inputs(
+            batch_size=int(imgs.shape[0]),
+            device=imgs.device,
+            dtype=torch.float32,
+        )
+        try:
+            with torch.no_grad():
+                dropped_data = self.model(
+                    imgs,
+                    boxes=boxes,
+                    valid=valid,
+                    action_labels=actions,
+                    **empty_inputs,
+                )
+            dropped_preds = self._unpack_model_data(dropped_data)[0].detach()
+        finally:
+            for name, value in saved_attrs.items():
+                setattr(self.model, name, value)
+
+        with torch.no_grad():
+            base_logp = F.log_softmax(preds.float(), dim=-1)
+            dropped_logp = F.log_softmax(dropped_preds.float(), dim=-1)
+            base_prob = base_logp.exp()
+            dropped_prob = dropped_logp.exp()
+            base_pred = preds.argmax(dim=-1)
+            dropped_pred = dropped_preds.argmax(dim=-1)
+
+            if has_objectless:
+                labels = actions[objectless_visible]
+                base_true_prob = base_prob[objectless_visible].gather(
+                    1,
+                    labels.unsqueeze(1),
+                ).squeeze(1)
+                dropped_true_prob = dropped_prob[objectless_visible].gather(
+                    1,
+                    labels.unsqueeze(1),
+                ).squeeze(1)
+                consistency_kl = F.kl_div(
+                    dropped_logp[objectless_visible],
+                    base_prob[objectless_visible],
+                    reduction="batchmean",
+                )
+                count = int(labels.numel())
+                self._log_scalar(
+                    f"{stage}_object_prompt_drop_objectless_pred_match",
+                    (
+                        base_pred[objectless_visible]
+                        == dropped_pred[objectless_visible]
+                    ).float().mean(),
+                    count,
+                )
+                self._log_scalar(
+                    f"{stage}_object_prompt_drop_objectless_true_prob_delta",
+                    (base_true_prob - dropped_true_prob).mean(),
+                    count,
+                )
+                self._log_scalar(
+                    f"{stage}_object_prompt_drop_objectless_kl",
+                    consistency_kl,
+                    count,
+                )
+                self._log_scalar(
+                    f"{stage}_object_prompt_drop_objectless_acc",
+                    (dropped_pred[objectless_visible] == labels).float().mean(),
+                    count,
+                )
+                object_action_indices = self.group_indices.get("object_mapped")
+                if (
+                    object_action_indices is not None
+                    and int(object_action_indices.numel()) > 0
+                ):
+                    object_action_indices = object_action_indices.to(
+                        device=device,
+                        dtype=torch.long,
+                    )
+                    object_action_rate = (
+                        self._labels_in_indices(
+                            dropped_pred[objectless_visible],
+                            object_action_indices,
+                        )
+                        .float()
+                        .mean()
+                    )
+                    self._log_scalar(
+                        f"{stage}_object_prompt_drop_objectless_object_action_pred_rate",
+                        object_action_rate,
+                        count,
+                    )
+
+            if has_exact:
+                labels = actions[exact_compatible]
+                base_true_logits = preds[exact_compatible].gather(
+                    1,
+                    labels.unsqueeze(1),
+                ).squeeze(1)
+                dropped_true_logits = dropped_preds[exact_compatible].gather(
+                    1,
+                    labels.unsqueeze(1),
+                ).squeeze(1)
+                base_true_prob = base_prob[exact_compatible].gather(
+                    1,
+                    labels.unsqueeze(1),
+                ).squeeze(1)
+                dropped_true_prob = dropped_prob[exact_compatible].gather(
+                    1,
+                    labels.unsqueeze(1),
+                ).squeeze(1)
+                count = int(labels.numel())
+                self._log_scalar(
+                    f"{stage}_object_prompt_drop_exact_true_logit_drop",
+                    (base_true_logits - dropped_true_logits).mean(),
+                    count,
+                )
+                self._log_scalar(
+                    f"{stage}_object_prompt_drop_exact_true_prob_drop",
+                    (base_true_prob - dropped_true_prob).mean(),
+                    count,
+                )
+                self._log_scalar(
+                    f"{stage}_object_prompt_drop_exact_pred_match",
+                    (
+                        base_pred[exact_compatible]
+                        == dropped_pred[exact_compatible]
+                    ).float().mean(),
+                    count,
+                )
+                self._log_scalar(
+                    f"{stage}_object_prompt_drop_exact_acc",
+                    (dropped_pred[exact_compatible] == labels).float().mean(),
+                    count,
+                )
+        return None
+
     def _log_actor_object_prompt_diagnostics(
         self,
         stage,
@@ -1396,6 +1585,50 @@ class HeatmapModule(pl.LightningModule):
         info = self._exact_teacher_object_info(actions, valid, target, device)
         if info is None:
             return
+
+        valid = valid.to(device=device, dtype=torch.bool)
+        actions = actions.to(device=device, dtype=torch.long)
+        prompt_valid = prompt_valid.to(device=device, dtype=torch.bool)
+        prompt_attention = prompt_attention.float()
+        visible_prompt = prompt_valid.any(dim=1)
+        valid_prompt_attention = prompt_attention.masked_fill(
+            ~prompt_valid[:, None, :],
+            0.0,
+        )
+        objectless = self._labels_in_indices(actions, self.objectless_action_indices)
+        objectless_visible = valid & objectless & visible_prompt[:, None]
+        if objectless_visible.any():
+            prompt_count = prompt_valid.sum(dim=1).clamp_min(1).to(
+                dtype=prompt_attention.dtype,
+            )
+            mean_attention = (
+                valid_prompt_attention.sum(dim=-1)
+                / prompt_count[:, None]
+            )
+            max_attention = valid_prompt_attention.amax(dim=-1)
+            entropy_prob = valid_prompt_attention.clamp_min(1.0e-8)
+            entropy = -(entropy_prob * entropy_prob.log()).sum(dim=-1)
+            entropy_norm = torch.where(
+                prompt_count[:, None] > 1.0,
+                entropy / prompt_count[:, None].log().clamp_min(1.0e-6),
+                torch.zeros_like(entropy),
+            )
+            count = int(objectless_visible.sum().item())
+            self._log_scalar(
+                f"{stage}_object_prompt_attention_objectless_visible_mean",
+                mean_attention[objectless_visible].mean(),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_object_prompt_attention_objectless_visible_max",
+                max_attention[objectless_visible].mean(),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_object_prompt_attention_objectless_visible_entropy",
+                entropy_norm[objectless_visible].mean(),
+                count,
+            )
 
         valid_known = info["valid"] & info["known_action"]
         if valid_known.any():
@@ -1447,6 +1680,11 @@ class HeatmapModule(pl.LightningModule):
         )
         self._log_scalar(
             f"{stage}_object_prompt_exact_correct_object_prob",
+            true_prob.mean(),
+            count,
+        )
+        self._log_scalar(
+            f"{stage}_object_prompt_attention_exact_teacher_mean",
             true_prob.mean(),
             count,
         )
@@ -1776,6 +2014,15 @@ class HeatmapModule(pl.LightningModule):
             preds,
             target,
             object_inputs,
+            stage,
+        )
+        self._log_object_prompt_drop_eval(
+            imgs,
+            boxes,
+            valid,
+            actions,
+            preds,
+            target,
             stage,
         )
         loss_objectless_prompt_consistency = (
