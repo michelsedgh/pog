@@ -39,64 +39,19 @@ CORE_COLUMNS = [
     "val_loss_main_deploy",
     "val_loss_grounding_aux",
     "val_loss_objectless_object_action_suppression",
-    "val_loss_object_action_confuser",
-    "val_object_action_confuser_violation_rate",
-    "val_loss_object_slot_target",
-    "val_loss_object_slot_quality",
-    "val_loss_object_slot_quality_pos",
-    "val_loss_object_slot_quality_neg",
-    "val_object_slot_true_compatible_rate",
-    "val_object_slot_true_incompatible_rate",
-    "val_object_slot_known_action_count",
-    "val_object_slot_exact_teacher_valid_rate_1based",
-    "val_object_slot_exact_teacher_valid_rate_0based",
-    "val_object_slot_exact_compatible_rate_1based",
-    "val_object_slot_exact_compatible_rate_0based",
-    "val_object_slot_any_compatible_proposal_rate",
-    "val_object_slot_exact_compatible_count",
-    "val_object_slot_exact_correct_object_rate",
-    "val_object_slot_exact_correct_object_prob",
-    "val_object_slot_exact_quality_pos_mean",
-    "val_coverage_true_action_exact",
-    "val_object_slot_mapped_missing_count",
-    "val_object_slot_mapped_mismatch_count",
-    "val_object_visual_fallback_true_delta_given_exact_compatible",
-    "val_object_visual_fallback_true_delta_given_missing",
-    "val_detected_mix_weight_exact",
-    "val_visual_mix_weight_exact",
-    "val_detected_mix_weight_missing",
-    "val_visual_mix_weight_missing",
-    "val_detected_delta_true_minus_confuser_exact",
-    "val_missing_true_minus_watchtv_margin",
-    "val_missing_true_minus_confuser_margin",
-    "val_visual_delta_true_minus_confuser_missing",
-    "val_watchtv_fp_rate_missing_objectful",
-    "val_watchtv_fp_rate_laptop_missing",
-    "val_watchtv_fp_rate_phone_missing",
-    "val_object_slot_exact_quality_teacher_rank_mean",
-    "val_object_slot_exact_quality_teacher_top1_rate",
+    "val_loss_object_prompt_grounding",
+    "val_object_prompt_grounding_acc",
+    "val_object_prompt_grounding_true_prob",
+    "val_object_prompt_exact_teacher_valid_rate_1based",
+    "val_object_prompt_exact_compatible_rate_1based",
+    "val_object_prompt_any_compatible_proposal_rate",
+    "val_object_prompt_exact_compatible_count",
+    "val_object_prompt_exact_correct_object_rate",
+    "val_object_prompt_exact_correct_object_prob",
+    "val_actor_object_prompt_token_count",
     "val_objectless_branch_acc",
     "val_objectful_branch_acc",
     "val_objectless_true_minus_max_objectful_margin",
-    "val_object_slot_quality_mean",
-    "val_object_slot_quality_max_mean",
-    "val_object_slot_quality_pos_acc",
-    "val_object_slot_quality_pos_mean",
-    "val_object_slot_quality_neg_acc",
-    "val_object_slot_quality_neg_mean",
-    "val_object_slot_mismatch_mean",
-    "val_object_slot_Uselaptop_laptop_rate",
-    "val_object_slot_Uselaptop_incompatible_rate",
-    "val_coverage_Uselaptop",
-    "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
-    "val_object_slot_motion_Uselaptop_minus_Readbook_logit_margin",
-    "val_object_slot_delta_Uselaptop_minus_Readbook_logit_margin",
-    "val_object_visual_fallback_Uselaptop_delta",
-    "val_object_visual_fallback_Uselaptop_minus_Readbook_margin",
-    "val_object_slot_Readbook_book_rate",
-    "val_coverage_Readbook",
-    "val_object_slot_Readbook_incompatible_rate",
-    "val_object_slot_Readbook_minus_Uselaptop_logit_margin",
     "val_loss_motion_aux",
     "val_motion_aux_acc",
     "train_nash_weight_action",
@@ -126,29 +81,12 @@ CORE_COLUMNS = [
     "val_objectless_with_book_visible_count",
     "val_objectless_with_phone_visible_acc",
     "val_objectless_with_phone_visible_count",
-    "val_actor_object_slot_relation_scale",
-    "val_factorized_visual_source_token_count",
-    "val_factorized_heatmap_source_token_count",
-    "val_factorized_final_visual_source_token_count",
-    "val_loss_factorized_presence",
-    "val_factorized_presence_acc",
-    "val_factorized_presence_objectless_null_rate",
-    "val_factorized_presence_objectful_interaction_rate",
     "val_presence_acc",
     "val_presence_objectless_null_rate",
     "val_presence_objectful_interaction_rate",
-    "val_teacher_dropped_objectful_acc",
-    "val_teacher_dropped_true_minus_watchtv_margin",
-    "val_teacher_dropped_true_minus_confuser_margin",
     "val_watchtv_fp_rate_objectless",
-    "train_teacher_object_drop_prob_scheduled",
-    "train_missing_object_confuser_weight_scheduled",
-    "train_missing_object_visual_fallback_weight_scheduled",
-    "train_loss_missing_object_confuser",
-    "train_loss_missing_object_visual_fallback",
-    "train_missing_object_dropout_acc",
-    "train_missing_object_visual_fallback_acc",
-    "train_missing_object_true_minus_WatchTV_margin",
+    "train_loss_objectless_prompt_consistency",
+    "train_objectless_prompt_consistency_pred_match",
 ]
 
 GROUPS = [
@@ -339,26 +277,12 @@ def print_compact_epoch_summary(epoch_df):
         "val_group_phone_tv_acc",
         "val_group_drink_cup_bottle_glass_acc",
         "val_group_drink_acc",
-        "val_object_slot_true_compatible_rate",
-        "val_object_slot_exact_correct_object_rate",
-        "val_coverage_true_action_exact",
-        "val_object_visual_fallback_true_delta_given_exact_compatible",
-        "val_object_visual_fallback_true_delta_given_missing",
-        "val_detected_mix_weight_exact",
-        "val_visual_mix_weight_exact",
-        "val_detected_mix_weight_missing",
-        "val_visual_mix_weight_missing",
-        "val_missing_true_minus_watchtv_margin",
-        "val_missing_true_minus_confuser_margin",
-        "val_object_slot_quality_pos_acc",
-        "val_object_slot_quality_neg_acc",
-        "val_object_slot_Uselaptop_laptop_rate",
-        "val_coverage_Uselaptop",
-        "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
-        "val_actor_object_slot_relation_scale",
-        "val_factorized_final_visual_source_token_count",
         "val_object_counterfactual_teacher_logit_drop",
-        "val_teacher_dropped_true_minus_confuser_margin",
+        "val_object_prompt_grounding_acc",
+        "val_object_prompt_grounding_true_prob",
+        "val_object_prompt_exact_correct_object_rate",
+        "val_object_prompt_exact_correct_object_prob",
+        "val_actor_object_prompt_token_count",
         "val_interaction_heatmap_positive_mean",
         "val_interaction_heatmap_pred_max",
         "val_interaction_heatmap_soft_iou",
@@ -402,26 +326,13 @@ def print_compact_best(epoch_df):
         "val_group_objectless_acc",
         "val_group_laptop_book_tv_acc",
         "val_group_phone_tv_acc",
-        "val_object_slot_true_compatible_rate",
-        "val_object_slot_exact_correct_object_rate",
-        "val_coverage_true_action_exact",
-        "val_object_visual_fallback_true_delta_given_exact_compatible",
-        "val_object_visual_fallback_true_delta_given_missing",
-        "val_detected_mix_weight_exact",
-        "val_visual_mix_weight_exact",
-        "val_detected_mix_weight_missing",
-        "val_visual_mix_weight_missing",
-        "val_missing_true_minus_confuser_margin",
         "val_objectless_true_minus_max_objectful_margin",
-        "val_object_slot_quality_pos_acc",
-        "val_object_slot_quality_neg_acc",
-        "val_object_slot_Uselaptop_laptop_rate",
-        "val_coverage_Uselaptop",
-        "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
-        "val_actor_object_slot_relation_scale",
-        "val_factorized_final_visual_source_token_count",
         "val_object_counterfactual_teacher_logit_drop",
-        "val_teacher_dropped_true_minus_confuser_margin",
+        "val_object_prompt_grounding_acc",
+        "val_object_prompt_grounding_true_prob",
+        "val_object_prompt_exact_correct_object_rate",
+        "val_object_prompt_exact_correct_object_prob",
+        "val_actor_object_prompt_token_count",
         "val_action_Uselaptop_acc",
         "val_action_Readbook_acc",
         "val_action_WatchTV_acc",
@@ -453,29 +364,7 @@ def print_object_use_epoch_table(epoch_df):
         "val_interaction_heatmap_soft_iou",
         "val_interaction_heatmap_center_l2",
         "val_interaction_heatmap_missing_object_masked_rate",
-        "val_object_slot_true_compatible_rate",
-        "val_object_slot_true_incompatible_rate",
-        "val_object_slot_exact_compatible_rate_1based",
-        "val_object_slot_exact_compatible_rate_0based",
-        "val_object_slot_exact_correct_object_rate",
-        "val_coverage_true_action_exact",
-        "val_object_visual_fallback_true_delta_given_exact_compatible",
-        "val_object_visual_fallback_true_delta_given_missing",
-        "val_detected_mix_weight_exact",
-        "val_visual_mix_weight_exact",
-        "val_detected_mix_weight_missing",
-        "val_visual_mix_weight_missing",
-        "val_missing_true_minus_confuser_margin",
-        "val_object_slot_exact_quality_teacher_rank_mean",
-        "val_object_slot_exact_quality_teacher_top1_rate",
         "val_objectless_true_minus_max_objectful_margin",
-        "val_object_slot_quality_pos_acc",
-        "val_object_slot_quality_neg_acc",
-        "val_object_slot_Uselaptop_laptop_rate",
-        "val_coverage_Uselaptop",
-        "val_object_visual_fallback_Uselaptop_delta",
-        "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
-        "val_object_slot_delta_Uselaptop_minus_Readbook_logit_margin",
         "val_object_counterfactual_teacher_logit_drop",
         "val_object_counterfactual_teacher_prob_drop",
     ]
@@ -494,29 +383,7 @@ def print_object_use_epoch_table(epoch_df):
         "val_interaction_heatmap_mismatch_valid_rate",
         "val_object_counterfactual_teacher_logit_drop",
         "val_object_counterfactual_teacher_prob_drop",
-        "val_object_slot_true_compatible_rate",
-        "val_object_slot_true_incompatible_rate",
-        "val_object_slot_exact_compatible_rate_1based",
-        "val_object_slot_exact_compatible_rate_0based",
-        "val_object_slot_exact_correct_object_rate",
-        "val_coverage_true_action_exact",
-        "val_object_visual_fallback_true_delta_given_exact_compatible",
-        "val_object_visual_fallback_true_delta_given_missing",
-        "val_detected_mix_weight_exact",
-        "val_visual_mix_weight_exact",
-        "val_detected_mix_weight_missing",
-        "val_visual_mix_weight_missing",
-        "val_missing_true_minus_confuser_margin",
-        "val_object_slot_exact_quality_teacher_rank_mean",
-        "val_object_slot_exact_quality_teacher_top1_rate",
         "val_objectless_true_minus_max_objectful_margin",
-        "val_object_slot_quality_pos_acc",
-        "val_object_slot_quality_neg_acc",
-        "val_object_slot_Uselaptop_laptop_rate",
-        "val_coverage_Uselaptop",
-        "val_object_visual_fallback_Uselaptop_delta",
-        "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
-        "val_object_slot_delta_Uselaptop_minus_Readbook_logit_margin",
     ]
     display_cols = [col for col in cols if col in epoch_df.columns]
     if len(display_cols) <= 1:
@@ -767,131 +634,47 @@ def print_decision(epoch_df):
     latest = epoch_df.iloc[-1]
     f1_base = metric(base, "val_f1")
     f1_latest = metric(latest, "val_f1")
+    f1_delta = f1_latest - f1_base
+    latest_epoch = int(latest["epoch"])
+
     deploy_score = metric(latest, "val_deploy_score")
     deploy_key_mean = metric(latest, "val_deploy_key_action_mean")
     deploy_key_min = metric(latest, "val_deploy_key_action_min")
-    f1_delta = f1_latest - f1_base
-    latest_epoch = int(latest["epoch"])
+    object_mapped_acc = metric(latest, "val_group_object_mapped_acc")
+    objectless_acc = metric(latest, "val_group_objectless_acc")
+
     pos = metric(latest, "val_interaction_heatmap_positive_mean")
     pred_max = metric(latest, "val_interaction_heatmap_pred_max")
     soft_iou = metric(latest, "val_interaction_heatmap_soft_iou")
     center_l2 = metric(latest, "val_interaction_heatmap_center_l2")
     laptop_pos = metric(latest, "val_interaction_heatmap_laptop_positive_mean")
     laptop_iou = metric(latest, "val_interaction_heatmap_laptop_iou")
-    actor_all_slot = metric(latest, "val_actor_all_slot_acc")
-    actor_pair = metric(latest, "val_actor_pair_acc")
-    actor_pair_swap = metric(latest, "val_actor_pair_swap_acc")
-    actor_presence = metric(latest, "val_actor_presence_acc")
-    object_mapped_acc = metric(latest, "val_group_object_mapped_acc")
-    objectless_acc = metric(latest, "val_group_objectless_acc")
-    cf_logit = metric(latest, "val_object_counterfactual_teacher_logit_drop")
-    cf_prob = metric(latest, "val_object_counterfactual_teacher_prob_drop")
-    hard_objectless = metric(latest, "val_objectless_with_object_visible_acc")
-    hard_objectless_count = metric(latest, "val_objectless_with_object_visible_count")
-    hard_object_action_rate = metric(
+
+    prompt_loss = metric(latest, "val_loss_object_prompt_grounding")
+    prompt_acc = metric(latest, "val_object_prompt_grounding_acc")
+    prompt_true_prob = metric(latest, "val_object_prompt_grounding_true_prob")
+    prompt_teacher_valid = metric(
         latest,
-        "val_objectless_with_object_visible_object_action_pred_rate",
+        "val_object_prompt_exact_teacher_valid_rate_1based",
     )
-    confuser_loss = metric(latest, "val_loss_object_action_confuser")
-    confuser_violation = metric(latest, "val_object_action_confuser_violation_rate")
-    motion_aux_loss = metric(latest, "val_loss_motion_aux")
-    motion_aux_acc = metric(latest, "val_motion_aux_acc")
-    slot_loss = metric(latest, "val_loss_object_slot_target")
-    slot_quality_loss = metric(latest, "val_loss_object_slot_quality")
-    slot_compatible = metric(latest, "val_object_slot_true_compatible_rate")
-    slot_incompatible = metric(latest, "val_object_slot_true_incompatible_rate")
-    exact_valid_1based = metric(
+    prompt_teacher_compat = metric(
         latest,
-        "val_object_slot_exact_teacher_valid_rate_1based",
+        "val_object_prompt_exact_compatible_rate_1based",
     )
-    exact_valid_0based = metric(
+    prompt_any_compat = metric(
         latest,
-        "val_object_slot_exact_teacher_valid_rate_0based",
+        "val_object_prompt_any_compatible_proposal_rate",
     )
-    exact_compatible_1based = metric(
+    prompt_exact_correct = metric(
         latest,
-        "val_object_slot_exact_compatible_rate_1based",
+        "val_object_prompt_exact_correct_object_rate",
     )
-    exact_compatible_0based = metric(
+    prompt_exact_prob = metric(
         latest,
-        "val_object_slot_exact_compatible_rate_0based",
+        "val_object_prompt_exact_correct_object_prob",
     )
-    any_compatible_proposal = metric(
-        latest,
-        "val_object_slot_any_compatible_proposal_rate",
-    )
-    exact_correct_rate = metric(
-        latest,
-        "val_object_slot_exact_correct_object_rate",
-    )
-    exact_correct_prob = metric(
-        latest,
-        "val_object_slot_exact_correct_object_prob",
-    )
-    exact_coverage = metric(latest, "val_coverage_true_action_exact")
-    exact_quality = metric(latest, "val_object_slot_exact_quality_pos_mean")
-    mapped_missing_count = metric(latest, "val_object_slot_mapped_missing_count")
-    mapped_mismatch_count = metric(latest, "val_object_slot_mapped_mismatch_count")
-    fallback_delta_exact = metric(
-        latest,
-        "val_object_visual_fallback_true_delta_given_exact_compatible",
-    )
-    fallback_delta_missing = metric(
-        latest,
-        "val_object_visual_fallback_true_delta_given_missing",
-    )
-    detected_mix_exact = metric(latest, "val_detected_mix_weight_exact")
-    visual_mix_exact = metric(latest, "val_visual_mix_weight_exact")
-    detected_mix_missing = metric(latest, "val_detected_mix_weight_missing")
-    visual_mix_missing = metric(latest, "val_visual_mix_weight_missing")
-    detected_delta_confuser_exact = metric(
-        latest,
-        "val_detected_delta_true_minus_confuser_exact",
-    )
-    missing_watch_margin = metric(latest, "val_missing_true_minus_watchtv_margin")
-    missing_confuser_margin = metric(
-        latest,
-        "val_missing_true_minus_confuser_margin",
-    )
-    missing_visual_confuser_margin = metric(
-        latest,
-        "val_visual_delta_true_minus_confuser_missing",
-    )
-    watchtv_missing_fp = metric(latest, "val_watchtv_fp_rate_missing_objectful")
-    watchtv_laptop_missing_fp = metric(latest, "val_watchtv_fp_rate_laptop_missing")
-    watchtv_phone_missing_fp = metric(latest, "val_watchtv_fp_rate_phone_missing")
-    factorized_presence_acc = metric(latest, "val_factorized_presence_acc")
-    factorized_null_rate = metric(
-        latest,
-        "val_factorized_presence_objectless_null_rate",
-    )
-    factorized_interaction_rate = metric(
-        latest,
-        "val_factorized_presence_objectful_interaction_rate",
-    )
-    visual_source_tokens = metric(latest, "val_factorized_visual_source_token_count")
-    heatmap_source_tokens = metric(latest, "val_factorized_heatmap_source_token_count")
-    final_visual_source_tokens = metric(
-        latest,
-        "val_factorized_final_visual_source_token_count",
-    )
-    teacher_dropped_acc = metric(latest, "val_teacher_dropped_objectful_acc")
-    teacher_dropped_watch_margin = metric(
-        latest,
-        "val_teacher_dropped_true_minus_watchtv_margin",
-    )
-    teacher_dropped_confuser_margin = metric(
-        latest,
-        "val_teacher_dropped_true_minus_confuser_margin",
-    )
-    exact_quality_rank = metric(
-        latest,
-        "val_object_slot_exact_quality_teacher_rank_mean",
-    )
-    exact_quality_top1 = metric(
-        latest,
-        "val_object_slot_exact_quality_teacher_top1_rate",
-    )
+    prompt_tokens = metric(latest, "val_actor_object_prompt_token_count")
+
     heatmap_missing_mask_rate = metric(
         latest,
         "val_interaction_heatmap_missing_object_masked_rate",
@@ -908,37 +691,22 @@ def print_decision(epoch_df):
         latest,
         "val_interaction_heatmap_mismatch_valid_rate",
     )
-    objectless_margin = metric(
+
+    hard_objectless = metric(latest, "val_objectless_with_object_visible_acc")
+    hard_objectless_count = metric(latest, "val_objectless_with_object_visible_count")
+    hard_object_action_rate = metric(
         latest,
-        "val_objectless_true_minus_max_objectful_margin",
+        "val_objectless_with_object_visible_object_action_pred_rate",
     )
-    slot_quality = metric(latest, "val_object_slot_quality_max_mean")
-    slot_relation_scale = metric(latest, "val_actor_object_slot_relation_scale")
-    slot_quality_pos_acc = metric(latest, "val_object_slot_quality_pos_acc")
-    slot_quality_neg_acc = metric(latest, "val_object_slot_quality_neg_acc")
-    slot_mismatch = metric(latest, "val_object_slot_mismatch_mean")
-    slot_laptop_rate = metric(latest, "val_object_slot_Uselaptop_laptop_rate")
-    laptop_coverage = metric(latest, "val_coverage_Uselaptop")
-    fallback_laptop_delta = metric(
-        latest,
-        "val_object_visual_fallback_Uselaptop_delta",
-    )
-    slot_laptop_incompatible = metric(
-        latest,
-        "val_object_slot_Uselaptop_incompatible_rate",
-    )
-    slot_u_minus_read = metric(
-        latest,
-        "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
-    )
-    slot_motion_u_minus_read = metric(
-        latest,
-        "val_object_slot_motion_Uselaptop_minus_Readbook_logit_margin",
-    )
-    slot_delta_u_minus_read = metric(
-        latest,
-        "val_object_slot_delta_Uselaptop_minus_Readbook_logit_margin",
-    )
+    motion_aux_loss = metric(latest, "val_loss_motion_aux")
+    motion_aux_acc = metric(latest, "val_motion_aux_acc")
+    actor_all_slot = metric(latest, "val_actor_all_slot_acc")
+    actor_pair = metric(latest, "val_actor_pair_acc")
+    actor_pair_swap = metric(latest, "val_actor_pair_swap_acc")
+    actor_presence = metric(latest, "val_actor_presence_acc")
+    cf_logit = metric(latest, "val_object_counterfactual_teacher_logit_drop")
+    cf_prob = metric(latest, "val_object_counterfactual_teacher_prob_drop")
+
     print("\nDECISION:\n")
     print(f"latest epoch: {latest_epoch}")
     if pd.notna(deploy_score):
@@ -961,81 +729,17 @@ def print_decision(epoch_df):
             f"object_mapped {fmt(object_mapped_acc)}, "
             f"objectless {fmt(objectless_acc)}"
         )
-    if pd.notna(slot_compatible) or pd.notna(slot_laptop_rate):
+    if pd.notna(prompt_acc) or pd.notna(prompt_loss):
         print(
-            "object slot explanations: "
-            f"loss {fmt(slot_loss)}, compatible {fmt(slot_compatible)}, "
-            f"incompatible {fmt(slot_incompatible)}, "
-            f"objectless_margin {fmt(objectless_margin)}, "
-            f"relation_scale {fmt(slot_relation_scale)}, "
-            f"quality_loss {fmt(slot_quality_loss)}, "
-            f"quality_pos_acc {fmt(slot_quality_pos_acc)}, "
-            f"quality_neg_acc {fmt(slot_quality_neg_acc)}, "
-            f"quality_max {fmt(slot_quality)}, mismatch {fmt(slot_mismatch)}"
-        )
-        print(
-            "Uselaptop slot: "
-            f"laptop {fmt(slot_laptop_rate)}, "
-            f"incompatible {fmt(slot_laptop_incompatible)}, "
-            f"u_minus_read {fmt(slot_u_minus_read)}, "
-            f"motion_margin {fmt(slot_motion_u_minus_read)}, "
-            f"slot_delta_margin {fmt(slot_delta_u_minus_read)}, "
-            f"coverage {fmt(laptop_coverage)}, "
-            f"fallback_delta {fmt(fallback_laptop_delta)}"
-        )
-    if pd.notna(exact_correct_rate) or pd.notna(exact_compatible_1based):
-        print(
-            "exact teacher object: "
-            f"valid_1based {fmt(exact_valid_1based)}, "
-            f"valid_0based {fmt(exact_valid_0based)}, "
-            f"compat_1based {fmt(exact_compatible_1based)}, "
-            f"compat_0based {fmt(exact_compatible_0based)}, "
-            f"any_compat {fmt(any_compatible_proposal)}, "
-            f"correct_rate {fmt(exact_correct_rate)}, "
-            f"correct_prob {fmt(exact_correct_prob)}, "
-            f"coverage {fmt(exact_coverage)}, "
-            f"fallback_delta_exact {fmt(fallback_delta_exact)}, "
-            f"fallback_delta_missing {fmt(fallback_delta_missing)}, "
-            f"missing_count {fmt(mapped_missing_count, 0)}, "
-            f"mismatch_count {fmt(mapped_mismatch_count, 0)}, "
-            f"quality {fmt(exact_quality)}, "
-            f"quality_rank {fmt(exact_quality_rank)}, "
-            f"quality_top1 {fmt(exact_quality_top1)}"
-        )
-    if (
-        pd.notna(detected_mix_exact)
-        or pd.notna(visual_mix_missing)
-        or pd.notna(missing_confuser_margin)
-    ):
-        print(
-            "factorized evidence mix: "
-            f"detected_exact {fmt(detected_mix_exact)}, "
-            f"visual_exact {fmt(visual_mix_exact)}, "
-            f"detected_missing {fmt(detected_mix_missing)}, "
-            f"visual_missing {fmt(visual_mix_missing)}, "
-            f"detected_delta_confuser_exact {fmt(detected_delta_confuser_exact)}, "
-            f"missing_watch_margin {fmt(missing_watch_margin)}, "
-            f"missing_confuser_margin {fmt(missing_confuser_margin)}, "
-            f"visual_missing_confuser_margin {fmt(missing_visual_confuser_margin)}"
-        )
-        print(
-            "fallback false positives: "
-            f"watchtv_missing {fmt(watchtv_missing_fp)}, "
-            f"laptop_missing {fmt(watchtv_laptop_missing_fp)}, "
-            f"phone_missing {fmt(watchtv_phone_missing_fp)}"
-        )
-    if (
-        pd.notna(factorized_presence_acc)
-        or pd.notna(final_visual_source_tokens)
-    ):
-        print(
-            "factorized mode/source: "
-            f"presence_acc {fmt(factorized_presence_acc)}, "
-            f"objectless_null {fmt(factorized_null_rate)}, "
-            f"objectful_interaction {fmt(factorized_interaction_rate)}, "
-            f"source_tokens {fmt(visual_source_tokens, 0)}, "
-            f"heatmap_tokens {fmt(heatmap_source_tokens, 0)}, "
-            f"final_visual_tokens {fmt(final_visual_source_tokens, 0)}"
+            "object prompt grounding: "
+            f"loss {fmt(prompt_loss)}, acc {fmt(prompt_acc)}, "
+            f"true_prob {fmt(prompt_true_prob)}, "
+            f"teacher_valid {fmt(prompt_teacher_valid)}, "
+            f"teacher_compat {fmt(prompt_teacher_compat)}, "
+            f"any_compat {fmt(prompt_any_compat)}, "
+            f"exact_correct {fmt(prompt_exact_correct)}, "
+            f"exact_prob {fmt(prompt_exact_prob)}, "
+            f"tokens {fmt(prompt_tokens, 0)}"
         )
     if pd.notna(heatmap_missing_mask_rate):
         print(
@@ -1050,11 +754,6 @@ def print_decision(epoch_df):
             "objectless hard negatives: "
             f"acc {fmt(hard_objectless)}, count {fmt(hard_objectless_count, 0)}, "
             f"object_action_pred_rate {fmt(hard_object_action_rate)}"
-        )
-    if pd.notna(confuser_loss):
-        print(
-            "object-action confuser: "
-            f"loss {fmt(confuser_loss)}, violation_rate {fmt(confuser_violation)}"
         )
     if pd.notna(motion_aux_loss):
         print(
@@ -1075,39 +774,25 @@ def print_decision(epoch_df):
     if pd.notna(cf_logit) or pd.notna(cf_prob):
         print(
             "teacher-object removal: "
-            f"logit_drop {fmt(cf_logit)}, prob_drop {fmt(cf_prob)}, "
-            f"dropped_acc {fmt(teacher_dropped_acc)}, "
-            f"dropped_watch_margin {fmt(teacher_dropped_watch_margin)}, "
-            f"dropped_confuser_margin {fmt(teacher_dropped_confuser_margin)}"
+            f"logit_drop {fmt(cf_logit)}, prob_drop {fmt(cf_prob)}"
         )
 
     if pd.notna(f1_delta) and f1_delta < -0.01:
         print("STOP/ROLL BACK: action F1 dropped more than 0.01 from epoch 0.")
         return
-    if pd.notna(cf_logit):
-        if cf_logit > 0.02 and pd.notna(slot_compatible) and slot_compatible > 0.20:
-            print(
-                "GOOD SUPPORTING SIGN: teacher-object removal affects the "
-                "true action logit."
-            )
-        elif cf_logit <= 0.0:
-            print(
-                "WARNING: teacher-object removal is not lowering the true "
-                "action logit yet."
-            )
-        else:
-            print("CONTINUE/COMPARE: object path is partly learning; action dependence is still weak.")
+    if pd.notna(prompt_exact_correct) and prompt_exact_correct >= 0.70:
+        print("GOOD PROMPT SIGN: exact compatible objects are grounding to prompt tokens.")
+        return
+    if pd.notna(cf_logit) and cf_logit > 0.02:
+        print("GOOD SUPPORTING SIGN: removing the teacher object changes the true action logit.")
         return
     if pd.notna(pos) and pd.notna(pred_max):
         if pos > 0.05 and pred_max > 0.10:
-            print(
-                "GOOD HEATMAP SIGN: actor-object heatmaps are responding; "
-                "use object-token metrics for final proof."
-            )
+            print("GOOD HEATMAP SIGN: actor-object heatmaps are responding.")
         else:
-            print("CONTINUE: actor-object heatmaps are not strong yet.")
+            print("CONTINUE: heatmap/prompt evidence is not strong yet.")
         return
-    print("INSUFFICIENT SIGNAL: no object-use metrics were found in this run.")
+    print("INSUFFICIENT SIGNAL: no object-prompt or heatmap metrics were found in this run.")
 
 
 def print_row(title, row):
@@ -1152,12 +837,6 @@ def print_row(title, row):
             f"count {metric(row, 'val_objectless_with_object_visible_count'):.0f}, "
             "object_action_pred_rate "
             f"{metric(row, 'val_objectless_with_object_visible_object_action_pred_rate'):.4f}"
-        )
-    if pd.notna(metric(row, "val_loss_object_action_confuser")):
-        print(
-            "object-action confuser: "
-            f"loss {metric(row, 'val_loss_object_action_confuser'):.4f}, "
-            f"violation_rate {metric(row, 'val_object_action_confuser_violation_rate'):.4f}"
         )
     if pd.notna(metric(row, "val_loss_motion_aux")):
         print(
@@ -1283,13 +962,13 @@ def main():
     print_decision(epoch_df)
 
     print("\nREAD THIS:")
-    print("- Main proof: val_f1/per-action accuracy stay healthy while slot explanations and heatmaps improve.")
-    print("- Exact compatible detections should use detected object slots, not visual fallback.")
-    print("- Objectful detector misses should activate the visual fallback and still beat confusers.")
+    print("- Main proof: val_f1/per-action accuracy stay healthy while object prompts and heatmaps improve.")
+    print("- Runtime detections should guide actor/visual representation, not add direct action logits.")
+    print("- Exact compatible detections should raise object-prompt grounding, not create a second classifier.")
     print("- Teacher-object removal is supporting evidence, not the checkpoint target by itself.")
     print("- Guardrail: val_f1/per-action target accuracy should not collapse while object-use metrics rise.")
     print("- Heatmap/object-channel metrics are secondary; use --verbose when debugging teacher quality.")
-    print("- actor_object_factorized_head is the runtime action-relation path.")
+    print("- actor_object_prompt_tokens is the clean runtime object path.")
 
 
 if __name__ == "__main__":

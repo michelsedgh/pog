@@ -8,17 +8,7 @@ import torch
 import os
 import os.path
 import pickle
-from datasets.object_vocab import NUM_OBJECT_CLASSES, OBJECT_TO_ID
-from datasets.toyota_action_taxonomy import (
-    toyota_confuser_action_names,
-    toyota_action_object_map,
-    toyota_action_to_index,
-    toyota_objectless_action_names,
-)
-from models.factorized_interaction_action_head import (
-    FactorizedActionObjectSpec,
-    FactorizedInteractionActionHead,
-)
+from datasets.object_vocab import NUM_OBJECT_CLASSES
 
 
 def load_state_dict(
@@ -153,8 +143,11 @@ class POGUISE(pl.LightningModule):
         self.actor_interaction_heatmaps = bool(
             self.hparams.get("actor_interaction_heatmaps", 0)
         )
-        self.actor_object_factorized_head_enabled = bool(
+        actor_object_factorized_head_enabled = bool(
             self.hparams.get("actor_object_factorized_head", 0)
+        )
+        self.actor_object_prompt_tokens_enabled = bool(
+            self.hparams.get("actor_object_prompt_tokens", 0)
         )
         self.actor_object_slot_head_enabled = bool(
             self.hparams.get("actor_object_slot_head", 0)
@@ -162,24 +155,23 @@ class POGUISE(pl.LightningModule):
         if self.actor_object_slot_head_enabled:
             raise ValueError(
                 "actor_object_slot_head was replaced by "
-                "actor_object_factorized_head. Set --actor_object_factorized_head 1 "
+                "actor_object_prompt_tokens. Set --actor_object_prompt_tokens 1 "
                 "and keep --actor_object_slot_head 0."
             )
         self.actor_object_logit_residual = False
         self.actor_object_conditioned_action = False
         if bool(self.hparams.get("scene_object_tokens", 0)):
             raise ValueError(
-                "scene_object_tokens was removed from the actor-object action "
-                "path. Use actor_object_factorized_head=1; detector object "
-                "classes stay outside the transformer trunk."
+                "scene_object_tokens was removed. Use actor_object_prompt_tokens=1 "
+                "for runtime object prompts inside the transformer trunk."
             )
-        if self.actor_object_factorized_head_enabled and not self.actor_prompt:
-            raise ValueError("actor_object_factorized_head requires actor_prompt")
-        if self.actor_object_factorized_head_enabled and not self.actor_interaction_heatmaps:
+        if actor_object_factorized_head_enabled:
             raise ValueError(
-                "actor_object_factorized_head requires actor_interaction_heatmaps "
-                "so the visual missing-object fallback has detector-free source tokens."
+                "actor_object_factorized_head was removed from the active runtime "
+                "path. Use actor_object_prompt_tokens=1 with the plain actor_head."
             )
+        if self.actor_object_prompt_tokens_enabled and not self.actor_prompt:
+            raise ValueError("actor_object_prompt_tokens requires actor_prompt")
         if self.actor_interaction_heatmaps and not self.actor_prompt:
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
         if "interaction_object_classes" in self.hparams:
@@ -199,8 +191,6 @@ class POGUISE(pl.LightningModule):
                     "interaction_warmup_freeze_actor_path requires freeze_backbone"
                 )
         self.use_register_tokens = bool(self.hparams.get("use_register_tokens", 0))
-        self.actor_object_slot_head = None
-        self.factorized_interaction_action_head = None
         self._create_network()
         # freeze backbone if specified
         if self.hparams.freeze_backbone:
@@ -213,7 +203,7 @@ class POGUISE(pl.LightningModule):
             else 0
         )
         if self.hparams.pretrained == "small":
-            return_heatmap_features = bool(self.actor_object_factorized_head_enabled)
+            return_heatmap_features = bool(self.actor_object_prompt_tokens_enabled)
             self.net = vit_small_patch16_224(
                 drop_rate=self.hparams.drop_rate,
                 attn_drop_rate=self.hparams.attn_drop_rate,
@@ -240,11 +230,25 @@ class POGUISE(pl.LightningModule):
                     "actor_bbox_prior_expand", 1.75
                 ),
                 actor_interaction_heatmaps=self.actor_interaction_heatmaps,
+                actor_object_prompt_tokens=self.actor_object_prompt_tokens_enabled,
+                num_scene_object_tokens=self.hparams.get("num_scene_object_tokens", 32),
+                num_object_classes=self.hparams.get(
+                    "num_object_classes",
+                    NUM_OBJECT_CLASSES,
+                ),
+                actor_object_prompt_box_prior_weight=self.hparams.get(
+                    "actor_object_prompt_box_prior_weight",
+                    0.05,
+                ),
+                actor_object_prompt_box_prior_expand=self.hparams.get(
+                    "actor_object_prompt_box_prior_expand",
+                    1.25,
+                ),
                 return_heatmap_features=return_heatmap_features,
                 trt_safe_attention=self.hparams.get("trt_safe_attention", 0),
             )
         else:
-            return_heatmap_features = bool(self.actor_object_factorized_head_enabled)
+            return_heatmap_features = bool(self.actor_object_prompt_tokens_enabled)
             self.net = vit_base_patch16_224(
                 drop_rate=self.hparams.drop_rate,
                 attn_drop_rate=self.hparams.attn_drop_rate,
@@ -271,6 +275,20 @@ class POGUISE(pl.LightningModule):
                     "actor_bbox_prior_expand", 1.75
                 ),
                 actor_interaction_heatmaps=self.actor_interaction_heatmaps,
+                actor_object_prompt_tokens=self.actor_object_prompt_tokens_enabled,
+                num_scene_object_tokens=self.hparams.get("num_scene_object_tokens", 32),
+                num_object_classes=self.hparams.get(
+                    "num_object_classes",
+                    NUM_OBJECT_CLASSES,
+                ),
+                actor_object_prompt_box_prior_weight=self.hparams.get(
+                    "actor_object_prompt_box_prior_weight",
+                    0.05,
+                ),
+                actor_object_prompt_box_prior_expand=self.hparams.get(
+                    "actor_object_prompt_box_prior_expand",
+                    1.25,
+                ),
                 return_heatmap_features=return_heatmap_features,
                 trt_safe_attention=self.hparams.get("trt_safe_attention", 0),
             )
@@ -297,17 +315,13 @@ class POGUISE(pl.LightningModule):
         self.net.head = nn.Identity(self.net.num_features, self.net.num_features)
         self.head = nn.Linear(self.net.num_features, self.hparams.num_classes)
         if self.actor_prompt:
-            self.actor_head = (
-                None
-                if self.actor_object_factorized_head_enabled
-                else nn.Linear(self.net.num_features, self.hparams.num_classes)
+            self.actor_head = nn.Linear(
+                self.net.num_features,
+                self.hparams.num_classes,
             )
             self.actor_motion_head = (
                 nn.Linear(self.net.num_features, self.hparams.num_classes)
-                if (
-                    not self.actor_object_factorized_head_enabled
-                    and float(self.hparams.get("motion_aux_loss_weight", 0.25)) > 0.0
-                )
+                if float(self.hparams.get("motion_aux_loss_weight", 0.25)) > 0.0
                 else None
             )
             self.presence_head = (
@@ -315,37 +329,16 @@ class POGUISE(pl.LightningModule):
                 if self.hparams.get("actor_presence_head", 0)
                 else None
             )
-            if self.actor_object_factorized_head_enabled:
-                factorized_spec = self._factorized_action_object_spec()
-                if not factorized_spec.compat_matrix.any():
-                    raise ValueError(
-                        "actor_object_factorized_head requires a Toyota action-object "
-                        "taxonomy mapping."
-                    )
-                self.factorized_interaction_action_head = FactorizedInteractionActionHead(
+            if self.actor_object_prompt_tokens_enabled:
+                self.object_prompt_actor_query = nn.Linear(
                     self.net.num_features,
-                    spec=factorized_spec,
-                    hidden_dim=int(
-                        self.hparams.get("actor_object_factorized_hidden_dim", 512)
-                    ),
-                    relation_scale_init=float(
-                        self.hparams.get(
-                            "actor_object_factorized_relation_scale_init",
-                            -1.0,
-                        )
-                    ),
-                    relation_logit_bound=float(
-                        self.hparams.get(
-                            "actor_object_factorized_relation_logit_bound",
-                            2.0,
-                        )
-                    ),
-                    max_relation_scale=float(
-                        self.hparams.get(
-                            "actor_object_factorized_max_relation_scale",
-                            1.5,
-                        )
-                    ),
+                    self.net.num_features,
+                    bias=False,
+                )
+                self.object_prompt_key = nn.Linear(
+                    self.net.num_features,
+                    self.net.num_features,
+                    bias=False,
                 )
         if self.hparams.get("linear_probe", 0):
             self._freeze_backbone()
@@ -357,126 +350,6 @@ class POGUISE(pl.LightningModule):
                 use_dropout=False,
                 # dropout=0.5,
             )
-
-    def _toyota_action_settings(self):
-        task_type = self.hparams.get("task_type", "CS")
-        action_taxonomy = self.hparams.get("toyota_action_taxonomy", "toyota_31")
-        return task_type, action_taxonomy
-
-    def _factorized_action_object_spec(self):
-        dataset = self.hparams.get("dataset", None)
-        dataset_name = (
-            dataset
-            if isinstance(dataset, str)
-            else getattr(dataset, "__name__", str(dataset))
-        )
-        dataset_module = "" if isinstance(dataset, str) else getattr(dataset, "__module__", "")
-        is_toyotasm = (
-            dataset_name == "toyotasm"
-            or dataset_name == "ToyotaSMDataset"
-            or dataset_module == "datasets.toyotasm"
-            or self.hparams.get("dataset_artifact", None) == "toyotasm"
-        )
-        if not is_toyotasm:
-            raise ValueError("actor_object_factorized_head currently requires toyotasm")
-        task_type, action_taxonomy = self._toyota_action_settings()
-        action_to_index = toyota_action_to_index(task_type, action_taxonomy)
-        action_object_map = toyota_action_object_map(task_type, action_taxonomy)
-        objectless_names = toyota_objectless_action_names(task_type, action_taxonomy)
-        num_actions = int(self.hparams.num_classes)
-        num_object_classes = int(
-            self.hparams.get("num_object_classes", NUM_OBJECT_CLASSES)
-        )
-
-        objectless_indices = []
-        for action_name in objectless_names:
-            action_idx = action_to_index.get(action_name)
-            if action_idx is not None:
-                objectless_indices.append(int(action_idx))
-
-        compat = torch.zeros(num_object_classes, num_actions, dtype=torch.float32)
-        for action_name, object_names in action_object_map.items():
-            action_idx = action_to_index.get(action_name)
-            if action_idx is None:
-                continue
-            for object_name in object_names:
-                object_id = OBJECT_TO_ID.get(object_name)
-                if object_id is not None and int(object_id) < num_object_classes:
-                    compat[int(object_id), int(action_idx)] = 1.0
-
-        confusers_by_action = {}
-        for action_name, action_idx in action_to_index.items():
-            confusers = []
-            for confuser_name in toyota_confuser_action_names(
-                action_name,
-                task_type,
-                action_taxonomy,
-            ):
-                confuser_idx = action_to_index.get(confuser_name)
-                if confuser_idx is not None:
-                    confusers.append(int(confuser_idx))
-            if confusers:
-                confusers_by_action[int(action_idx)] = tuple(sorted(set(confusers)))
-
-        return FactorizedActionObjectSpec(
-            num_actions=num_actions,
-            num_object_classes=num_object_classes,
-            objectless_action_indices=tuple(sorted(set(objectless_indices))),
-            compat_matrix=compat,
-            confusers_by_action=confusers_by_action,
-        )
-
-    def _object_heatmap_scores_from_predictions(
-        self,
-        heatmap_preds,
-        object_boxes,
-        object_valid,
-        dtype,
-    ):
-        if not torch.is_tensor(heatmap_preds) or not self.actor_interaction_heatmaps:
-            return None
-        n_pose = int(self.hparams.get("n_landmarks", 0) or 0)
-        n_actor = int(self.hparams.get("num_actor_tokens", 8) or 8)
-        end = n_pose + n_actor
-        if heatmap_preds.shape[1] < end:
-            return None
-        interaction_heatmaps = heatmap_preds[:, n_pose:end].to(dtype=dtype).clamp(
-            0.0,
-            1.0,
-        )
-        object_boxes = object_boxes.to(
-            device=interaction_heatmaps.device,
-            dtype=dtype,
-        ).clamp(0.0, 1.0)
-        object_valid_f = object_valid.to(
-            device=interaction_heatmaps.device,
-            dtype=dtype,
-        )
-        height = int(interaction_heatmaps.shape[-2])
-        width = int(interaction_heatmaps.shape[-1])
-        ys = torch.linspace(
-            0.0,
-            1.0,
-            height,
-            device=interaction_heatmaps.device,
-            dtype=dtype,
-        ).view(1, 1, height, 1)
-        xs = torch.linspace(
-            0.0,
-            1.0,
-            width,
-            device=interaction_heatmaps.device,
-            dtype=dtype,
-        ).view(1, 1, 1, width)
-        x1 = object_boxes[..., 0].view(object_boxes.shape[0], object_boxes.shape[1], 1, 1)
-        y1 = object_boxes[..., 1].view(object_boxes.shape[0], object_boxes.shape[1], 1, 1)
-        x2 = object_boxes[..., 2].view(object_boxes.shape[0], object_boxes.shape[1], 1, 1)
-        y2 = object_boxes[..., 3].view(object_boxes.shape[0], object_boxes.shape[1], 1, 1)
-        mask = (xs >= x1) & (xs <= x2) & (ys >= y1) & (ys <= y2)
-        mask = mask.to(dtype=dtype) * object_valid_f[:, :, None, None]
-        area = mask.sum(dim=(-2, -1)).clamp_min(1.0)
-        score_sum = torch.einsum("bahw,bkhw->bak", interaction_heatmaps, mask)
-        return (score_sum / area[:, None, :]).clamp(0.0, 1.0)
 
     def _freeze_backbone(self):
         print("Freezing backbone")
@@ -512,9 +385,12 @@ class POGUISE(pl.LightningModule):
                 if self.presence_head is not None:
                     for param in self.presence_head.parameters():
                         param.requires_grad = False
-        if self.factorized_interaction_action_head is not None:
-            for param in self.factorized_interaction_action_head.parameters():
-                param.requires_grad = True
+                if hasattr(self, "object_prompt_actor_query"):
+                    for param in self.object_prompt_actor_query.parameters():
+                        param.requires_grad = False
+                if hasattr(self, "object_prompt_key"):
+                    for param in self.object_prompt_key.parameters():
+                        param.requires_grad = False
         interaction_unfreeze_last_blocks = int(
             self.hparams.get("interaction_unfreeze_last_blocks", 0) or 0
         )
@@ -562,13 +438,30 @@ class POGUISE(pl.LightningModule):
                 if hasattr(self.net, "bbox_mlp"):
                     for param in self.net.bbox_mlp.parameters():
                         param.requires_grad = True
+                for attr in (
+                    "object_slot_embed",
+                    "object_class_embed",
+                    "object_box_mlp",
+                    "object_conf_mlp",
+                    "object_valid_embed",
+                ):
+                    module = getattr(self.net, attr, None)
+                    if module is None:
+                        continue
+                    if isinstance(module, nn.Parameter):
+                        module.requires_grad = True
+                    else:
+                        for param in module.parameters():
+                            param.requires_grad = True
                 if self.presence_head is not None:
                     for param in self.presence_head.parameters():
                         param.requires_grad = True
-                if self.factorized_interaction_action_head is not None:
-                    for param in self.factorized_interaction_action_head.parameters():
+                if hasattr(self, "object_prompt_actor_query"):
+                    for param in self.object_prompt_actor_query.parameters():
                         param.requires_grad = True
-
+                if hasattr(self, "object_prompt_key"):
+                    for param in self.object_prompt_key.parameters():
+                        param.requires_grad = True
     def _freeze_stages(self):
         if self.frozen_stages >= 0:
             self.patch_embed.eval()
@@ -605,10 +498,24 @@ class POGUISE(pl.LightningModule):
                     x,
                     boxes=boxes,
                     valid=valid,
+                    object_boxes=object_boxes,
+                    object_classes=object_classes,
+                    object_confs=object_confs,
+                    object_valid=object_valid,
                 )
                 x_heatmap_feat = None
                 x_visual_final = None
-                if len(net_data) == 5:
+                x_object_prompt = None
+                if len(net_data) == 6:
+                    (
+                        _,
+                        x_actor,
+                        x_heatmap,
+                        x_heatmap_feat,
+                        x_visual_final,
+                        x_object_prompt,
+                    ) = net_data
+                elif len(net_data) == 5:
                     _, x_actor, x_heatmap, x_heatmap_feat, x_visual_final = net_data
                 elif len(net_data) == 4:
                     _, x_actor, x_heatmap, x_heatmap_feat = net_data
@@ -619,161 +526,54 @@ class POGUISE(pl.LightningModule):
                     x,
                     boxes=boxes,
                     valid=valid,
+                    object_boxes=object_boxes,
+                    object_classes=object_classes,
+                    object_confs=object_confs,
+                    object_valid=object_valid,
                 )
                 _, x_actor = data[:2]
                 x_heatmap = 0
                 x_heatmap_feat = None
                 x_visual_final = None
-            self.last_actor_object_slot_logit_delta = None
-            self.last_actor_object_slot_delta = None
-            self.last_actor_object_slot_posterior = None
-            self.last_actor_object_best_slot = None
-            self.last_actor_object_quality = None
-            self.last_actor_object_mismatch = None
-            self.last_actor_object_object_slot_delta = None
-            self.last_actor_object_visual_fallback_delta = None
-            self.last_actor_object_visual_fallback_logits = None
-            self.last_actor_object_visual_quality = None
-            self.last_actor_object_compatible_present = None
-            self.last_actor_objectful_presence_logits = None
-            self.last_actor_objectful_presence = None
-            self.last_actor_object_slot_relation_scale = None
+                x_object_prompt = None
             self.last_actor_motion_logits = None
-            self.last_factorized_head_output = None
-            self.last_factorized_presence_logits = None
-            self.last_factorized_objectless_logp = None
-            self.last_factorized_objectful_scores = None
-            self.last_factorized_objectful_scores_full = None
-            self.last_factorized_objectful_logp = None
-            self.last_factorized_objectful_logp_full = None
-            self.last_factorized_visual_delta = None
-            self.last_factorized_visual_delta_objectful = None
-            self.last_factorized_visual_delta_objectful_full = None
-            self.last_factorized_detected_delta = None
-            self.last_factorized_coverage = None
-            self.last_factorized_detected_mix_weight = None
-            self.last_factorized_visual_mix_weight = None
-            self.last_factorized_detected_mix_weight_objectful_full = None
-            self.last_factorized_visual_mix_weight_objectful_full = None
-            self.last_factorized_visual_source_token_count = None
-            self.last_factorized_heatmap_source_token_count = None
-            self.last_factorized_final_visual_source_token_count = None
+            self.last_actor_object_prompt_tokens = None
+            self.last_actor_object_prompt_attention_logits = None
+            self.last_actor_object_prompt_attention = None
+            self.last_actor_object_prompt_valid = None
             if self.hparams.ret_feat:
                 return x_actor
 
-            if self.factorized_interaction_action_head is not None:
-                if boxes is None:
-                    raise ValueError("actor_object_factorized_head requires actor boxes")
-                if object_boxes is None or object_classes is None:
-                    raise ValueError(
-                        "actor_object_factorized_head requires object_boxes and "
-                        "object_classes"
-                    )
-                if object_confs is None or object_valid is None:
-                    raise ValueError(
-                        "actor_object_factorized_head requires object_confs and "
-                        "object_valid"
-                    )
-                if x_heatmap_feat is None:
-                    raise RuntimeError(
-                        "actor_object_factorized_head requires PO-GUISE heatmap "
-                        "feature tokens. Keep actor_interaction_heatmaps enabled."
-                    )
-                heatmap_tokens = x_heatmap_feat.flatten(2).transpose(1, 2)
-                source_tokens = [heatmap_tokens]
-                if x_visual_final is not None and x_visual_final.shape[1] > 0:
-                    source_tokens.append(x_visual_final)
-                visual_tokens = torch.cat(source_tokens, dim=1)
-                head_output = self.factorized_interaction_action_head(
-                    actor_tokens=x_actor,
-                    actor_boxes=boxes,
-                    actor_valid=valid,
-                    object_boxes=object_boxes,
-                    object_classes=object_classes,
-                    object_confs=object_confs,
-                    object_valid=object_valid,
-                    visual_source_tokens=visual_tokens,
+            if self.actor_motion_head is not None:
+                self.last_actor_motion_logits = self.actor_motion_head(x_actor)
+            action_scores = self.actor_head(x_actor)
+            self.last_actor_action_logits = action_scores
+            if self.last_actor_motion_logits is None:
+                self.last_actor_motion_logits = action_scores
+            if (
+                self.actor_object_prompt_tokens_enabled
+                and x_object_prompt is not None
+                and object_valid is not None
+            ):
+                prompt_valid = object_valid.to(
+                    device=x_object_prompt.device,
+                    dtype=torch.bool,
                 )
-                action_scores = head_output["log_probs"]
-                self.last_factorized_head_output = head_output
-                self.last_factorized_presence_logits = head_output["presence_logits"]
-                self.last_factorized_objectless_logp = head_output["objectless_logp"]
-                self.last_factorized_objectful_scores = head_output["objectful_scores"]
-                self.last_factorized_objectful_scores_full = head_output[
-                    "objectful_scores_full"
-                ]
-                self.last_factorized_objectful_logp = head_output["objectful_logp"]
-                self.last_factorized_objectful_logp_full = head_output[
-                    "objectful_logp_full"
-                ]
-                self.last_factorized_visual_delta = head_output["visual_delta"]
-                self.last_factorized_visual_delta_objectful = head_output[
-                    "visual_delta_objectful"
-                ]
-                self.last_factorized_visual_delta_objectful_full = head_output[
-                    "visual_delta_objectful_full"
-                ]
-                self.last_factorized_detected_delta = head_output["detected_delta"]
-                self.last_factorized_coverage = head_output["coverage"]
-                self.last_factorized_detected_mix_weight = head_output[
-                    "detected_mix_weight"
-                ]
-                self.last_factorized_visual_mix_weight = head_output[
-                    "visual_mix_weight"
-                ]
-                self.last_factorized_detected_mix_weight_objectful_full = head_output[
-                    "detected_mix_weight_objectful_full"
-                ]
-                self.last_factorized_visual_mix_weight_objectful_full = head_output[
-                    "visual_mix_weight_objectful_full"
-                ]
-                self.last_factorized_heatmap_source_token_count = torch.tensor(
-                    int(heatmap_tokens.shape[1]),
-                    device=x_actor.device,
+                q = self.object_prompt_actor_query(x_actor)
+                k = self.object_prompt_key(x_object_prompt)
+                prompt_logits = torch.einsum("bad,bkd->bak", q, k)
+                prompt_logits = prompt_logits / (q.shape[-1] ** 0.5)
+                prompt_logits = prompt_logits.masked_fill(
+                    ~prompt_valid[:, None, :],
+                    -1.0e4,
                 )
-                final_visual_count = (
-                    int(x_visual_final.shape[1])
-                    if x_visual_final is not None
-                    else 0
-                )
-                self.last_factorized_final_visual_source_token_count = torch.tensor(
-                    final_visual_count,
-                    device=x_actor.device,
-                )
-                self.last_factorized_visual_source_token_count = torch.tensor(
-                    int(visual_tokens.shape[1]),
-                    device=x_actor.device,
-                )
-                self.last_actor_action_logits = action_scores
-                self.last_actor_motion_logits = head_output["motion_aux_logits"]
-                self.last_actor_object_slot_delta = head_output["det_slot_scores"]
-                self.last_actor_object_slot_posterior = head_output[
-                    "det_slot_posterior"
-                ]
-                self.last_actor_object_best_slot = head_output[
-                    "det_slot_posterior"
-                ].argmax(dim=-1)
-                self.last_actor_object_quality = head_output["det_quality"]
-                self.last_actor_object_quality_logits = head_output[
-                    "det_quality_logits"
-                ]
-                self.last_actor_object_visual_fallback_delta = head_output[
-                    "visual_delta"
-                ]
-                self.last_actor_object_visual_fallback_logits = head_output[
-                    "visual_delta"
-                ]
-                self.last_actor_object_compatible_present = head_output["coverage"]
-                self.last_actor_object_slot_relation_scale = head_output[
-                    "relation_scale"
-                ]
-            else:
-                if self.actor_motion_head is not None:
-                    self.last_actor_motion_logits = self.actor_motion_head(x_actor)
-                action_scores = self.actor_head(x_actor)
-                self.last_actor_action_logits = action_scores
-                if self.last_actor_motion_logits is None:
-                    self.last_actor_motion_logits = action_scores
+                self.last_actor_object_prompt_tokens = x_object_prompt
+                self.last_actor_object_prompt_attention_logits = prompt_logits
+                self.last_actor_object_prompt_attention = torch.softmax(
+                    prompt_logits.float(),
+                    dim=-1,
+                ).to(dtype=prompt_logits.dtype)
+                self.last_actor_object_prompt_valid = prompt_valid
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
                 return action_scores, x_heatmap, presence_logits
@@ -839,27 +639,16 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--actor_interaction_heatmaps", type=int, default=0)
         parser.add_argument("--num_scene_object_tokens", type=int, default=32)
         parser.add_argument("--num_object_classes", type=int, default=19)
-        parser.add_argument("--actor_object_factorized_head", type=int, default=0)
-        parser.add_argument("--actor_object_slot_head", type=int, default=0)
+        parser.add_argument("--actor_object_prompt_tokens", type=int, default=0)
         parser.add_argument(
-            "--actor_object_factorized_hidden_dim",
-            type=int,
-            default=512,
+            "--actor_object_prompt_box_prior_weight",
+            type=float,
+            default=0.05,
         )
         parser.add_argument(
-            "--actor_object_factorized_relation_scale_init",
+            "--actor_object_prompt_box_prior_expand",
             type=float,
-            default=-1.0,
-        )
-        parser.add_argument(
-            "--actor_object_factorized_relation_logit_bound",
-            type=float,
-            default=2.0,
-        )
-        parser.add_argument(
-            "--actor_object_factorized_max_relation_scale",
-            type=float,
-            default=1.5,
+            default=1.25,
         )
         parser.add_argument("--trt_safe_attention", type=int, default=0)
         parser.add_argument("--interaction_unfreeze_last_blocks", type=int, default=0)

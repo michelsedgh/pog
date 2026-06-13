@@ -570,18 +570,22 @@ class TorchActorBackend:
         if bool(self.hparams.get("scene_object_tokens", 0)):
             raise RuntimeError(
                 "scene_object_tokens checkpoints use the removed object-selection "
-                "path. Use an actor_object_factorized_head checkpoint instead."
+                "path. Use an actor_object_prompt_tokens checkpoint instead."
             )
-        self.actor_object_factorized_head = bool(
-            self.hparams.get("actor_object_factorized_head", 0)
-        )
-        self.actor_object_slot_head = bool(self.hparams.get("actor_object_slot_head", 0))
-        if self.actor_object_slot_head:
+        if bool(self.hparams.get("actor_object_factorized_head", 0)):
+            raise RuntimeError(
+                "actor_object_factorized_head checkpoints are no longer supported. "
+                "Use actor_object_prompt_tokens."
+            )
+        if bool(self.hparams.get("actor_object_slot_head", 0)):
             raise RuntimeError(
                 "actor_object_slot_head checkpoints are no longer supported. "
-                "Use actor_object_factorized_head."
+                "Use actor_object_prompt_tokens."
             )
-        self.uses_object_proposals = self.actor_object_factorized_head
+        self.actor_object_prompt_tokens = bool(
+            self.hparams.get("actor_object_prompt_tokens", 0)
+        )
+        self.uses_object_proposals = self.actor_object_prompt_tokens
         self.actor_object_logit_residual = False
         self.actor_object_conditioned_action = bool(
             getattr(self.model, "actor_object_conditioned_action", False)
@@ -599,7 +603,7 @@ class TorchActorBackend:
         if not self.uses_object_proposals:
             raise RuntimeError(
                 "This dashboard requires actor checkpoints with object proposal "
-                "inputs: actor_object_factorized_head=1."
+                "inputs: actor_object_prompt_tokens=1."
             )
         if self.num_scene_object_tokens <= 0:
             raise RuntimeError("Checkpoint object proposal count must be positive.")
@@ -650,11 +654,8 @@ class TensorRTLiveActorBackend:
         self.clip_frames = int(self.engine.clip_frames)
         self.input_size = int(self.engine.input_size)
         self.backend_name = "tensorrt"
-        self.actor_object_factorized_head = bool(
-            getattr(self.engine, "actor_object_factorized_head", False)
-        )
-        self.actor_object_slot_head = bool(
-            getattr(self.engine, "actor_object_slot_head", False)
+        self.actor_object_prompt_tokens = bool(
+            getattr(self.engine, "actor_object_prompt_tokens", False)
         )
         self.uses_object_proposals = bool(
             getattr(self.engine, "uses_object_proposals", False)
@@ -738,11 +739,8 @@ def run_actor_smoke(args, actor):
             "backend": actor.backend_name,
             "precision": actor.precision,
             "device": str(actor.device),
-            "actor_object_factorized_head": bool(
-                getattr(actor, "actor_object_factorized_head", False)
-            ),
-            "actor_object_slot_head": bool(
-                getattr(actor, "actor_object_slot_head", False)
+            "actor_object_prompt_tokens": bool(
+                getattr(actor, "actor_object_prompt_tokens", False)
             ),
             "uses_object_proposals": bool(
                 getattr(actor, "uses_object_proposals", False)
@@ -955,11 +953,8 @@ class LiveRunner:
             actor_backend=self.actor.backend_name,
             actor_precision=self.actor.precision,
             actor_device=str(self.actor.device),
-            actor_object_factorized_head=bool(
-                getattr(self.actor, "actor_object_factorized_head", False)
-            ),
-            actor_object_slot_head=bool(
-                getattr(self.actor, "actor_object_slot_head", False)
+            actor_object_prompt_tokens=bool(
+                getattr(self.actor, "actor_object_prompt_tokens", False)
             ),
             uses_object_proposals=bool(
                 getattr(self.actor, "uses_object_proposals", False)

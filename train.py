@@ -258,20 +258,14 @@ def _validate_active_actor_action_path(module):
         return
     if getattr(model, "actor_object_slot_head_enabled", False):
         raise RuntimeError(
-            "actor_object_slot_head is deprecated. Use actor_object_factorized_head."
+            "actor_object_slot_head is deprecated. Use actor_object_prompt_tokens."
         )
-    if getattr(model, "actor_object_factorized_head_enabled", False):
-        if getattr(model, "factorized_interaction_action_head", None) is None:
-            raise RuntimeError(
-                "actor_object_factorized_head is enabled but the factorized head "
-                "was not built."
-            )
-        return
     actor_head = getattr(model, "actor_head", None)
     if not isinstance(actor_head, torch.nn.Linear):
         raise RuntimeError(
             "Actor action path must be a plain nn.Linear over actor tokens. "
-            "Use actor_object_factorized_head for object-proposal action training."
+            "Object proposals may be used only as prompt/context inputs, not as "
+            "a replacement action head."
         )
     if getattr(model, "actor_object_conditioned_action", False):
         raise RuntimeError("actor_object_conditioned_action must be disabled.")
@@ -348,6 +342,7 @@ def _validate_no_deprecated_object_path(checkpoint):
                 "object_interaction",
                 "specialist",
                 "object_action_fusion",
+                "factorized_interaction_action_head",
             )
         ):
             return True
@@ -362,9 +357,8 @@ def _validate_no_deprecated_object_path(checkpoint):
         preview = ", ".join(deprecated[:12])
         raise ValueError(
             "Deprecated object specialist checkpoint detected. The active "
-            "actor-object path uses actor interaction heatmaps, scene object "
-            "tokens, object selection, a compatibility expert, and one base "
-            "actor-token action head. "
+            "actor-object path uses object prompt tokens inside the transformer "
+            "and one base actor-token action head. "
             f"First deprecated keys: {preview}"
         )
 
@@ -492,57 +486,19 @@ def build_parser():
         default=10.0,
     )
     parser.add_argument("--motion_aux_loss_weight", type=float, default=0.25)
-    parser.add_argument("--factorized_presence_loss_weight", type=float, default=1.0)
+    parser.add_argument("--object_prompt_grounding_loss_weight", type=float, default=0.0)
     parser.add_argument(
-        "--factorized_objectful_within_loss_weight",
+        "--objectless_prompt_consistency_loss_weight",
         type=float,
-        default=0.5,
+        default=0.0,
     )
     parser.add_argument(
         "--objectless_object_action_suppression_loss_weight",
         type=float,
         default=0.3,
     )
-    parser.add_argument("--object_action_confuser_loss_weight", type=float, default=0.0)
-    parser.add_argument("--object_action_confuser_margin", type=float, default=0.75)
-    parser.add_argument("--object_slot_target_loss_weight", type=float, default=1.0)
-    parser.add_argument("--object_slot_quality_loss_weight", type=float, default=0.5)
-    parser.add_argument("--object_slot_quality_pos_weight", type=float, default=1.0)
-    parser.add_argument("--object_slot_quality_neg_weight", type=float, default=0.25)
-    parser.add_argument("--object_slot_quality_exact_neg_topk", type=int, default=4)
-    parser.add_argument(
-        "--object_slot_quality_objectless_neg_topk",
-        type=int,
-        default=8,
-    )
-    parser.add_argument("--teacher_object_drop_prob", type=float, default=0.0)
-    parser.add_argument("--teacher_object_drop_start_prob", type=float, default=None)
     parser.add_argument("--object_class_dropout_prob", type=float, default=0.0)
     parser.add_argument("--object_class_wrong_prob", type=float, default=0.0)
-    parser.add_argument("--missing_object_full_ce_weight", type=float, default=0.0)
-    parser.add_argument("--missing_object_confuser_weight", type=float, default=0.0)
-    parser.add_argument(
-        "--missing_object_confuser_start_weight",
-        type=float,
-        default=None,
-    )
-    parser.add_argument("--missing_object_confuser_margin", type=float, default=1.0)
-    parser.add_argument(
-        "--missing_object_visual_fallback_loss_weight",
-        type=float,
-        default=None,
-    )
-    parser.add_argument(
-        "--missing_object_visual_slot_loss_weight",
-        type=float,
-        default=None,
-    )
-    parser.add_argument(
-        "--missing_object_visual_fallback_start_loss_weight",
-        type=float,
-        default=None,
-    )
-    parser.add_argument("--missing_object_curriculum_epochs", type=int, default=0)
     parser.add_argument("--deepspeed_optim", type=int, default=0)
     parser.add_argument("--kp_only", type=int, default=0)
 
@@ -568,40 +524,28 @@ def main():
         raise ValueError("actor_interaction_heatmaps requires actor_prompt")
     if getattr(hparams, "scene_object_tokens", 0):
         raise ValueError(
-            "scene_object_tokens was removed. Use --actor_object_factorized_head 1."
+            "scene_object_tokens was removed. Use --actor_object_prompt_tokens 1 "
+            "for runtime object prompts."
         )
-    if hparams.actor_object_slot_head:
+    if getattr(hparams, "actor_object_slot_head", 0):
         raise ValueError(
             "actor_object_slot_head was replaced by "
-            "--actor_object_factorized_head 1."
+            "--actor_object_prompt_tokens 1."
         )
-    if hparams.actor_object_factorized_head and not hparams.actor_prompt:
-        raise ValueError("actor_object_factorized_head requires actor_prompt")
-    if hparams.actor_object_factorized_head and not hparams.actor_interaction_heatmaps:
+    if getattr(hparams, "actor_object_factorized_head", 0):
         raise ValueError(
-            "actor_object_factorized_head requires --actor_interaction_heatmaps 1"
+            "actor_object_factorized_head was removed from the active runtime path. "
+            "Use --actor_object_prompt_tokens 1 with the plain actor_head."
         )
-    if hparams.actor_object_factorized_head and not hparams.object_detector_cache:
-        raise ValueError(
-            "actor_object_factorized_head requires --object_detector_cache"
-        )
+    if hparams.actor_object_prompt_tokens and not hparams.actor_prompt:
+        raise ValueError("actor_object_prompt_tokens requires actor_prompt")
     if (
-        hparams.actor_object_factorized_head
-        and float(hparams.missing_object_full_ce_weight) > 0.0
+        hparams.actor_object_prompt_tokens
+        and not hparams.object_detector_cache
     ):
         raise ValueError(
-            "missing_object_full_ce_weight must be 0 with the factorized head; "
-            "use missing_object_confuser_weight instead."
+            "runtime object proposal paths require --object_detector_cache"
         )
-    if (
-        hparams.actor_object_factorized_head
-        and float(getattr(hparams, "label_smoothing", 0.0) or 0.0) != 0.0
-    ):
-        raise ValueError(
-            "label_smoothing is incompatible with factorized action NLL; "
-            "set --label_smoothing 0.0."
-        )
-
     seed_everything(hparams.seed)
     dataset = _dataset_class(hparams.dataset)
     module = HeatmapModule(model=POGUISE, **vars(hparams))

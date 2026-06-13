@@ -113,21 +113,30 @@ class ToyotaSMDataset(Dataset):
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
         if bool(kwargs.get("scene_object_tokens", 0)):
             raise ValueError(
-                "scene_object_tokens was removed. Use actor_object_factorized_head=1."
+                "scene_object_tokens was removed. Use actor_object_prompt_tokens=1 "
+                "for runtime object prompts."
             )
         self.actor_object_factorized_head = bool(
             kwargs.get("actor_object_factorized_head", 0)
+        )
+        self.actor_object_prompt_tokens = bool(
+            kwargs.get("actor_object_prompt_tokens", 0)
         )
         self.actor_object_slot_head = bool(kwargs.get("actor_object_slot_head", 0))
         if self.actor_object_slot_head:
             raise ValueError(
                 "actor_object_slot_head was replaced by "
-                "actor_object_factorized_head. Set --actor_object_factorized_head 1 "
+                "actor_object_prompt_tokens. Set --actor_object_prompt_tokens 1 "
                 "and keep --actor_object_slot_head 0."
             )
-        if self.actor_object_factorized_head and not self.actor_prompt:
-            raise ValueError("actor_object_factorized_head requires actor_prompt")
-        self.requires_object_proposals = self.actor_object_factorized_head
+        if self.actor_object_factorized_head:
+            raise ValueError(
+                "actor_object_factorized_head was removed from the active runtime "
+                "path. Use actor_object_prompt_tokens=1 with the plain actor_head."
+            )
+        if self.actor_object_prompt_tokens and not self.actor_prompt:
+            raise ValueError("actor_object_prompt_tokens requires actor_prompt")
+        self.requires_object_proposals = self.actor_object_prompt_tokens
         self.num_scene_object_tokens = int(kwargs.get("num_scene_object_tokens", 32))
         if self.num_scene_object_tokens <= 0:
             raise ValueError("num_scene_object_tokens must be positive")

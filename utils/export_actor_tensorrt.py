@@ -13,13 +13,18 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-def uses_factorized_object_proposals(hparams):
+def uses_prompt_object_proposals(hparams):
     if bool(hparams.get("actor_object_slot_head", 0)):
         raise RuntimeError(
             "actor_object_slot_head checkpoints are no longer supported. "
-            "Export an actor_object_factorized_head checkpoint instead."
+            "Train/export with actor_object_prompt_tokens instead."
         )
-    return bool(hparams.get("actor_object_factorized_head", 0))
+    if bool(hparams.get("actor_object_factorized_head", 0)):
+        raise RuntimeError(
+            "actor_object_factorized_head checkpoints are no longer supported. "
+            "Train/export with actor_object_prompt_tokens instead."
+        )
+    return bool(hparams.get("actor_object_prompt_tokens", 0))
 
 
 def parse_args():
@@ -105,7 +110,7 @@ def default_output_paths(args, hparams):
         if args.max_objects is not None
         else hparams.get("num_scene_object_tokens", 0)
     )
-    uses_object_proposals = uses_factorized_object_proposals(hparams)
+    uses_object_proposals = uses_prompt_object_proposals(hparams)
     object_suffix = f"_o{max_objects}" if uses_object_proposals else ""
     fixed = (
         f"{stem}_b{args.batch_size}_t{clip_frames}_k{max_actors}"
@@ -217,9 +222,9 @@ def export_onnx(model, onnx_out, args, clip_frames, max_actors, max_objects, hpa
     if bool(hparams.get("scene_object_tokens", 0)):
         raise RuntimeError(
             "scene_object_tokens checkpoints use the removed object-selection path. "
-            "Export an actor_object_factorized_head checkpoint instead."
+            "Train/export with actor_object_prompt_tokens instead."
         )
-    uses_object_proposals = uses_factorized_object_proposals(hparams)
+    uses_object_proposals = uses_prompt_object_proposals(hparams)
     num_object_classes = int(hparams.get("num_object_classes", 19))
 
     class ActorExport(torch.nn.Module):
@@ -367,7 +372,7 @@ def checkpoint_payload(checkpoint_path, hparam_overrides=None):
     if bool(hparams.get("scene_object_tokens", 0)):
         raise RuntimeError(
             "scene_object_tokens checkpoints use the removed object-selection path. "
-            "Export an actor_object_factorized_head checkpoint instead."
+            "Train/export with actor_object_prompt_tokens instead."
         )
     original_hparams = dict(hparams)
     if hparam_overrides:
@@ -379,11 +384,10 @@ def checkpoint_payload(checkpoint_path, hparam_overrides=None):
             hparams.get("actor_interaction_heatmaps", 0)
         ),
         "interaction_heatmap_channels": "per_actor_interacted_object",
-        "actor_object_factorized_head": int(
-            hparams.get("actor_object_factorized_head", 0)
+        "actor_object_prompt_tokens": int(
+            hparams.get("actor_object_prompt_tokens", 0)
         ),
-        "actor_object_slot_head": 0,
-        "uses_object_proposals": int(uses_factorized_object_proposals(hparams)),
+        "uses_object_proposals": int(uses_prompt_object_proposals(hparams)),
         "num_scene_object_tokens": int(hparams.get("num_scene_object_tokens", 0)),
         "num_object_classes": int(hparams.get("num_object_classes", 19)),
         "actor_object_logit_residual": 0,
@@ -447,9 +451,9 @@ def internal_export(args):
     if bool(hparams.get("scene_object_tokens", 0)):
         raise RuntimeError(
             "scene_object_tokens checkpoints use the removed object-selection path. "
-            "Export an actor_object_factorized_head checkpoint instead."
+            "Train/export with actor_object_prompt_tokens instead."
         )
-    uses_object_proposals = uses_factorized_object_proposals(hparams)
+    uses_object_proposals = uses_prompt_object_proposals(hparams)
     if uses_object_proposals:
         checkpoint_objects = int(hparams.get("num_scene_object_tokens", 0))
         if args.max_objects is not None and args.max_objects != checkpoint_objects:
@@ -565,9 +569,9 @@ def main():
     if bool(hparams.get("scene_object_tokens", 0)):
         raise RuntimeError(
             "scene_object_tokens checkpoints use the removed object-selection path. "
-            "Export an actor_object_factorized_head checkpoint instead."
+            "Train/export with actor_object_prompt_tokens instead."
         )
-    uses_object_proposals = uses_factorized_object_proposals(hparams)
+    uses_object_proposals = uses_prompt_object_proposals(hparams)
     max_objects = int(args.max_objects if args.max_objects is not None else checkpoint_objects)
     if uses_object_proposals and max_objects != checkpoint_objects:
         raise ValueError(
@@ -617,10 +621,9 @@ def main():
             "keep_rate_merge": float(hparams.get("keep_rate_merge", 1.0)),
             "merge_type": str(hparams.get("merge_type", "")),
             "trt_safe_attention": int(hparams.get("trt_safe_attention", 0)),
-            "actor_object_factorized_head": int(
-                hparams.get("actor_object_factorized_head", 0)
+            "actor_object_prompt_tokens": int(
+                hparams.get("actor_object_prompt_tokens", 0)
             ),
-            "actor_object_slot_head": 0,
             "uses_object_proposals": int(uses_object_proposals),
         },
         "input_shapes": {

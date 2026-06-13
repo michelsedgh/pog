@@ -111,11 +111,12 @@ class ActorStageExport(torch.nn.Module):
             raise ValueError(
                 f"{stage} exceeds network depth {self.net.depth}."
             )
-        if bool(getattr(actor_model, "actor_object_factorized_head_enabled", False)):
+        if bool(getattr(actor_model, "actor_object_prompt_tokens_enabled", False)):
             raise RuntimeError(
-                "utils/bisect_actor_tensorrt.py does not support the factorized "
-                "interaction action head. Use the actor TensorRT export/check "
-                "utilities that run the full PO-GUISE+ actor path."
+                "utils/bisect_actor_tensorrt.py does not support actor object "
+                "prompt tokens because this partial-stage wrapper does not rebuild "
+                "the full prompt prefix. Use the full actor TensorRT export/check "
+                "utilities for object-prompt checkpoints."
             )
 
     def _token_prefix(
@@ -453,7 +454,7 @@ def main():
     if bool(hparams.get("scene_object_tokens", 0)):
         raise RuntimeError(
             "scene_object_tokens checkpoints use the removed object-selection path. "
-            "Use --actor_object_factorized_head 1 for object-proposal action training."
+            "Train with actor_object_prompt_tokens instead."
         )
     if bool(hparams.get("actor_object_slot_head", 0)):
         raise RuntimeError(
@@ -461,9 +462,13 @@ def main():
         )
     if bool(hparams.get("actor_object_factorized_head", 0)):
         raise RuntimeError(
-            "utils/bisect_actor_tensorrt.py does not support factorized action "
-            "checkpoints because this wrapper does not rebuild heatmap feature "
-            "tokens for the head."
+            "actor_object_factorized_head checkpoints are no longer supported. "
+            "Train with actor_object_prompt_tokens instead."
+        )
+    if bool(hparams.get("actor_object_prompt_tokens", 0)):
+        raise RuntimeError(
+            "utils/bisect_actor_tensorrt.py does not support actor_object_prompt_tokens. "
+            "Use utils/export_actor_tensorrt.py for the full object-prompt actor path."
         )
     uses_object_proposals = False
     clip_frames = int(args.clip_frames or hparams.get("n_frames", 16))

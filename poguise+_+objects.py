@@ -287,7 +287,6 @@ run_checked([
     "datasets/object_vocab.py",
     "datasets/toyota_action_taxonomy.py",
     "datasets/toyotasm.py",
-    "models/factorized_interaction_action_head.py",
     "models/poguise.py",
     "modules/heatmap_module.py",
     "losses/poguiseplus_losses.py",
@@ -405,7 +404,7 @@ def run_training_with_epoch_summaries(cmd, run_name, epoch_dir, poll_secs=20):
     return str(run_dir)
 
 TS = datetime.now().strftime("%Y%m%d_%H%M%S")
-RUN_NAME = f"actor_object_factorized_visualtokens_heatmapfix_epoch15_{TS}"
+RUN_NAME = f"actor_object_prompted_poguiseplus_clean_epoch15_{TS}"
 EPOCH_DIR = str(Path(DATA_DIR) / "checkpoints" / RUN_NAME / "epoch_checkpoints")
 
 cmd = [
@@ -438,16 +437,12 @@ cmd = [
 
     "--actor_interaction_heatmaps", "1",
 
-    # Fixed top-K runtime object proposals for the factorized interaction head.
-    # This is not the removed scene-object-token trunk path.
-    "--actor_object_factorized_head", "1",
-    "--actor_object_slot_head", "0",
+    # Runtime detections are transformer prompt tokens, not action-logit experts.
+    "--actor_object_prompt_tokens", "1",
+    "--actor_object_prompt_box_prior_weight", "0.05",
+    "--actor_object_prompt_box_prior_expand", "1.25",
     "--num_scene_object_tokens", "32",
     "--num_object_classes", "19",
-    "--actor_object_factorized_hidden_dim", "512",
-    "--actor_object_factorized_relation_scale_init", "-1.00",
-    "--actor_object_factorized_relation_logit_bound", "2.0",
-    "--actor_object_factorized_max_relation_scale", "1.5",
 
     "--object_detector_cache", OBJECT_DETECTOR_CACHE,
     "--object_camera_allowlist", "tv_monitor=c05,c06",
@@ -497,34 +492,13 @@ cmd = [
     "--poguiseplus_heatmap_log_eps", "1e-6",
     "--poguiseplus_normalized_heatmap_loss", "1",
     "--poguiseplus_heatmap_mse_scale", "1000",
-    "--poguiseplus_interaction_heatmap_pos_loss_weight", "0.25",
-    "--poguiseplus_interaction_heatmap_pos_weight", "8.0",
-    "--poguiseplus_interaction_heatmap_center_loss_weight", "0.25",
-    "--poguiseplus_interaction_heatmap_center_temperature", "10.0",
 
     "--motion_aux_loss_weight", "0.25",
-    "--factorized_presence_loss_weight", "1.0",
-    "--factorized_objectful_within_loss_weight", "0.5",
-    "--object_slot_target_loss_weight", "1.0",
-    "--object_slot_quality_loss_weight", "0.5",
-    "--object_slot_quality_pos_weight", "1.0",
-    "--object_slot_quality_neg_weight", "0.25",
-    "--object_slot_quality_exact_neg_topk", "4",
-    "--object_slot_quality_objectless_neg_topk", "8",
-    "--object_action_confuser_loss_weight", "0.0",
-    "--object_action_confuser_margin", "1.0",
+    "--object_prompt_grounding_loss_weight", "0.5",
+    "--objectless_prompt_consistency_loss_weight", "0.2",
     "--objectless_object_action_suppression_loss_weight", "0.5",
-    "--teacher_object_drop_start_prob", "0.05",
-    "--teacher_object_drop_prob", "0.15",
     "--object_class_dropout_prob", "0.0",
     "--object_class_wrong_prob", "0.0",
-    "--missing_object_full_ce_weight", "0.0",
-    "--missing_object_confuser_start_weight", "0.25",
-    "--missing_object_confuser_weight", "0.75",
-    "--missing_object_confuser_margin", "1.0",
-    "--missing_object_visual_fallback_start_loss_weight", "0.05",
-    "--missing_object_visual_fallback_loss_weight", "0.25",
-    "--missing_object_curriculum_epochs", "5",
 
     "--toyota_pose_guided_sampling", "1",
     "--toyota_min_pose_frames", "1",

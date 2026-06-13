@@ -79,31 +79,47 @@ class TensorRTActorEngine:
         output_set = set(self.output_names)
         self.uses_object_proposals = object_inputs.issubset(input_set)
         export_hparams = self.metadata.get("export_hparams", {})
-        self.actor_object_factorized_head = bool(
+        if bool(
             export_hparams.get(
                 "actor_object_factorized_head",
-                self.metadata.get(
-                    "actor_object_factorized_head",
-                    self.uses_object_proposals,
-                ),
+                self.metadata.get("actor_object_factorized_head", False),
             )
-        )
-        self.actor_object_slot_head = bool(
+        ):
+            raise RuntimeError(
+                "This TensorRT actor engine was exported from the removed "
+                "actor_object_factorized_head path. Re-export with "
+                "actor_object_prompt_tokens."
+            )
+        if bool(
             export_hparams.get(
                 "actor_object_slot_head",
                 self.metadata.get("actor_object_slot_head", False),
             )
-        )
-        if self.actor_object_slot_head:
+        ):
             raise RuntimeError(
                 "This TensorRT actor engine was exported from the removed "
                 "actor_object_slot_head path. Re-export with "
-                "actor_object_factorized_head."
+                "actor_object_prompt_tokens."
+            )
+        self.actor_object_prompt_tokens = bool(
+            export_hparams.get(
+                "actor_object_prompt_tokens",
+                self.metadata.get(
+                    "actor_object_prompt_tokens",
+                    self.uses_object_proposals,
+                ),
+            )
+        )
+        if self.actor_object_prompt_tokens != self.uses_object_proposals:
+            raise RuntimeError(
+                "Engine metadata and bindings disagree on object prompt inputs: "
+                f"metadata={self.actor_object_prompt_tokens}, "
+                f"bindings={self.uses_object_proposals}."
             )
         if "object_selection" in output_set:
             raise RuntimeError(
                 "This TensorRT actor engine exposes the removed object_selection "
-                "output. Re-export with actor_object_factorized_head."
+                "output. Re-export with actor_object_prompt_tokens."
             )
         self.actor_object_logit_residual = bool(
             self.metadata.get("actor_object_logit_residual", False)
