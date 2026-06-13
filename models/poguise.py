@@ -143,29 +143,21 @@ class POGUISE(pl.LightningModule):
         self.actor_interaction_heatmaps = bool(
             self.hparams.get("actor_interaction_heatmaps", 0)
         )
-        actor_object_factorized_head_enabled = bool(
-            self.hparams.get("actor_object_factorized_head", 0)
-        )
         self.actor_object_prompt_tokens_enabled = bool(
             self.hparams.get("actor_object_prompt_tokens", 0)
         )
-        self.actor_object_slot_head_enabled = bool(
-            self.hparams.get("actor_object_slot_head", 0)
-        )
-        if self.actor_object_slot_head_enabled:
+        if bool(self.hparams.get("actor_object_slot_head", 0)):
             raise ValueError(
                 "actor_object_slot_head was replaced by "
                 "actor_object_prompt_tokens. Set --actor_object_prompt_tokens 1 "
                 "and keep --actor_object_slot_head 0."
             )
-        self.actor_object_logit_residual = False
-        self.actor_object_conditioned_action = False
         if bool(self.hparams.get("scene_object_tokens", 0)):
             raise ValueError(
                 "scene_object_tokens was removed. Use actor_object_prompt_tokens=1 "
                 "for runtime object prompts inside the transformer trunk."
             )
-        if actor_object_factorized_head_enabled:
+        if bool(self.hparams.get("actor_object_factorized_head", 0)):
             raise ValueError(
                 "actor_object_factorized_head was removed from the active runtime "
                 "path. Use actor_object_prompt_tokens=1 with the plain actor_head."
@@ -178,7 +170,7 @@ class POGUISE(pl.LightningModule):
             raise ValueError(
                 "interaction_object_classes was removed. Actor-object heatmaps "
                 "are now one interacted-object channel per actor; object class "
-                "semantics come from the actor-object action query decoder."
+                "semantics come from runtime object prompt tokens."
             )
         if self.hparams.get("interaction_warmup_freeze_actor_path", 0):
             if not (self.actor_prompt and self.actor_interaction_heatmaps):
@@ -486,9 +478,6 @@ class POGUISE(pl.LightningModule):
         object_classes=None,
         object_confs=None,
         object_valid=None,
-        interaction_object_index=None,
-        interaction_object_index_valid=None,
-        object_heatmap_scores=None,
     ):
         # convert to b c t h w
         x = x.permute(0, 2, 1, 3, 4)

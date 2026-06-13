@@ -586,10 +586,6 @@ class TorchActorBackend:
             self.hparams.get("actor_object_prompt_tokens", 0)
         )
         self.uses_object_proposals = self.actor_object_prompt_tokens
-        self.actor_object_logit_residual = False
-        self.actor_object_conditioned_action = bool(
-            getattr(self.model, "actor_object_conditioned_action", False)
-        )
         self.num_scene_object_tokens = (
             int(self.hparams.get("num_scene_object_tokens", 0))
             if self.uses_object_proposals
@@ -659,10 +655,6 @@ class TensorRTLiveActorBackend:
         )
         self.uses_object_proposals = bool(
             getattr(self.engine, "uses_object_proposals", False)
-        )
-        self.actor_object_logit_residual = bool(self.engine.actor_object_logit_residual)
-        self.actor_object_conditioned_action = bool(
-            getattr(self.engine, "actor_object_conditioned_action", False)
         )
         self.num_scene_object_tokens = int(self.engine.num_scene_object_tokens)
         if self.clip_frames != TRAINING_CLIP_FRAMES:
@@ -745,10 +737,6 @@ def run_actor_smoke(args, actor):
             "uses_object_proposals": bool(
                 getattr(actor, "uses_object_proposals", False)
             ),
-            "actor_object_logit_residual": bool(actor.actor_object_logit_residual),
-            "actor_object_conditioned_action": bool(
-                actor.actor_object_conditioned_action
-            ),
             "num_scene_object_tokens": int(actor.num_scene_object_tokens),
             "clip_frames": TRAINING_CLIP_FRAMES,
             "span_frames": TRAINING_SPAN_FRAMES,
@@ -775,8 +763,6 @@ class DashboardState:
             "objects": [],
             "actor_backend": None,
             "actor_device": None,
-            "actor_object_logit_residual": None,
-            "actor_object_conditioned_action": None,
             "num_scene_object_tokens": None,
             "detector_backend": None,
             "last_detector_ms": None,
@@ -958,10 +944,6 @@ class LiveRunner:
             ),
             uses_object_proposals=bool(
                 getattr(self.actor, "uses_object_proposals", False)
-            ),
-            actor_object_logit_residual=bool(self.actor.actor_object_logit_residual),
-            actor_object_conditioned_action=bool(
-                self.actor.actor_object_conditioned_action
             ),
             num_scene_object_tokens=int(self.actor.num_scene_object_tokens),
             detector_backend=self.detector_backend_name,

@@ -121,15 +121,6 @@ class TensorRTActorEngine:
                 "This TensorRT actor engine exposes the removed object_selection "
                 "output. Re-export with actor_object_prompt_tokens."
             )
-        self.actor_object_logit_residual = bool(
-            self.metadata.get("actor_object_logit_residual", False)
-        )
-        self.actor_object_conditioned_action = bool(
-            self.metadata.get(
-                "actor_object_conditioned_action",
-                False,
-            )
-        )
         expected_inputs = base_inputs | (
             object_inputs if self.uses_object_proposals else set()
         )

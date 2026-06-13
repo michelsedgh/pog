@@ -2,8 +2,8 @@
 
 This is the intended one-way architecture for Toyota actor-slot object training.
 Older experiments that used residual object decoders, shuffled object ablations,
-selected-object dropout, selected-object class dropout, or checkpointing only on
-raw counterfactual logit drop are deprecated.
+object-selection heads, selected-object dropout, selected-object class dropout,
+or checkpointing only on raw counterfactual logit drop are deprecated.
 
 ## What PO-GUISE+ Did
 
@@ -35,56 +35,53 @@ The intended model path is:
 ```text
 video tokens + actor tokens + heatmap tokens + object tokens
 -> transformer
--> object selection head per actor
--> actor-only action head
--> selected-object context predicts masked object-action residual logits
--> final logits = actor logits + object residual logits
+-> actor-token action head
+-> prompt-token grounding diagnostics / auxiliary loss
+-> final logits = actor logits
 ```
 
 The model must learn interaction, not object proximity. A laptop token alone
 must not force `Uselaptop`; it is only useful when the actor visual evidence and
 teacher target say that actor is interacting with the laptop.
 
-The object residual is intentionally not allowed to score every class. It is
-masked to the explicitly mapped object-action classes from
-`datasets/object_vocab.py`, further masked by the selected object's compatible
-action classes, and scaled by the selector probability assigned to real object
-slots. A selected `laptop` object can add residual score to `Uselaptop`, but not
-to `Readbook`; a selected `book` object can add residual score to `Readbook`,
-but not to `Uselaptop`. True body/motion classes such as `Walk`, `Getup`,
-`Sitdown`, and `Laydown` stay on the actor-only action path.
+Object prompt tokens are context, not a second classifier. They can change the
+actor representation through transformer attention, but they do not directly
+add class-specific action logits. True body/motion classes such as `Walk`,
+`Getup`, `Sitdown`, and `Laydown` stay protected by the same actor-token action
+head used for object-involving actions.
 
 ## Kept
 
 - Actor prompt slots.
 - One generic interacted-object heatmap per actor slot.
-- RF-DETR scene object tokens.
-- Object selection head.
-- Selected-object-compatible object-logit residual added after the actor-only
-  action head.
+- RF-DETR object prompt tokens inside the transformer.
+- Plain actor-token action head.
+- Prompt-token grounding loss for exact compatible teacher objects.
+- Teacher-object removal as a validation-only supporting signal.
 - PO-GUISE+ style `action CE + log(heatmap MSE)`.
-- Selected-object removal as a validation-only supporting signal.
 
 ## Removed
 
+- Object-selection head.
+- Selected-object-compatible object-logit residuals.
 - Selected-object token dropout.
 - Selected-object class dropout.
 - Learnable scalar object-fusion gate.
 - Pre-action actor/object token fusion.
 - Configurable object-action fusion on/off and hidden-size knobs.
 - Target/background weighted interacted-object heatmap loss.
-- Training/checkpoint logic that treats raw selected-object logit drop as the
+- Training/checkpoint logic that treats raw teacher-object logit drop as the
   main proof of object-action learning.
 
-The selected object should stay visible during object-positive training samples.
-Detector robustness should come from box jitter, confidence noise, non-selected
-distractors, and real detector misses, not from erasing the object that the
-label says is being interacted with.
+Compatible teacher objects should stay visible during object-positive training
+samples. Detector robustness should come from prompt-token context, objectless
+hard negatives, heatmap grounding, and real detector misses, not from a separate
+object-action residual classifier.
 
-Checkpoints trained before this cleanup include a deprecated fusion-gate
-parameter. They are useful for diagnosis, but they are not the final production
-architecture. Resume them only with `--strict_load 0`; for live deployment,
-prefer checkpoints trained after this cleanup.
+Checkpoints trained before the prompt-token cleanup are useful for diagnosis,
+but they are not the final production architecture. Current training rejects old
+object-specialist checkpoints instead of adapting them into the prompt-token
+path.
 
 ## Teacher Target
 
@@ -95,25 +92,25 @@ Toyota action label
 -> expected object class from datasets/object_vocab.py
 -> RF-DETR tracks of that class
 -> best actor-associated track
--> selected object index + actor-specific interacted-object heatmap
+-> teacher object index + actor-specific interacted-object heatmap
 ```
 
 This is action-conditioned and actor-associated. It is not a proximity-only
-rule. Object class semantics live in the RF-DETR object tokens and selected
-object index, not in separate object-class heatmap channels.
+rule. Object class semantics live in the RF-DETR object prompt tokens and
+teacher object index, not in separate object-class heatmap channels.
 
-The selector teacher is about usable object-token binding:
+The prompt-grounding teacher is about usable object-token binding:
 
 ```text
-object-positive action + trusted matching object token -> selected token
-object-positive action + no usable matching object token -> unlabeled selector
-objectless action -> NONE=0
+object-positive action + trusted matching object token -> teacher object token
+object-positive action + no usable matching object token -> no prompt-grounding target
+objectless action -> no prompt-grounding target
 ```
 
-`NONE` is reserved for true body/motion actions: `Enter`, `Getup`,
-`Laydown`, `Leave`, `Sitdown`, and `Walk`. Object-involving actions without a
+Objectless actions are supervised by action CE and objectless hard-negative
+metrics, not by a NONE object-selection class. Object-involving actions without a
 trusted object teacher, such as `Drink.Fromcan`, `Usetablet`, and coffee/tea
-preparation variants, are left unlabeled for object selection instead of being
+preparation variants, are left unlabeled for prompt grounding instead of being
 treated as objectless.
 
 The heatmap teacher stays stricter: it is present only for a trusted matching
@@ -125,27 +122,27 @@ The intended training objective is:
 
 ```text
 action CE
-+ balanced object/NONE selection CE at fixed weight 0.5
++ object prompt grounding CE
 + log(pose/object heatmap MSE)
 ```
 
-With Nash-MTL enabled, action CE and object selection are treated as the action
-task, while pose/object heatmap localization is treated as the heatmap task.
-Action CE owns the action boundary. The actor-only action head is always present,
-and object evidence contributes only through a selected-object-compatible
-residual over mapped object-action logits. Object selection binds the actor token
-to a usable object-token context, and the interacted-object heatmap teaches
-visual grounding.
+With Nash-MTL enabled, the actor action objective is one task and the
+pose/interacted-object heatmap objective is the second task. Runtime detections
+enter the transformer as object prompt tokens. The action head remains one plain
+linear head over actor tokens; there is no object-selection action head and no
+detected-object residual over action logits. Object prompt grounding teaches
+actor tokens to attend to compatible teacher objects when they exist, while the
+interacted-object heatmap teaches detector-free visual grounding.
 There is intentionally no supervised object-action margin loss: object presence
-alone must not force an action class. There is also no target/background weighted
-heatmap variant; interacted-object heatmaps use the same PO-GUISE+ style
-Frobenius/log-MSE objective as pose heatmaps.
+alone must not force an action class. Interacted-object heatmaps use the
+PO-GUISE+ normalized heatmap objective, optionally with positive-balanced and
+center losses for sparse object targets.
 
 Objectless hard-negative sampling is enabled for scene-object runs. For true
 body/motion labels, the dataset tries to keep at least one sampled frame where a
-mapped object is visible inside the same clip window. The selector target remains
-`NONE`; this teaches `object visible != object action` without inventing a fake
-object-positive label.
+mapped object is visible inside the same clip window. The action target remains
+the objectless class; this teaches `object visible != object action` without
+inventing a fake object-positive label.
 
 ## Synthetic Actor Slots
 
@@ -175,13 +172,13 @@ drop. Use all of these:
 - `val_group_object_mapped_acc`
 - `val_group_objectless_acc`
 - target action accuracy for `Uselaptop`, `Readbook`, `Usetelephone`, and drink classes
-- `val_object_selection_acc`
-- `val_object_selection_none_acc`
-- `val_object_selection_object_acc`
-- `val_object_selection_true_prob`
+- `val_object_prompt_grounding_acc`
+- `val_object_prompt_grounding_true_prob`
+- `val_object_prompt_exact_correct_object_rate`
+- `val_object_prompt_exact_correct_object_prob`
 - `val_objectless_with_object_visible_acc`
 - `val_objectless_with_object_visible_object_action_pred_rate`
-- `val_object_counterfactual_selected_logit_drop`
+- `val_object_counterfactual_teacher_logit_drop`
 - live/saved probe sweeps for laptop/book/phone cases
 
 `val_deploy_score` is the preferred checkpoint monitor for scene-object actor

@@ -116,20 +116,16 @@ class ToyotaSMDataset(Dataset):
                 "scene_object_tokens was removed. Use actor_object_prompt_tokens=1 "
                 "for runtime object prompts."
             )
-        self.actor_object_factorized_head = bool(
-            kwargs.get("actor_object_factorized_head", 0)
-        )
         self.actor_object_prompt_tokens = bool(
             kwargs.get("actor_object_prompt_tokens", 0)
         )
-        self.actor_object_slot_head = bool(kwargs.get("actor_object_slot_head", 0))
-        if self.actor_object_slot_head:
+        if bool(kwargs.get("actor_object_slot_head", 0)):
             raise ValueError(
                 "actor_object_slot_head was replaced by "
                 "actor_object_prompt_tokens. Set --actor_object_prompt_tokens 1 "
                 "and keep --actor_object_slot_head 0."
             )
-        if self.actor_object_factorized_head:
+        if bool(kwargs.get("actor_object_factorized_head", 0)):
             raise ValueError(
                 "actor_object_factorized_head was removed from the active runtime "
                 "path. Use actor_object_prompt_tokens=1 with the plain actor_head."

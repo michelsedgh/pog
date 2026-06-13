@@ -1019,7 +1019,7 @@ class VisionTransformer(nn.Module):
             raise ValueError(
                 "interaction_object_classes was removed. Actor-object heatmaps "
                 "are now one interacted-object channel per actor; object class "
-                "semantics come from the actor-object action query decoder."
+                "semantics come from runtime object prompt tokens."
             )
         self.return_heatmap_features = bool(return_heatmap_features)
         self.HW_OUT_CONV = (hw_out_conv, hw_out_conv)

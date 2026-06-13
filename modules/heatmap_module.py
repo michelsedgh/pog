@@ -21,7 +21,6 @@ from datasets.object_vocab import (
 )
 from datasets.toyota_action_taxonomy import (
     toyota_action_names,
-    toyota_confuser_action_names,
     toyota_action_object_map,
     toyota_action_to_index,
     toyota_group_action_names,
@@ -79,8 +78,8 @@ class HeatmapModule(pl.LightningModule):
         self.actor_object_prompt_tokens = bool(
             hparams.get("actor_object_prompt_tokens", 0)
         )
-        self.actor_object_slot_head = bool(hparams.get("actor_object_slot_head", 0))
-        if self.actor_object_slot_head:
+        actor_object_slot_head = bool(hparams.get("actor_object_slot_head", 0))
+        if actor_object_slot_head:
             raise ValueError(
                 "actor_object_slot_head was replaced by "
                 "actor_object_prompt_tokens. Set --actor_object_prompt_tokens 1 "
@@ -198,13 +197,11 @@ class HeatmapModule(pl.LightningModule):
                 self.action_taxonomy,
             )
             self.action_object_ids_by_index = self._build_action_object_ids_by_index()
-            self.action_confuser_indices = self._build_action_confuser_indices()
         else:
             self.action_names = [str(index) for index in range(self.num_classes)]
             self.action_to_index = {}
             self.action_object_map = {}
             self.action_object_ids_by_index = {}
-            self.action_confuser_indices = {}
 
         # Create model
         self.lr = hparams.lr
@@ -355,7 +352,6 @@ class HeatmapModule(pl.LightningModule):
         object_classes=None,
         object_confs=None,
         object_valid=None,
-        object_heatmap_scores=None,
     ):
         # Forward function that is run when visualizing the graph
         return self.model(
@@ -367,7 +363,6 @@ class HeatmapModule(pl.LightningModule):
             object_classes=object_classes,
             object_confs=object_confs,
             object_valid=object_valid,
-            object_heatmap_scores=object_heatmap_scores,
         )
 
     def _actor_prompt_param_name(self, name):
@@ -488,25 +483,6 @@ class HeatmapModule(pl.LightningModule):
                     dtype=torch.long,
                 )
         return action_object_ids
-
-    def _build_action_confuser_indices(self):
-        confuser_indices = {}
-        for action_name, action_idx in self.action_to_index.items():
-            confusers = [
-                int(self.action_to_index[confuser_name])
-                for confuser_name in toyota_confuser_action_names(
-                    action_name,
-                    self.task_type,
-                    self.action_taxonomy,
-                )
-                if confuser_name in self.action_to_index
-            ]
-            if confusers:
-                confuser_indices[int(action_idx)] = torch.tensor(
-                    confusers,
-                    dtype=torch.long,
-                )
-        return confuser_indices
 
     def _build_group_indices(self):
         if not self.is_toyota:
@@ -997,9 +973,6 @@ class HeatmapModule(pl.LightningModule):
                 dtype=torch.bool,
             ),
         }
-
-    def _detected_slot_offset(self):
-        return 0
 
     def _object_class_dropout_inputs(self, object_inputs, stage):
         if stage != "train" or not object_inputs:
@@ -2414,11 +2387,6 @@ class HeatmapModule(pl.LightningModule):
         watch_idx = self._action_index("WatchTV")
         if watch_idx is not None:
             watch_fp = (pred_labels[hard_mask] == int(watch_idx)).float().mean()
-            self._log_scalar(
-                f"{stage}_presence_objectless_watchtv_fp_rate",
-                watch_fp,
-                count,
-            )
             self._log_scalar(
                 f"{stage}_watchtv_fp_rate_objectless",
                 watch_fp,

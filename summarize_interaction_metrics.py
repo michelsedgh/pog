@@ -49,9 +49,6 @@ CORE_COLUMNS = [
     "val_object_prompt_exact_correct_object_rate",
     "val_object_prompt_exact_correct_object_prob",
     "val_actor_object_prompt_token_count",
-    "val_objectless_branch_acc",
-    "val_objectful_branch_acc",
-    "val_objectless_true_minus_max_objectful_margin",
     "val_loss_motion_aux",
     "val_motion_aux_acc",
     "train_nash_weight_action",
@@ -81,9 +78,6 @@ CORE_COLUMNS = [
     "val_objectless_with_book_visible_count",
     "val_objectless_with_phone_visible_acc",
     "val_objectless_with_phone_visible_count",
-    "val_presence_acc",
-    "val_presence_objectless_null_rate",
-    "val_presence_objectful_interaction_rate",
     "val_watchtv_fp_rate_objectless",
     "train_loss_objectless_prompt_consistency",
     "train_objectless_prompt_consistency_pred_match",
@@ -326,7 +320,6 @@ def print_compact_best(epoch_df):
         "val_group_objectless_acc",
         "val_group_laptop_book_tv_acc",
         "val_group_phone_tv_acc",
-        "val_objectless_true_minus_max_objectful_margin",
         "val_object_counterfactual_teacher_logit_drop",
         "val_object_prompt_grounding_acc",
         "val_object_prompt_grounding_true_prob",
@@ -364,7 +357,6 @@ def print_object_use_epoch_table(epoch_df):
         "val_interaction_heatmap_soft_iou",
         "val_interaction_heatmap_center_l2",
         "val_interaction_heatmap_missing_object_masked_rate",
-        "val_objectless_true_minus_max_objectful_margin",
         "val_object_counterfactual_teacher_logit_drop",
         "val_object_counterfactual_teacher_prob_drop",
     ]
@@ -383,7 +375,6 @@ def print_object_use_epoch_table(epoch_df):
         "val_interaction_heatmap_mismatch_valid_rate",
         "val_object_counterfactual_teacher_logit_drop",
         "val_object_counterfactual_teacher_prob_drop",
-        "val_objectless_true_minus_max_objectful_margin",
     ]
     display_cols = [col for col in cols if col in epoch_df.columns]
     if len(display_cols) <= 1:

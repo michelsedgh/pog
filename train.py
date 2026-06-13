@@ -209,57 +209,10 @@ def _initialize_actor_prompt_from_checkpoint(module, checkpoint):
         )
 
 
-def _adapt_actor_action_head_checkpoint(module, checkpoint):
-    if checkpoint is None:
-        return
-    state_dict = checkpoint.get("state_dict", {})
-    model = module.model
-    actor_head = getattr(model, "actor_head", None)
-    if actor_head is None or not hasattr(actor_head, "weight"):
-        return
-    linear_w = "model.actor_head.weight"
-    linear_b = "model.actor_head.bias"
-    conditioned_w = "model.actor_head.action_head.weight"
-    conditioned_b = "model.actor_head.action_head.bias"
-    adapted = False
-    if (
-        linear_w not in state_dict
-        and linear_b not in state_dict
-        and conditioned_w in state_dict
-        and conditioned_b in state_dict
-        and tuple(state_dict[conditioned_w].shape) == tuple(actor_head.weight.shape)
-        and tuple(state_dict[conditioned_b].shape) == tuple(actor_head.bias.shape)
-    ):
-        state_dict[linear_w] = state_dict[conditioned_w]
-        state_dict[linear_b] = state_dict[conditioned_b]
-        adapted = True
-    for key in list(state_dict):
-        if key.startswith("model.actor_head.") and key not in {linear_w, linear_b}:
-            state_dict.pop(key)
-    residual_keys = [
-        key
-        for key in list(state_dict)
-        if key.startswith("model.object_action_residual.")
-    ]
-    for key in residual_keys:
-        state_dict.pop(key)
-    if adapted:
-        print("Adapted object-conditioned actor_head.action_head weights into actor_head.")
-    if residual_keys:
-        print(
-            "Discarded legacy object_action_residual weights; "
-            "using transformer-context actor action head."
-        )
-
-
 def _validate_active_actor_action_path(module):
     model = module.model
     if not getattr(model, "actor_prompt", False):
         return
-    if getattr(model, "actor_object_slot_head_enabled", False):
-        raise RuntimeError(
-            "actor_object_slot_head is deprecated. Use actor_object_prompt_tokens."
-        )
     actor_head = getattr(model, "actor_head", None)
     if not isinstance(actor_head, torch.nn.Linear):
         raise RuntimeError(
@@ -267,8 +220,6 @@ def _validate_active_actor_action_path(module):
             "Object proposals may be used only as prompt/context inputs, not as "
             "a replacement action head."
         )
-    if getattr(model, "actor_object_conditioned_action", False):
-        raise RuntimeError("actor_object_conditioned_action must be disabled.")
     if hasattr(actor_head, "action_head"):
         raise RuntimeError("Legacy actor_head.action_head is still active.")
 
@@ -336,6 +287,10 @@ def _validate_no_deprecated_object_path(checkpoint):
     state_dict = checkpoint.get("state_dict", {})
 
     def is_deprecated_object_key(key):
+        if key.startswith("model.actor_head.action_head."):
+            return True
+        if key.startswith("model.object_action_residual."):
+            return True
         if any(
             needle in key
             for needle in (
@@ -346,7 +301,7 @@ def _validate_no_deprecated_object_path(checkpoint):
             )
         ):
             return True
-        return "object_action" in key and "object_action_residual" not in key
+        return "object_action" in key
 
     deprecated = [
         key
@@ -552,7 +507,6 @@ def main():
     _validate_active_actor_action_path(module)
 
     if checkpoint is not None:
-        _adapt_actor_action_head_checkpoint(module, checkpoint)
         _adapt_heatmap_final_layer_checkpoint(module, checkpoint)
         strict = (
             bool(hparams.strict_load)
