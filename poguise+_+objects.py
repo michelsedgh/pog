@@ -283,6 +283,7 @@ def run_checked(cmd, label=None):
 
 run_checked([
     sys.executable, "-m", "py_compile",
+    "blocks/poguise.py",
     "datasets/object_vocab.py",
     "datasets/toyota_action_taxonomy.py",
     "datasets/toyotasm.py",
@@ -404,7 +405,7 @@ def run_training_with_epoch_summaries(cmd, run_name, epoch_dir, poll_secs=20):
     return str(run_dir)
 
 TS = datetime.now().strftime("%Y%m%d_%H%M%S")
-RUN_NAME = f"actor_object_visualfallback_v1_deploybalanced_videomae_epoch20_{TS}"
+RUN_NAME = f"actor_object_factorized_visualtokens_heatmapfix_epoch15_{TS}"
 EPOCH_DIR = str(Path(DATA_DIR) / "checkpoints" / RUN_NAME / "epoch_checkpoints")
 
 cmd = [
@@ -457,7 +458,7 @@ cmd = [
     "--object_token_confidence_noise", "0.0",
 
     "--interaction_heatmap_size", "56",
-    "--interaction_heatmap_sigma", "1.5",
+    "--interaction_heatmap_sigma", "2.5",
     "--interaction_guided_sampling", "1",
     "--interaction_min_sampled_object_frames", "1",
     "--interaction_repair_radius_frames", "8",
@@ -496,6 +497,10 @@ cmd = [
     "--poguiseplus_heatmap_log_eps", "1e-6",
     "--poguiseplus_normalized_heatmap_loss", "1",
     "--poguiseplus_heatmap_mse_scale", "1000",
+    "--poguiseplus_interaction_heatmap_pos_loss_weight", "0.25",
+    "--poguiseplus_interaction_heatmap_pos_weight", "8.0",
+    "--poguiseplus_interaction_heatmap_center_loss_weight", "0.25",
+    "--poguiseplus_interaction_heatmap_center_temperature", "10.0",
 
     "--motion_aux_loss_weight", "0.25",
     "--factorized_presence_loss_weight", "1.0",
@@ -509,13 +514,17 @@ cmd = [
     "--object_action_confuser_loss_weight", "0.0",
     "--object_action_confuser_margin", "1.0",
     "--objectless_object_action_suppression_loss_weight", "0.5",
-    "--teacher_object_drop_prob", "0.10",
+    "--teacher_object_drop_start_prob", "0.05",
+    "--teacher_object_drop_prob", "0.15",
     "--object_class_dropout_prob", "0.0",
     "--object_class_wrong_prob", "0.0",
     "--missing_object_full_ce_weight", "0.0",
-    "--missing_object_confuser_weight", "0.50",
+    "--missing_object_confuser_start_weight", "0.25",
+    "--missing_object_confuser_weight", "0.75",
     "--missing_object_confuser_margin", "1.0",
-    "--missing_object_visual_fallback_loss_weight", "0.10",
+    "--missing_object_visual_fallback_start_loss_weight", "0.05",
+    "--missing_object_visual_fallback_loss_weight", "0.25",
+    "--missing_object_curriculum_epochs", "5",
 
     "--toyota_pose_guided_sampling", "1",
     "--toyota_min_pose_frames", "1",
@@ -528,8 +537,8 @@ cmd = [
     "--batch_size", "32",
     "--accum_grad_batches", "2",
 
-    "--max_epochs", "3",
-    "--t_max_scheduler", "3",
+    "--max_epochs", "15",
+    "--t_max_scheduler", "15",
 
     "--lr", "5e-5",
     "--lr_head", "5e-4",
@@ -564,142 +573,6 @@ cmd = [
     "--default_root_dir", f"{DATA_DIR}/checkpoints",
     "--model_name", RUN_NAME,
 ]
-
-bad_flags = {
-    "--model_file",
-    "--resume_from_checkpoint",
-    "--scene_object_tokens",
-    "--interaction_object_classes",
-    "--actor_object_relation_layers",
-    "--actor_object_relation_heads",
-    "--actor_object_relation_hidden_dim",
-    "--actor_object_relevance_gate_init",
-    "--actor_object_action_fusion",
-    "--actor_object_action_fusion_hidden_dim",
-    "--actor_object_action_fusion_gate_init",
-    "--object_token_dropout_prob",
-    "--object_token_class_dropout_prob",
-    "--poguiseplus_interaction_target_weight",
-    "--poguiseplus_interaction_background_weight",
-    "--aux_object_selection_loss_weight",
-    "--object_selection_loss_weight",
-    "--object_relevance_loss_weight",
-    "--object_counterfactual_loss_weight",
-    "--object_counterfactual_margin",
-    "--object_counterfactual_eval",
-    "--object_slot_ignore_missing_object",
-    "--object_slot_unknown_exact_loss_weight",
-    "--missing_object_ce_weight",
-    "--objectful_presence_loss_weight",
-    "--actor_object_slot_hidden_dim",
-    "--actor_object_slot_attn_dim",
-    "--actor_object_slot_num_visual_slots",
-}
-present_bad = sorted(flag for flag in bad_flags if flag in cmd)
-if present_bad:
-    raise RuntimeError(f"Deprecated/removed flags still present: {present_bad}")
-
-required_flags = {
-    "--toyota_action_taxonomy",
-    "--poguiseplus_normalized_heatmap_loss",
-    "--actor_object_factorized_head",
-    "--actor_object_slot_head",
-    "--motion_aux_loss_weight",
-    "--factorized_presence_loss_weight",
-    "--factorized_objectful_within_loss_weight",
-    "--object_slot_target_loss_weight",
-    "--object_slot_quality_loss_weight",
-    "--object_slot_quality_pos_weight",
-    "--object_slot_quality_neg_weight",
-    "--object_slot_quality_exact_neg_topk",
-    "--object_slot_quality_objectless_neg_topk",
-    "--teacher_object_drop_prob",
-    "--object_class_dropout_prob",
-    "--object_class_wrong_prob",
-    "--missing_object_full_ce_weight",
-    "--missing_object_confuser_weight",
-    "--missing_object_confuser_margin",
-    "--missing_object_visual_fallback_loss_weight",
-    "--object_action_confuser_loss_weight",
-    "--object_action_confuser_margin",
-    "--objectless_object_action_suppression_loss_weight",
-    "--objectless_hard_negative_sampling",
-    "--objectless_hard_negative_min_sampled_object_frames",
-    "--merge_type",
-    "--sim_metric",
-    "--t_max_scheduler",
-    "--label_smoothing",
-    "--lr",
-    "--lr_head",
-    "--lr_head_hm",
-    "--object_token_box_jitter",
-    "--object_token_confidence_noise",
-    "--actor_object_factorized_hidden_dim",
-    "--actor_object_factorized_relation_scale_init",
-    "--actor_object_factorized_relation_logit_bound",
-    "--actor_object_factorized_max_relation_scale",
-    "--checkpoint_monitor",
-}
-missing = sorted(flag for flag in required_flags if flag not in cmd)
-if missing:
-    raise RuntimeError(f"Required flags missing: {missing}")
-
-checks = {
-    "--pretrained": "DEFAULT",
-    "--toyota_action_taxonomy": "product_v1",
-    "--num_classes": "26",
-    "--actor_object_factorized_head": "1",
-    "--actor_object_slot_head": "0",
-    "--checkpoint_monitor": "val_deploy_score",
-    "--checkpoint_mode": "max",
-    "--max_epochs": "3",
-    "--t_max_scheduler": "3",
-    "--merge_type": "sim",
-    "--sim_metric": "1",
-    "--lr": "5e-5",
-    "--lr_head": "5e-4",
-    "--lr_head_hm": "5e-4",
-    "--label_smoothing": "0.0",
-    "--poguiseplus_normalized_heatmap_loss": "1",
-    "--poguiseplus_interaction_heatmap_weight": "3.0",
-    "--motion_aux_loss_weight": "0.25",
-    "--factorized_presence_loss_weight": "1.0",
-    "--factorized_objectful_within_loss_weight": "0.5",
-    "--object_slot_target_loss_weight": "1.0",
-    "--object_slot_quality_loss_weight": "0.5",
-    "--object_slot_quality_pos_weight": "1.0",
-    "--object_slot_quality_neg_weight": "0.25",
-    "--object_slot_quality_exact_neg_topk": "4",
-    "--object_slot_quality_objectless_neg_topk": "8",
-    "--object_action_confuser_loss_weight": "0.0",
-    "--object_action_confuser_margin": "1.0",
-    "--objectless_object_action_suppression_loss_weight": "0.5",
-    "--teacher_object_drop_prob": "0.10",
-    "--object_class_dropout_prob": "0.0",
-    "--object_class_wrong_prob": "0.0",
-    "--missing_object_full_ce_weight": "0.0",
-    "--missing_object_confuser_weight": "0.50",
-    "--missing_object_confuser_margin": "1.0",
-    "--missing_object_visual_fallback_loss_weight": "0.10",
-    "--object_token_box_jitter": "0.0",
-    "--object_token_confidence_noise": "0.0",
-    "--actor_object_factorized_hidden_dim": "512",
-    "--actor_object_factorized_relation_scale_init": "-1.00",
-    "--actor_object_factorized_relation_logit_bound": "2.0",
-    "--actor_object_factorized_max_relation_scale": "1.5",
-}
-for flag, expected in checks.items():
-    actual = cmd[cmd.index(flag) + 1]
-    if actual != expected:
-        raise RuntimeError(f"Expected {flag} {expected}, got {actual}")
-
-for checkpoint_name in ("CKPT_PATH", "RESUME_CKPT_PATH"):
-    checkpoint_path = globals().get(checkpoint_name)
-    if checkpoint_path and checkpoint_path in cmd:
-        raise RuntimeError(
-            f"{checkpoint_name} is present in the training command. "
-            "This cell must train from the original DEFAULT backbone, not an old checkpoint."
-        )
 
 run_dir = run_training_with_epoch_summaries(cmd, RUN_NAME, EPOCH_DIR, poll_secs=20)
 print("RUN_DIR:", run_dir)

@@ -607,7 +607,10 @@ class POGUISE(pl.LightningModule):
                     valid=valid,
                 )
                 x_heatmap_feat = None
-                if len(net_data) == 4:
+                x_visual_final = None
+                if len(net_data) == 5:
+                    _, x_actor, x_heatmap, x_heatmap_feat, x_visual_final = net_data
+                elif len(net_data) == 4:
                     _, x_actor, x_heatmap, x_heatmap_feat = net_data
                 else:
                     _, x_actor, x_heatmap = net_data
@@ -620,6 +623,7 @@ class POGUISE(pl.LightningModule):
                 _, x_actor = data[:2]
                 x_heatmap = 0
                 x_heatmap_feat = None
+                x_visual_final = None
             self.last_actor_object_slot_logit_delta = None
             self.last_actor_object_slot_delta = None
             self.last_actor_object_slot_posterior = None
@@ -647,6 +651,13 @@ class POGUISE(pl.LightningModule):
             self.last_factorized_visual_delta_objectful_full = None
             self.last_factorized_detected_delta = None
             self.last_factorized_coverage = None
+            self.last_factorized_detected_mix_weight = None
+            self.last_factorized_visual_mix_weight = None
+            self.last_factorized_detected_mix_weight_objectful_full = None
+            self.last_factorized_visual_mix_weight_objectful_full = None
+            self.last_factorized_visual_source_token_count = None
+            self.last_factorized_heatmap_source_token_count = None
+            self.last_factorized_final_visual_source_token_count = None
             if self.hparams.ret_feat:
                 return x_actor
 
@@ -668,7 +679,11 @@ class POGUISE(pl.LightningModule):
                         "actor_object_factorized_head requires PO-GUISE heatmap "
                         "feature tokens. Keep actor_interaction_heatmaps enabled."
                     )
-                visual_tokens = x_heatmap_feat.flatten(2).transpose(1, 2)
+                heatmap_tokens = x_heatmap_feat.flatten(2).transpose(1, 2)
+                source_tokens = [heatmap_tokens]
+                if x_visual_final is not None and x_visual_final.shape[1] > 0:
+                    source_tokens.append(x_visual_final)
+                visual_tokens = torch.cat(source_tokens, dim=1)
                 head_output = self.factorized_interaction_action_head(
                     actor_tokens=x_actor,
                     actor_boxes=boxes,
@@ -700,6 +715,35 @@ class POGUISE(pl.LightningModule):
                 ]
                 self.last_factorized_detected_delta = head_output["detected_delta"]
                 self.last_factorized_coverage = head_output["coverage"]
+                self.last_factorized_detected_mix_weight = head_output[
+                    "detected_mix_weight"
+                ]
+                self.last_factorized_visual_mix_weight = head_output[
+                    "visual_mix_weight"
+                ]
+                self.last_factorized_detected_mix_weight_objectful_full = head_output[
+                    "detected_mix_weight_objectful_full"
+                ]
+                self.last_factorized_visual_mix_weight_objectful_full = head_output[
+                    "visual_mix_weight_objectful_full"
+                ]
+                self.last_factorized_heatmap_source_token_count = torch.tensor(
+                    int(heatmap_tokens.shape[1]),
+                    device=x_actor.device,
+                )
+                final_visual_count = (
+                    int(x_visual_final.shape[1])
+                    if x_visual_final is not None
+                    else 0
+                )
+                self.last_factorized_final_visual_source_token_count = torch.tensor(
+                    final_visual_count,
+                    device=x_actor.device,
+                )
+                self.last_factorized_visual_source_token_count = torch.tensor(
+                    int(visual_tokens.shape[1]),
+                    device=x_actor.device,
+                )
                 self.last_actor_action_logits = action_scores
                 self.last_actor_motion_logits = head_output["motion_aux_logits"]
                 self.last_actor_object_slot_delta = head_output["det_slot_scores"]

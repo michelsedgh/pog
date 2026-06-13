@@ -1336,19 +1336,29 @@ class VisionTransformer(nn.Module):
                 heatmap_start : self.heatmap_tokens.shape[1] + heatmap_start,
                 :,
             ]
+        x_visual = None
+        if self.return_heatmap_features:
+            visual_start = self.N_KEY_TOKENS + self.n_heatmap_tokens
+            x_visual = x[:, visual_start:, :]
         x_class = x[:, 0, :]
         if self.fc_norm is not None:
             x_class = self.fc_norm(x_class)
             if self.n_actor_tokens > 0:
                 x_actor = self.fc_norm(x_actor)
+            if x_visual is not None:
+                x_visual = self.fc_norm(x_visual)
         else:
             x_class = self.norm(x_class)
             if self.n_actor_tokens > 0:
                 x_actor = self.norm(x_actor)
+            if x_visual is not None:
+                x_visual = self.norm(x_visual)
         x_class = self.head_dropout(x_class)
         x_class = self.head(x_class)
         if self.n_actor_tokens > 0:
             x_actor = self.head_dropout(x_actor)
+        if x_visual is not None:
+            x_visual = self.head_dropout(x_visual)
 
         if self.n_heatmap_out_channels == 0:
             if self.n_actor_tokens > 0:
@@ -1364,7 +1374,7 @@ class VisionTransformer(nn.Module):
         x_heatmap = self.heatmap_head(x_heatmap)
         if self.n_actor_tokens > 0:
             if self.return_heatmap_features:
-                return x_class, x_actor, x_heatmap, x_heatmap_feat
+                return x_class, x_actor, x_heatmap, x_heatmap_feat, x_visual
             return x_class, x_actor, x_heatmap
         return x_class, x_heatmap
 

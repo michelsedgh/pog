@@ -241,7 +241,7 @@ class DetectedObjectRelationHead(nn.Module):
 
         # detected taxonomy prior is inside the objectful expert, not global action competition
         taxonomy_prior = torch.log1p(compat_back * proposal_strength / eps).amax(dim=-1)
-        taxonomy_prior = taxonomy_prior.clamp(max=2.5)
+        taxonomy_prior = taxonomy_prior.clamp(max=4.0)
         detected_delta = detected_delta + taxonomy_prior
 
         return {
@@ -360,7 +360,11 @@ class FactorizedInteractionActionHead(nn.Module):
         # detected/missing evidence mixture INSIDE objectful branch only
         detected_path = torch.log(coverage) + det_delta
         missing_path = torch.log1p(-coverage) + vis_delta
-        evidence_mix = torch.logsumexp(torch.stack([detected_path, missing_path], dim=-1), dim=-1)
+        mix_paths = torch.stack([detected_path, missing_path], dim=-1)
+        evidence_mix = torch.logsumexp(mix_paths, dim=-1)
+        mix_weight = F.softmax(mix_paths.float(), dim=-1).to(objectful_motion.dtype)
+        detected_mix_weight = mix_weight[..., 0]
+        visual_mix_weight = mix_weight[..., 1]
         objectful_scores = objectful_motion + evidence_mix
         objectful_logp = F.log_softmax(objectful_scores, dim=-1)
 
@@ -392,6 +396,18 @@ class FactorizedInteractionActionHead(nn.Module):
             self.objectful_index,
             self.spec.num_actions,
         )
+        detected_mix_weight_objectful_full = _scatter_last_dim(
+            detected_mix_weight,
+            self.objectful_index,
+            self.spec.num_actions,
+            fill_value=0.0,
+        )
+        visual_mix_weight_objectful_full = _scatter_last_dim(
+            visual_mix_weight,
+            self.objectful_index,
+            self.spec.num_actions,
+            fill_value=0.0,
+        )
 
         final_logp = final_logp.masked_fill(~actor_valid[:, :, None], -1e4)
         motion_aux_logits = motion_aux_logits.masked_fill(~actor_valid[:, :, None], -1e4)
@@ -409,6 +425,10 @@ class FactorizedInteractionActionHead(nn.Module):
             "visual_delta": vis_delta_full,
             "visual_delta_objectful": visual_delta_objectful,
             "visual_delta_objectful_full": visual_delta_objectful_full,
+            "detected_mix_weight": detected_mix_weight,
+            "visual_mix_weight": visual_mix_weight,
+            "detected_mix_weight_objectful_full": detected_mix_weight_objectful_full,
+            "visual_mix_weight_objectful_full": visual_mix_weight_objectful_full,
             "coverage": coverage_full,
             "relation_scale": rel_scale.detach(),
             **{f"det_{k}": v for k, v in det.items()},

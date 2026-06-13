@@ -471,6 +471,26 @@ def build_parser():
     parser.add_argument("--poguiseplus_heatmap_log_eps", type=float, default=1e-6)
     parser.add_argument("--poguiseplus_normalized_heatmap_loss", type=int, default=0)
     parser.add_argument("--poguiseplus_heatmap_mse_scale", type=float, default=1000.0)
+    parser.add_argument(
+        "--poguiseplus_interaction_heatmap_pos_loss_weight",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--poguiseplus_interaction_heatmap_pos_weight",
+        type=float,
+        default=8.0,
+    )
+    parser.add_argument(
+        "--poguiseplus_interaction_heatmap_center_loss_weight",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--poguiseplus_interaction_heatmap_center_temperature",
+        type=float,
+        default=10.0,
+    )
     parser.add_argument("--motion_aux_loss_weight", type=float, default=0.25)
     parser.add_argument("--factorized_presence_loss_weight", type=float, default=1.0)
     parser.add_argument(
@@ -496,10 +516,16 @@ def build_parser():
         default=8,
     )
     parser.add_argument("--teacher_object_drop_prob", type=float, default=0.0)
+    parser.add_argument("--teacher_object_drop_start_prob", type=float, default=None)
     parser.add_argument("--object_class_dropout_prob", type=float, default=0.0)
     parser.add_argument("--object_class_wrong_prob", type=float, default=0.0)
     parser.add_argument("--missing_object_full_ce_weight", type=float, default=0.0)
     parser.add_argument("--missing_object_confuser_weight", type=float, default=0.0)
+    parser.add_argument(
+        "--missing_object_confuser_start_weight",
+        type=float,
+        default=None,
+    )
     parser.add_argument("--missing_object_confuser_margin", type=float, default=1.0)
     parser.add_argument(
         "--missing_object_visual_fallback_loss_weight",
@@ -511,6 +537,12 @@ def build_parser():
         type=float,
         default=None,
     )
+    parser.add_argument(
+        "--missing_object_visual_fallback_start_loss_weight",
+        type=float,
+        default=None,
+    )
+    parser.add_argument("--missing_object_curriculum_epochs", type=int, default=0)
     parser.add_argument("--deepspeed_optim", type=int, default=0)
     parser.add_argument("--kp_only", type=int, default=0)
 

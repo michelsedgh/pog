@@ -34,6 +34,8 @@ CORE_COLUMNS = [
     "val_loss_interaction_heatmap_raw_frobenius",
     "val_loss_interaction_heatmap_frobenius",
     "val_loss_interaction_heatmap_mse_scaled",
+    "val_loss_interaction_heatmap_pos_balanced",
+    "val_loss_interaction_heatmap_center",
     "val_loss_main_deploy",
     "val_loss_grounding_aux",
     "val_loss_objectless_object_action_suppression",
@@ -60,6 +62,17 @@ CORE_COLUMNS = [
     "val_object_slot_mapped_mismatch_count",
     "val_object_visual_fallback_true_delta_given_exact_compatible",
     "val_object_visual_fallback_true_delta_given_missing",
+    "val_detected_mix_weight_exact",
+    "val_visual_mix_weight_exact",
+    "val_detected_mix_weight_missing",
+    "val_visual_mix_weight_missing",
+    "val_detected_delta_true_minus_confuser_exact",
+    "val_missing_true_minus_watchtv_margin",
+    "val_missing_true_minus_confuser_margin",
+    "val_visual_delta_true_minus_confuser_missing",
+    "val_watchtv_fp_rate_missing_objectful",
+    "val_watchtv_fp_rate_laptop_missing",
+    "val_watchtv_fp_rate_phone_missing",
     "val_object_slot_exact_quality_teacher_rank_mean",
     "val_object_slot_exact_quality_teacher_top1_rate",
     "val_objectless_branch_acc",
@@ -114,10 +127,23 @@ CORE_COLUMNS = [
     "val_objectless_with_phone_visible_acc",
     "val_objectless_with_phone_visible_count",
     "val_actor_object_slot_relation_scale",
+    "val_factorized_visual_source_token_count",
+    "val_factorized_heatmap_source_token_count",
+    "val_factorized_final_visual_source_token_count",
     "val_loss_factorized_presence",
+    "val_factorized_presence_acc",
+    "val_factorized_presence_objectless_null_rate",
+    "val_factorized_presence_objectful_interaction_rate",
     "val_presence_acc",
     "val_presence_objectless_null_rate",
     "val_presence_objectful_interaction_rate",
+    "val_teacher_dropped_objectful_acc",
+    "val_teacher_dropped_true_minus_watchtv_margin",
+    "val_teacher_dropped_true_minus_confuser_margin",
+    "val_watchtv_fp_rate_objectless",
+    "train_teacher_object_drop_prob_scheduled",
+    "train_missing_object_confuser_weight_scheduled",
+    "train_missing_object_visual_fallback_weight_scheduled",
     "train_loss_missing_object_confuser",
     "train_loss_missing_object_visual_fallback",
     "train_missing_object_dropout_acc",
@@ -318,13 +344,21 @@ def print_compact_epoch_summary(epoch_df):
         "val_coverage_true_action_exact",
         "val_object_visual_fallback_true_delta_given_exact_compatible",
         "val_object_visual_fallback_true_delta_given_missing",
+        "val_detected_mix_weight_exact",
+        "val_visual_mix_weight_exact",
+        "val_detected_mix_weight_missing",
+        "val_visual_mix_weight_missing",
+        "val_missing_true_minus_watchtv_margin",
+        "val_missing_true_minus_confuser_margin",
         "val_object_slot_quality_pos_acc",
         "val_object_slot_quality_neg_acc",
         "val_object_slot_Uselaptop_laptop_rate",
         "val_coverage_Uselaptop",
         "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
         "val_actor_object_slot_relation_scale",
+        "val_factorized_final_visual_source_token_count",
         "val_object_counterfactual_teacher_logit_drop",
+        "val_teacher_dropped_true_minus_confuser_margin",
         "val_interaction_heatmap_positive_mean",
         "val_interaction_heatmap_pred_max",
         "val_interaction_heatmap_soft_iou",
@@ -373,6 +407,11 @@ def print_compact_best(epoch_df):
         "val_coverage_true_action_exact",
         "val_object_visual_fallback_true_delta_given_exact_compatible",
         "val_object_visual_fallback_true_delta_given_missing",
+        "val_detected_mix_weight_exact",
+        "val_visual_mix_weight_exact",
+        "val_detected_mix_weight_missing",
+        "val_visual_mix_weight_missing",
+        "val_missing_true_minus_confuser_margin",
         "val_objectless_true_minus_max_objectful_margin",
         "val_object_slot_quality_pos_acc",
         "val_object_slot_quality_neg_acc",
@@ -380,7 +419,9 @@ def print_compact_best(epoch_df):
         "val_coverage_Uselaptop",
         "val_object_slot_Uselaptop_minus_Readbook_logit_margin",
         "val_actor_object_slot_relation_scale",
+        "val_factorized_final_visual_source_token_count",
         "val_object_counterfactual_teacher_logit_drop",
+        "val_teacher_dropped_true_minus_confuser_margin",
         "val_action_Uselaptop_acc",
         "val_action_Readbook_acc",
         "val_action_WatchTV_acc",
@@ -420,6 +461,11 @@ def print_object_use_epoch_table(epoch_df):
         "val_coverage_true_action_exact",
         "val_object_visual_fallback_true_delta_given_exact_compatible",
         "val_object_visual_fallback_true_delta_given_missing",
+        "val_detected_mix_weight_exact",
+        "val_visual_mix_weight_exact",
+        "val_detected_mix_weight_missing",
+        "val_visual_mix_weight_missing",
+        "val_missing_true_minus_confuser_margin",
         "val_object_slot_exact_quality_teacher_rank_mean",
         "val_object_slot_exact_quality_teacher_top1_rate",
         "val_objectless_true_minus_max_objectful_margin",
@@ -456,6 +502,11 @@ def print_object_use_epoch_table(epoch_df):
         "val_coverage_true_action_exact",
         "val_object_visual_fallback_true_delta_given_exact_compatible",
         "val_object_visual_fallback_true_delta_given_missing",
+        "val_detected_mix_weight_exact",
+        "val_visual_mix_weight_exact",
+        "val_detected_mix_weight_missing",
+        "val_visual_mix_weight_missing",
+        "val_missing_true_minus_confuser_margin",
         "val_object_slot_exact_quality_teacher_rank_mean",
         "val_object_slot_exact_quality_teacher_top1_rate",
         "val_objectless_true_minus_max_objectful_margin",
@@ -789,6 +840,50 @@ def print_decision(epoch_df):
         latest,
         "val_object_visual_fallback_true_delta_given_missing",
     )
+    detected_mix_exact = metric(latest, "val_detected_mix_weight_exact")
+    visual_mix_exact = metric(latest, "val_visual_mix_weight_exact")
+    detected_mix_missing = metric(latest, "val_detected_mix_weight_missing")
+    visual_mix_missing = metric(latest, "val_visual_mix_weight_missing")
+    detected_delta_confuser_exact = metric(
+        latest,
+        "val_detected_delta_true_minus_confuser_exact",
+    )
+    missing_watch_margin = metric(latest, "val_missing_true_minus_watchtv_margin")
+    missing_confuser_margin = metric(
+        latest,
+        "val_missing_true_minus_confuser_margin",
+    )
+    missing_visual_confuser_margin = metric(
+        latest,
+        "val_visual_delta_true_minus_confuser_missing",
+    )
+    watchtv_missing_fp = metric(latest, "val_watchtv_fp_rate_missing_objectful")
+    watchtv_laptop_missing_fp = metric(latest, "val_watchtv_fp_rate_laptop_missing")
+    watchtv_phone_missing_fp = metric(latest, "val_watchtv_fp_rate_phone_missing")
+    factorized_presence_acc = metric(latest, "val_factorized_presence_acc")
+    factorized_null_rate = metric(
+        latest,
+        "val_factorized_presence_objectless_null_rate",
+    )
+    factorized_interaction_rate = metric(
+        latest,
+        "val_factorized_presence_objectful_interaction_rate",
+    )
+    visual_source_tokens = metric(latest, "val_factorized_visual_source_token_count")
+    heatmap_source_tokens = metric(latest, "val_factorized_heatmap_source_token_count")
+    final_visual_source_tokens = metric(
+        latest,
+        "val_factorized_final_visual_source_token_count",
+    )
+    teacher_dropped_acc = metric(latest, "val_teacher_dropped_objectful_acc")
+    teacher_dropped_watch_margin = metric(
+        latest,
+        "val_teacher_dropped_true_minus_watchtv_margin",
+    )
+    teacher_dropped_confuser_margin = metric(
+        latest,
+        "val_teacher_dropped_true_minus_confuser_margin",
+    )
     exact_quality_rank = metric(
         latest,
         "val_object_slot_exact_quality_teacher_rank_mean",
@@ -907,6 +1002,41 @@ def print_decision(epoch_df):
             f"quality_rank {fmt(exact_quality_rank)}, "
             f"quality_top1 {fmt(exact_quality_top1)}"
         )
+    if (
+        pd.notna(detected_mix_exact)
+        or pd.notna(visual_mix_missing)
+        or pd.notna(missing_confuser_margin)
+    ):
+        print(
+            "factorized evidence mix: "
+            f"detected_exact {fmt(detected_mix_exact)}, "
+            f"visual_exact {fmt(visual_mix_exact)}, "
+            f"detected_missing {fmt(detected_mix_missing)}, "
+            f"visual_missing {fmt(visual_mix_missing)}, "
+            f"detected_delta_confuser_exact {fmt(detected_delta_confuser_exact)}, "
+            f"missing_watch_margin {fmt(missing_watch_margin)}, "
+            f"missing_confuser_margin {fmt(missing_confuser_margin)}, "
+            f"visual_missing_confuser_margin {fmt(missing_visual_confuser_margin)}"
+        )
+        print(
+            "fallback false positives: "
+            f"watchtv_missing {fmt(watchtv_missing_fp)}, "
+            f"laptop_missing {fmt(watchtv_laptop_missing_fp)}, "
+            f"phone_missing {fmt(watchtv_phone_missing_fp)}"
+        )
+    if (
+        pd.notna(factorized_presence_acc)
+        or pd.notna(final_visual_source_tokens)
+    ):
+        print(
+            "factorized mode/source: "
+            f"presence_acc {fmt(factorized_presence_acc)}, "
+            f"objectless_null {fmt(factorized_null_rate)}, "
+            f"objectful_interaction {fmt(factorized_interaction_rate)}, "
+            f"source_tokens {fmt(visual_source_tokens, 0)}, "
+            f"heatmap_tokens {fmt(heatmap_source_tokens, 0)}, "
+            f"final_visual_tokens {fmt(final_visual_source_tokens, 0)}"
+        )
     if pd.notna(heatmap_missing_mask_rate):
         print(
             "missing-aware heatmap supervision: "
@@ -945,7 +1075,10 @@ def print_decision(epoch_df):
     if pd.notna(cf_logit) or pd.notna(cf_prob):
         print(
             "teacher-object removal: "
-            f"logit_drop {fmt(cf_logit)}, prob_drop {fmt(cf_prob)}"
+            f"logit_drop {fmt(cf_logit)}, prob_drop {fmt(cf_prob)}, "
+            f"dropped_acc {fmt(teacher_dropped_acc)}, "
+            f"dropped_watch_margin {fmt(teacher_dropped_watch_margin)}, "
+            f"dropped_confuser_margin {fmt(teacher_dropped_confuser_margin)}"
         )
 
     if pd.notna(f1_delta) and f1_delta < -0.01:
