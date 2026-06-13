@@ -404,7 +404,7 @@ def run_training_with_epoch_summaries(cmd, run_name, epoch_dir, poll_secs=20):
     return str(run_dir)
 
 TS = datetime.now().strftime("%Y%m%d_%H%M%S")
-RUN_NAME = f"actor_object_visualslot_v1_deploybalanced_videomae_epoch20_{TS}"
+RUN_NAME = f"actor_object_visualfallback_v1_deploybalanced_videomae_epoch20_{TS}"
 EPOCH_DIR = str(Path(DATA_DIR) / "checkpoints" / RUN_NAME / "epoch_checkpoints")
 
 cmd = [
@@ -454,7 +454,6 @@ cmd = [
     "--actor_object_slot_relation_logit_bound", "2.0",
     "--actor_object_slot_max_relation_scale", "1.5",
     "--actor_object_slot_num_visual_slots", "1",
-    "--actor_object_slot_visual_bias", "0.20",
     "--actor_object_slot_objectful_presence_beta", "1.0",
     "--actor_object_slot_objectful_presence_init_bias", "0.0",
 
@@ -463,8 +462,8 @@ cmd = [
     "--object_ignore_regions", "c03=0,0,0.26,0.42",
     "--object_conf_threshold", "0.25",
 
-    "--object_token_box_jitter", "0.06",
-    "--object_token_confidence_noise", "0.05",
+    "--object_token_box_jitter", "0.0",
+    "--object_token_confidence_noise", "0.0",
 
     "--interaction_heatmap_size", "56",
     "--interaction_heatmap_sigma", "1.5",
@@ -520,13 +519,13 @@ cmd = [
     "--object_action_confuser_margin", "1.0",
     "--objectless_object_action_suppression_loss_weight", "0.35",
     "--teacher_object_drop_prob", "0.35",
-    "--object_class_dropout_prob", "0.25",
-    "--object_class_wrong_prob", "0.10",
+    "--object_class_dropout_prob", "0.0",
+    "--object_class_wrong_prob", "0.0",
     "--missing_object_ce_weight", "0.75",
     "--missing_object_confuser_weight", "1.0",
     "--missing_object_confuser_margin", "1.0",
-    "--missing_object_visual_slot_loss_weight", "0.5",
-    "--objectful_presence_loss_weight", "0.4",
+    "--missing_object_visual_fallback_loss_weight", "0.5",
+    "--objectful_presence_loss_weight", "0.5",
 
     "--toyota_pose_guided_sampling", "1",
     "--toyota_min_pose_frames", "1",
@@ -622,7 +621,7 @@ required_flags = {
     "--missing_object_ce_weight",
     "--missing_object_confuser_weight",
     "--missing_object_confuser_margin",
-    "--missing_object_visual_slot_loss_weight",
+    "--missing_object_visual_fallback_loss_weight",
     "--objectful_presence_loss_weight",
     "--object_action_confuser_loss_weight",
     "--object_action_confuser_margin",
@@ -649,7 +648,6 @@ required_flags = {
     "--actor_object_slot_relation_logit_bound",
     "--actor_object_slot_max_relation_scale",
     "--actor_object_slot_num_visual_slots",
-    "--actor_object_slot_visual_bias",
     "--actor_object_slot_objectful_presence_beta",
     "--actor_object_slot_objectful_presence_init_bias",
     "--checkpoint_monitor",
@@ -687,15 +685,15 @@ checks = {
     "--object_action_confuser_margin": "1.0",
     "--objectless_object_action_suppression_loss_weight": "0.35",
     "--teacher_object_drop_prob": "0.35",
-    "--object_class_dropout_prob": "0.25",
-    "--object_class_wrong_prob": "0.10",
+    "--object_class_dropout_prob": "0.0",
+    "--object_class_wrong_prob": "0.0",
     "--missing_object_ce_weight": "0.75",
     "--missing_object_confuser_weight": "1.0",
     "--missing_object_confuser_margin": "1.0",
-    "--missing_object_visual_slot_loss_weight": "0.5",
-    "--objectful_presence_loss_weight": "0.4",
-    "--object_token_box_jitter": "0.06",
-    "--object_token_confidence_noise": "0.05",
+    "--missing_object_visual_fallback_loss_weight": "0.5",
+    "--objectful_presence_loss_weight": "0.5",
+    "--object_token_box_jitter": "0.0",
+    "--object_token_confidence_noise": "0.0",
     "--actor_object_slot_hidden_dim": "512",
     "--actor_object_slot_attn_dim": "256",
     "--actor_object_slot_prior_compatible": "1.50",
@@ -708,7 +706,6 @@ checks = {
     "--actor_object_slot_relation_logit_bound": "2.0",
     "--actor_object_slot_max_relation_scale": "1.5",
     "--actor_object_slot_num_visual_slots": "1",
-    "--actor_object_slot_visual_bias": "0.20",
     "--actor_object_slot_objectful_presence_beta": "1.0",
     "--actor_object_slot_objectful_presence_init_bias": "0.0",
 }

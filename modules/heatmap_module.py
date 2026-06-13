@@ -196,11 +196,24 @@ class HeatmapModule(pl.LightningModule):
         )
         if self.missing_object_confuser_margin < 0:
             raise ValueError("missing_object_confuser_margin must be >= 0")
-        self.missing_object_visual_slot_loss_weight = float(
-            hparams.get("missing_object_visual_slot_loss_weight", 0.0)
+        visual_fallback_weight = hparams.get(
+            "missing_object_visual_fallback_loss_weight",
+            None,
         )
-        if self.missing_object_visual_slot_loss_weight < 0:
-            raise ValueError("missing_object_visual_slot_loss_weight must be >= 0")
+        if visual_fallback_weight is None:
+            visual_fallback_weight = hparams.get(
+                "missing_object_visual_slot_loss_weight",
+                None,
+            )
+        if visual_fallback_weight is None:
+            visual_fallback_weight = 0.0
+        self.missing_object_visual_fallback_loss_weight = float(
+            visual_fallback_weight
+        )
+        if self.missing_object_visual_fallback_loss_weight < 0:
+            raise ValueError(
+                "missing_object_visual_fallback_loss_weight must be >= 0"
+            )
         self.objectful_presence_loss_weight = float(
             hparams.get("objectful_presence_loss_weight", 0.0)
         )
@@ -971,8 +984,11 @@ class HeatmapModule(pl.LightningModule):
             return 2
         return int(getattr(slot_head, "detected_slot_offset", 2))
 
-    def _num_visual_slots(self):
-        return max(0, self._detected_slot_offset() - 2)
+    def _num_visual_fallback_slots(self):
+        slot_head = getattr(self.model, "actor_object_slot_head", None)
+        if slot_head is None:
+            return 0
+        return max(0, int(getattr(slot_head, "num_visual_slots", 0)))
 
     def _object_class_dropout_inputs(self, object_inputs, stage):
         if stage != "train" or not object_inputs:
@@ -1138,12 +1154,7 @@ class HeatmapModule(pl.LightningModule):
             interaction_object_index_valid=target.get(
                 "interaction_object_index_valid"
             ),
-            interaction_heatmap_valid=target.get("interaction_heatmap_valid"),
             ignore_missing_object=self.object_slot_ignore_missing_object,
-            num_visual_slots=self._num_visual_slots(),
-            missing_object_target=(
-                "visual" if self._num_visual_slots() > 0 else "unknown"
-            ),
         )
         self.log(
             f"{stage}_loss_object_slot_target",
@@ -1476,7 +1487,7 @@ class HeatmapModule(pl.LightningModule):
         if (
             self.missing_object_ce_weight <= 0.0
             and self.missing_object_confuser_weight <= 0.0
-            and self.missing_object_visual_slot_loss_weight <= 0.0
+            and self.missing_object_visual_fallback_loss_weight <= 0.0
         ):
             return None, None
 
@@ -1568,25 +1579,24 @@ class HeatmapModule(pl.LightningModule):
                     max(sample_count, 1),
                 )
 
-        slot_delta = getattr(self.model, "last_actor_object_slot_delta", None)
-        num_visual_slots = self._num_visual_slots()
+        visual_delta = getattr(
+            self.model,
+            "last_actor_object_visual_fallback_delta",
+            None,
+        )
+        num_visual_slots = self._num_visual_fallback_slots()
         if (
-            slot_delta is not None
+            visual_delta is not None
             and num_visual_slots > 0
-            and self.missing_object_visual_slot_loss_weight > 0.0
+            and self.missing_object_visual_fallback_loss_weight > 0.0
         ):
-            rows = torch.nonzero(drop_mask, as_tuple=False)
-            true_slot_logits = slot_delta[
-                rows[:, 0],
-                rows[:, 1],
-                true_labels,
-            ].float()
-            slot_prob = true_slot_logits.softmax(dim=-1)
-            visual_prob = slot_prob[:, 2 : 2 + num_visual_slots].sum(dim=-1)
-            visual_loss = -torch.log(visual_prob.clamp_min(1.0e-6)).mean()
-            aux_terms.append(visual_loss * self.missing_object_visual_slot_loss_weight)
+            visual_logits = visual_delta[drop_mask].float()
+            visual_loss = F.cross_entropy(visual_logits, true_labels)
+            aux_terms.append(
+                visual_loss * self.missing_object_visual_fallback_loss_weight
+            )
             self.log(
-                "train_loss_missing_object_visual_slot",
+                "train_loss_missing_object_visual_fallback",
                 visual_loss,
                 on_step=True,
                 on_epoch=True,
@@ -1594,17 +1604,27 @@ class HeatmapModule(pl.LightningModule):
                 logger=True,
                 sync_dist=True,
             )
-            best_slot = slot_prob.argmax(dim=-1)
+            visual_pred = visual_logits.argmax(dim=-1)
             self._log_scalar(
-                "train_missing_object_visual_slot_rate",
-                ((best_slot >= 2) & (best_slot < 2 + num_visual_slots)).float().mean(),
-                int(best_slot.numel()),
+                "train_missing_object_visual_fallback_acc",
+                (visual_pred == true_labels).float().mean(),
+                int(true_labels.numel()),
             )
-            self._log_scalar(
-                "train_missing_object_unknown_slot_rate",
-                (best_slot == 1).float().mean(),
-                int(best_slot.numel()),
+            fallback_gate = getattr(
+                self.model,
+                "last_actor_object_visual_fallback_gate",
+                None,
             )
+            if fallback_gate is not None:
+                true_gate = fallback_gate[drop_mask].gather(
+                    1,
+                    true_labels.unsqueeze(1),
+                ).squeeze(1)
+                self._log_scalar(
+                    "train_missing_object_visual_fallback_true_gate",
+                    true_gate.float().mean(),
+                    int(true_gate.numel()),
+                )
 
         with torch.no_grad():
             pred_labels = dropped_valid_preds.argmax(dim=-1)
@@ -1741,13 +1761,25 @@ class HeatmapModule(pl.LightningModule):
         object_valid = target["object_valid"].to(device=device, dtype=torch.bool)
         full_preds = full_preds.to(device=device)
         detected_slot_offset = self._detected_slot_offset()
-        num_visual_slots = self._num_visual_slots()
+        visual_fallback_delta = getattr(
+            self.model,
+            "last_actor_object_visual_fallback_delta",
+            None,
+        )
+        visual_fallback_gate = getattr(
+            self.model,
+            "last_actor_object_visual_fallback_gate",
+            None,
+        )
+        if visual_fallback_delta is not None:
+            visual_fallback_delta = visual_fallback_delta.to(device=device).float()
+        if visual_fallback_gate is not None:
+            visual_fallback_gate = visual_fallback_gate.to(device=device).float()
 
         true_best_slot = best_slot.gather(
             dim=-1,
             index=safe_actions.unsqueeze(-1),
         ).squeeze(-1)
-        visual_slot = (true_best_slot >= 2) & (true_best_slot < detected_slot_offset)
         object_slot = true_best_slot >= detected_slot_offset
         object_slot_index = (true_best_slot - detected_slot_offset).clamp_min(0)
         object_slot_index = object_slot_index.clamp_max(object_classes.shape[1] - 1)
@@ -1773,12 +1805,6 @@ class HeatmapModule(pl.LightningModule):
             unknown = known_object_mask & (true_best_slot == 1)
             null = known_object_mask & (true_best_slot == 0)
             incompatible = known_object_mask & true_object_valid & ~compatible_object_slot
-            if num_visual_slots > 0:
-                self._log_scalar(
-                    f"{stage}_object_slot_true_visual_rate",
-                    visual_slot[known_object_mask].float().mean(),
-                    count,
-                )
             self._log_scalar(
                 f"{stage}_object_slot_true_compatible_rate",
                 compatible_object_slot[known_object_mask].float().mean(),
@@ -1857,12 +1883,6 @@ class HeatmapModule(pl.LightningModule):
                     (true_best_slot[exact_compatible] == 1).float().mean(),
                     exact_count,
                 )
-                if num_visual_slots > 0:
-                    self._log_scalar(
-                        f"{stage}_object_slot_visual_rate_given_exact_compatible",
-                        visual_slot[exact_compatible].float().mean(),
-                        exact_count,
-                    )
                 self._log_scalar(
                     f"{stage}_object_slot_object_rate_given_exact_compatible",
                     (true_best_slot[exact_compatible] >= detected_slot_offset)
@@ -1870,6 +1890,26 @@ class HeatmapModule(pl.LightningModule):
                     .mean(),
                     exact_count,
                 )
+                if visual_fallback_gate is not None:
+                    true_gate = visual_fallback_gate[exact_compatible].gather(
+                        1,
+                        safe_actions[exact_compatible].unsqueeze(1),
+                    ).squeeze(1)
+                    self._log_scalar(
+                        f"{stage}_object_visual_fallback_gate_given_exact_compatible",
+                        true_gate.mean(),
+                        exact_count,
+                    )
+                if visual_fallback_delta is not None:
+                    true_delta = visual_fallback_delta[exact_compatible].gather(
+                        1,
+                        safe_actions[exact_compatible].unsqueeze(1),
+                    ).squeeze(1)
+                    self._log_scalar(
+                        f"{stage}_object_visual_fallback_true_delta_given_exact_compatible",
+                        true_delta.mean(),
+                        exact_count,
+                    )
             if teacher_missing.any():
                 missing_count = int(teacher_missing.sum().item())
                 self._log_count(
@@ -1881,10 +1921,24 @@ class HeatmapModule(pl.LightningModule):
                     (true_best_slot[teacher_missing] == 1).float().mean(),
                     missing_count,
                 )
-                if num_visual_slots > 0:
+                if visual_fallback_gate is not None:
+                    true_gate = visual_fallback_gate[teacher_missing].gather(
+                        1,
+                        safe_actions[teacher_missing].unsqueeze(1),
+                    ).squeeze(1)
                     self._log_scalar(
-                        f"{stage}_object_slot_visual_rate_given_missing",
-                        visual_slot[teacher_missing].float().mean(),
+                        f"{stage}_object_visual_fallback_gate_given_missing",
+                        true_gate.mean(),
+                        missing_count,
+                    )
+                if visual_fallback_delta is not None:
+                    true_delta = visual_fallback_delta[teacher_missing].gather(
+                        1,
+                        safe_actions[teacher_missing].unsqueeze(1),
+                    ).squeeze(1)
+                    self._log_scalar(
+                        f"{stage}_object_visual_fallback_true_delta_given_missing",
+                        true_delta.mean(),
                         missing_count,
                     )
             if teacher_mismatch.any():
@@ -1898,12 +1952,6 @@ class HeatmapModule(pl.LightningModule):
                     (true_best_slot[teacher_mismatch] == 1).float().mean(),
                     mismatch_count,
                 )
-                if num_visual_slots > 0:
-                    self._log_scalar(
-                        f"{stage}_object_slot_visual_rate_given_mismatch",
-                        visual_slot[teacher_mismatch].float().mean(),
-                        mismatch_count,
-                    )
             if exact_compatible.any():
                 expected_slot = exact_info["idx_1based"] + detected_slot_offset
                 exact_count = int(exact_compatible.sum().item())
@@ -2049,9 +2097,6 @@ class HeatmapModule(pl.LightningModule):
             if not mask.any():
                 continue
             action_best_slot = best_slot[..., int(action_idx)]
-            action_slot_is_visual = (
-                (action_best_slot >= 2) & (action_best_slot < detected_slot_offset)
-            )
             action_slot_is_object = action_best_slot >= detected_slot_offset
             action_slot_idx = (action_best_slot - detected_slot_offset).clamp_min(0)
             action_slot_idx = action_slot_idx.clamp_max(object_classes.shape[1] - 1)
@@ -2074,12 +2119,6 @@ class HeatmapModule(pl.LightningModule):
                 (action_best_slot[mask] == 1).float().mean(),
                 count,
             )
-            if num_visual_slots > 0:
-                self._log_scalar(
-                    f"{stage}_object_slot_{action_name}_visual_rate",
-                    action_slot_is_visual[mask].float().mean(),
-                    count,
-                )
             self._log_scalar(
                 f"{stage}_object_slot_{action_name}_null_rate",
                 (action_best_slot[mask] == 0).float().mean(),
@@ -2090,6 +2129,18 @@ class HeatmapModule(pl.LightningModule):
                 incompatible[mask].float().mean(),
                 count,
             )
+            if visual_fallback_gate is not None:
+                self._log_scalar(
+                    f"{stage}_object_visual_fallback_{action_name}_gate",
+                    visual_fallback_gate[..., int(action_idx)][mask].mean(),
+                    count,
+                )
+            if visual_fallback_delta is not None:
+                self._log_scalar(
+                    f"{stage}_object_visual_fallback_{action_name}_delta",
+                    visual_fallback_delta[..., int(action_idx)][mask].mean(),
+                    count,
+                )
             for confuser_name in confuser_names:
                 confuser_idx = self._action_index(confuser_name)
                 if confuser_idx is None:
@@ -2116,6 +2167,16 @@ class HeatmapModule(pl.LightningModule):
                     self._log_scalar(
                         f"{stage}_object_slot_delta_{action_name}_minus_{confuser_name}_logit_margin",
                         (final_margin - motion_margin).mean(),
+                        count,
+                    )
+                if visual_fallback_delta is not None:
+                    visual_margin = (
+                        visual_fallback_delta[..., int(action_idx)]
+                        - visual_fallback_delta[..., int(confuser_idx)]
+                    )[mask].float()
+                    self._log_scalar(
+                        f"{stage}_object_visual_fallback_{action_name}_minus_{confuser_name}_margin",
+                        visual_margin.mean(),
                         count,
                     )
 

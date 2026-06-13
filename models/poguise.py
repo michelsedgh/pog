@@ -352,9 +352,6 @@ class POGUISE(pl.LightningModule):
                     num_visual_slots=int(
                         self.hparams.get("actor_object_slot_num_visual_slots", 0)
                     ),
-                    visual_slot_bias=float(
-                        self.hparams.get("actor_object_slot_visual_bias", 0.0)
-                    ),
                     relation_logit_scale_init=float(
                         self.hparams.get(
                             "actor_object_slot_relation_logit_scale_init",
@@ -376,7 +373,7 @@ class POGUISE(pl.LightningModule):
                     objectful_presence_init_bias=float(
                         self.hparams.get(
                             "actor_object_slot_objectful_presence_init_bias",
-                            2.0,
+                            0.0,
                         )
                     ),
                 )
@@ -647,8 +644,11 @@ class POGUISE(pl.LightningModule):
             self.last_actor_object_mismatch = None
             self.last_actor_object_unknown_delta = None
             self.last_actor_object_object_slot_delta = None
-            self.last_actor_object_visual_slot_delta = None
+            self.last_actor_object_visual_fallback_delta = None
+            self.last_actor_object_visual_fallback_logits = None
+            self.last_actor_object_visual_fallback_gate = None
             self.last_actor_object_visual_quality = None
+            self.last_actor_object_compatible_present = None
             self.last_actor_objectful_presence_logits = None
             self.last_actor_objectful_presence = None
             self.last_actor_object_slot_relation_scale = None
@@ -738,14 +738,23 @@ class POGUISE(pl.LightningModule):
                 ]
                 self.last_actor_object_mismatch = slot_output["mismatch"]
                 self.last_actor_object_unknown_delta = slot_output["unknown_delta"]
-                self.last_actor_object_visual_slot_delta = slot_output[
-                    "visual_slot_delta"
-                ]
+                self.last_actor_object_visual_fallback_delta = slot_output.get(
+                    "visual_fallback_delta"
+                )
+                self.last_actor_object_visual_fallback_logits = slot_output.get(
+                    "visual_fallback_logits"
+                )
+                self.last_actor_object_visual_fallback_gate = slot_output.get(
+                    "visual_fallback_gate"
+                )
                 self.last_actor_object_object_slot_delta = slot_output[
                     "object_slot_delta"
                 ]
                 self.last_actor_object_visual_quality = slot_output.get(
                     "visual_quality"
+                )
+                self.last_actor_object_compatible_present = slot_output.get(
+                    "compatible_present"
                 )
                 self.last_actor_objectful_presence_logits = slot_output.get(
                     "objectful_presence_logits"
@@ -863,11 +872,6 @@ class POGUISE(pl.LightningModule):
             default=0,
         )
         parser.add_argument(
-            "--actor_object_slot_visual_bias",
-            type=float,
-            default=0.0,
-        )
-        parser.add_argument(
             "--actor_object_slot_relation_logit_scale_init",
             type=float,
             default=-2.0,
@@ -890,7 +894,7 @@ class POGUISE(pl.LightningModule):
         parser.add_argument(
             "--actor_object_slot_objectful_presence_init_bias",
             type=float,
-            default=2.0,
+            default=0.0,
         )
         parser.add_argument("--trt_safe_attention", type=int, default=0)
         parser.add_argument("--interaction_unfreeze_last_blocks", type=int, default=0)
