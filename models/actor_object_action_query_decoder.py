@@ -673,7 +673,7 @@ class ActorObjectActionQueryDecoder(nn.Module):
                 missing_compatible[:, None, :]
                 * objectful.view(1, 1, self.num_actions)
                 * has_known.view(1, 1, self.num_actions)
-            ).to(dtype=dtype)
+            ).expand(batch, actors, self.num_actions).to(dtype=dtype)
             visual_fallback_delta = (
                 relation_scale * visual_fallback_logits * visual_fallback_gate
             )
