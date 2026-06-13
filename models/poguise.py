@@ -10,13 +10,14 @@ import os.path
 import pickle
 from datasets.object_vocab import NUM_OBJECT_CLASSES, OBJECT_TO_ID
 from datasets.toyota_action_taxonomy import (
+    toyota_confuser_action_names,
     toyota_action_object_map,
     toyota_action_to_index,
     toyota_objectless_action_names,
 )
-from models.actor_object_action_query_decoder import (
-    ActionObjectQuerySpec,
-    ActorObjectActionQueryDecoder,
+from models.factorized_interaction_action_head import (
+    FactorizedActionObjectSpec,
+    FactorizedInteractionActionHead,
 )
 
 
@@ -152,20 +153,33 @@ class POGUISE(pl.LightningModule):
         self.actor_interaction_heatmaps = bool(
             self.hparams.get("actor_interaction_heatmaps", 0)
         )
+        self.actor_object_factorized_head_enabled = bool(
+            self.hparams.get("actor_object_factorized_head", 0)
+        )
         self.actor_object_slot_head_enabled = bool(
             self.hparams.get("actor_object_slot_head", 0)
         )
+        if self.actor_object_slot_head_enabled:
+            raise ValueError(
+                "actor_object_slot_head was replaced by "
+                "actor_object_factorized_head. Set --actor_object_factorized_head 1 "
+                "and keep --actor_object_slot_head 0."
+            )
         self.actor_object_logit_residual = False
         self.actor_object_conditioned_action = False
         if bool(self.hparams.get("scene_object_tokens", 0)):
             raise ValueError(
                 "scene_object_tokens was removed from the actor-object action "
-                "path. Use actor_object_slot_head=1, which keeps detector object "
-                "classes out of the transformer trunk and uses the action-query "
-                "decoder."
+                "path. Use actor_object_factorized_head=1; detector object "
+                "classes stay outside the transformer trunk."
             )
-        if self.actor_object_slot_head_enabled and not self.actor_prompt:
-            raise ValueError("actor_object_slot_head requires actor_prompt")
+        if self.actor_object_factorized_head_enabled and not self.actor_prompt:
+            raise ValueError("actor_object_factorized_head requires actor_prompt")
+        if self.actor_object_factorized_head_enabled and not self.actor_interaction_heatmaps:
+            raise ValueError(
+                "actor_object_factorized_head requires actor_interaction_heatmaps "
+                "so the visual missing-object fallback has detector-free source tokens."
+            )
         if self.actor_interaction_heatmaps and not self.actor_prompt:
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
         if "interaction_object_classes" in self.hparams:
@@ -185,11 +199,8 @@ class POGUISE(pl.LightningModule):
                     "interaction_warmup_freeze_actor_path requires freeze_backbone"
                 )
         self.use_register_tokens = bool(self.hparams.get("use_register_tokens", 0))
-        self.actor_object_num_visual_slots = int(
-            self.hparams.get("actor_object_slot_num_visual_slots", 0) or 0
-        )
-        if self.actor_object_num_visual_slots < 0:
-            raise ValueError("actor_object_slot_num_visual_slots must be >= 0")
+        self.actor_object_slot_head = None
+        self.factorized_interaction_action_head = None
         self._create_network()
         # freeze backbone if specified
         if self.hparams.freeze_backbone:
@@ -202,10 +213,7 @@ class POGUISE(pl.LightningModule):
             else 0
         )
         if self.hparams.pretrained == "small":
-            return_heatmap_features = bool(
-                self.actor_object_slot_head_enabled
-                and self.actor_object_num_visual_slots > 0
-            )
+            return_heatmap_features = bool(self.actor_object_factorized_head_enabled)
             self.net = vit_small_patch16_224(
                 drop_rate=self.hparams.drop_rate,
                 attn_drop_rate=self.hparams.attn_drop_rate,
@@ -236,10 +244,7 @@ class POGUISE(pl.LightningModule):
                 trt_safe_attention=self.hparams.get("trt_safe_attention", 0),
             )
         else:
-            return_heatmap_features = bool(
-                self.actor_object_slot_head_enabled
-                and self.actor_object_num_visual_slots > 0
-            )
+            return_heatmap_features = bool(self.actor_object_factorized_head_enabled)
             self.net = vit_base_patch16_224(
                 drop_rate=self.hparams.drop_rate,
                 attn_drop_rate=self.hparams.attn_drop_rate,
@@ -292,14 +297,15 @@ class POGUISE(pl.LightningModule):
         self.net.head = nn.Identity(self.net.num_features, self.net.num_features)
         self.head = nn.Linear(self.net.num_features, self.hparams.num_classes)
         if self.actor_prompt:
-            self.actor_head = nn.Linear(
-                self.net.num_features,
-                self.hparams.num_classes,
+            self.actor_head = (
+                None
+                if self.actor_object_factorized_head_enabled
+                else nn.Linear(self.net.num_features, self.hparams.num_classes)
             )
             self.actor_motion_head = (
                 nn.Linear(self.net.num_features, self.hparams.num_classes)
                 if (
-                    not self.actor_object_slot_head_enabled
+                    not self.actor_object_factorized_head_enabled
                     and float(self.hparams.get("motion_aux_loss_weight", 0.25)) > 0.0
                 )
                 else None
@@ -309,76 +315,38 @@ class POGUISE(pl.LightningModule):
                 if self.hparams.get("actor_presence_head", 0)
                 else None
             )
-            if self.actor_object_slot_head_enabled:
-                slot_spec = self._actor_object_slot_spec()
-                if not slot_spec.action_to_object_ids:
+            if self.actor_object_factorized_head_enabled:
+                factorized_spec = self._factorized_action_object_spec()
+                if not factorized_spec.compat_matrix.any():
                     raise ValueError(
-                        "actor_object_slot_head requires a Toyota action-object "
+                        "actor_object_factorized_head requires a Toyota action-object "
                         "taxonomy mapping."
                     )
-                self.actor_object_slot_head = ActorObjectActionQueryDecoder(
+                self.factorized_interaction_action_head = FactorizedInteractionActionHead(
                     self.net.num_features,
-                    spec=slot_spec,
+                    spec=factorized_spec,
                     hidden_dim=int(
-                        self.hparams.get("actor_object_slot_hidden_dim", 512)
+                        self.hparams.get("actor_object_factorized_hidden_dim", 512)
                     ),
-                    attn_dim=int(
-                        self.hparams.get("actor_object_slot_attn_dim", 256)
-                    ),
-                    compatible_bias=float(
-                        self.hparams.get("actor_object_slot_prior_compatible", 0.75)
-                    ),
-                    incompatible_bias=float(
-                        self.hparams.get("actor_object_slot_prior_incompatible", -0.75)
-                    ),
-                    unknown_bias=float(
-                        self.hparams.get("actor_object_slot_unknown_init_bias", -0.10)
-                    ),
-                    unknown_mismatch_penalty=float(
+                    relation_scale_init=float(
                         self.hparams.get(
-                            "actor_object_slot_unknown_mismatch_penalty",
-                            1.0,
-                        )
-                    ),
-                    quality_init_bias=float(
-                        self.hparams.get("actor_object_slot_quality_init_bias", -3.0)
-                    ),
-                    prior_quality_floor=float(
-                        self.hparams.get(
-                            "actor_object_slot_prior_quality_floor",
-                            0.20,
-                        )
-                    ),
-                    num_visual_slots=int(
-                        self.hparams.get("actor_object_slot_num_visual_slots", 0)
-                    ),
-                    relation_logit_scale_init=float(
-                        self.hparams.get(
-                            "actor_object_slot_relation_logit_scale_init",
-                            -2.0,
+                            "actor_object_factorized_relation_scale_init",
+                            -1.0,
                         )
                     ),
                     relation_logit_bound=float(
-                        self.hparams.get("actor_object_slot_relation_logit_bound", 2.0)
-                    ),
-                    max_relation_logit_scale=float(
-                        self.hparams.get("actor_object_slot_max_relation_scale", 1.5)
-                    ),
-                    objectful_presence_beta=float(
                         self.hparams.get(
-                            "actor_object_slot_objectful_presence_beta",
-                            0.0,
+                            "actor_object_factorized_relation_logit_bound",
+                            2.0,
                         )
                     ),
-                    objectful_presence_init_bias=float(
+                    max_relation_scale=float(
                         self.hparams.get(
-                            "actor_object_slot_objectful_presence_init_bias",
-                            0.0,
+                            "actor_object_factorized_max_relation_scale",
+                            1.5,
                         )
                     ),
                 )
-            else:
-                self.actor_object_slot_head = None
         if self.hparams.get("linear_probe", 0):
             self._freeze_backbone()
             self.head = Classifier(
@@ -395,7 +363,7 @@ class POGUISE(pl.LightningModule):
         action_taxonomy = self.hparams.get("toyota_action_taxonomy", "toyota_31")
         return task_type, action_taxonomy
 
-    def _actor_object_slot_spec(self):
+    def _factorized_action_object_spec(self):
         dataset = self.hparams.get("dataset", None)
         dataset_name = (
             dataset
@@ -410,11 +378,15 @@ class POGUISE(pl.LightningModule):
             or self.hparams.get("dataset_artifact", None) == "toyotasm"
         )
         if not is_toyotasm:
-            raise ValueError("actor_object_slot_head currently requires toyotasm")
+            raise ValueError("actor_object_factorized_head currently requires toyotasm")
         task_type, action_taxonomy = self._toyota_action_settings()
         action_to_index = toyota_action_to_index(task_type, action_taxonomy)
         action_object_map = toyota_action_object_map(task_type, action_taxonomy)
         objectless_names = toyota_objectless_action_names(task_type, action_taxonomy)
+        num_actions = int(self.hparams.num_classes)
+        num_object_classes = int(
+            self.hparams.get("num_object_classes", NUM_OBJECT_CLASSES)
+        )
 
         objectless_indices = []
         for action_name in objectless_names:
@@ -422,26 +394,36 @@ class POGUISE(pl.LightningModule):
             if action_idx is not None:
                 objectless_indices.append(int(action_idx))
 
-        action_to_object_ids = {}
+        compat = torch.zeros(num_object_classes, num_actions, dtype=torch.float32)
         for action_name, object_names in action_object_map.items():
             action_idx = action_to_index.get(action_name)
             if action_idx is None:
                 continue
-            object_ids = []
             for object_name in object_names:
                 object_id = OBJECT_TO_ID.get(object_name)
-                if object_id is not None:
-                    object_ids.append(int(object_id))
-            if object_ids:
-                action_to_object_ids[int(action_idx)] = tuple(sorted(set(object_ids)))
+                if object_id is not None and int(object_id) < num_object_classes:
+                    compat[int(object_id), int(action_idx)] = 1.0
 
-        return ActionObjectQuerySpec(
-            num_actions=int(self.hparams.num_classes),
-            num_object_classes=int(
-                self.hparams.get("num_object_classes", NUM_OBJECT_CLASSES)
-            ),
+        confusers_by_action = {}
+        for action_name, action_idx in action_to_index.items():
+            confusers = []
+            for confuser_name in toyota_confuser_action_names(
+                action_name,
+                task_type,
+                action_taxonomy,
+            ):
+                confuser_idx = action_to_index.get(confuser_name)
+                if confuser_idx is not None:
+                    confusers.append(int(confuser_idx))
+            if confusers:
+                confusers_by_action[int(action_idx)] = tuple(sorted(set(confusers)))
+
+        return FactorizedActionObjectSpec(
+            num_actions=num_actions,
+            num_object_classes=num_object_classes,
             objectless_action_indices=tuple(sorted(set(objectless_indices))),
-            action_to_object_ids=action_to_object_ids,
+            compat_matrix=compat,
+            confusers_by_action=confusers_by_action,
         )
 
     def _object_heatmap_scores_from_predictions(
@@ -521,16 +503,17 @@ class POGUISE(pl.LightningModule):
             for param in self.head.parameters():
                 param.requires_grad = False
             if self.actor_prompt:
-                for param in self.actor_head.parameters():
-                    param.requires_grad = False
+                if self.actor_head is not None:
+                    for param in self.actor_head.parameters():
+                        param.requires_grad = False
                 if self.actor_motion_head is not None:
                     for param in self.actor_motion_head.parameters():
                         param.requires_grad = False
                 if self.presence_head is not None:
                     for param in self.presence_head.parameters():
                         param.requires_grad = False
-        if self.actor_object_slot_head is not None:
-            for param in self.actor_object_slot_head.parameters():
+        if self.factorized_interaction_action_head is not None:
+            for param in self.factorized_interaction_action_head.parameters():
                 param.requires_grad = True
         interaction_unfreeze_last_blocks = int(
             self.hparams.get("interaction_unfreeze_last_blocks", 0) or 0
@@ -563,8 +546,9 @@ class POGUISE(pl.LightningModule):
                 param.requires_grad = True
         if self.actor_prompt:
             if not interaction_warmup_freeze_actor_path:
-                for param in self.actor_head.parameters():
-                    param.requires_grad = True
+                if self.actor_head is not None:
+                    for param in self.actor_head.parameters():
+                        param.requires_grad = True
                 if self.actor_motion_head is not None:
                     for param in self.actor_motion_head.parameters():
                         param.requires_grad = True
@@ -581,8 +565,8 @@ class POGUISE(pl.LightningModule):
                 if self.presence_head is not None:
                     for param in self.presence_head.parameters():
                         param.requires_grad = True
-                if self.actor_object_slot_head is not None:
-                    for param in self.actor_object_slot_head.parameters():
+                if self.factorized_interaction_action_head is not None:
+                    for param in self.factorized_interaction_action_head.parameters():
                         param.requires_grad = True
 
     def _freeze_stages(self):
@@ -642,77 +626,50 @@ class POGUISE(pl.LightningModule):
             self.last_actor_object_best_slot = None
             self.last_actor_object_quality = None
             self.last_actor_object_mismatch = None
-            self.last_actor_object_unknown_delta = None
             self.last_actor_object_object_slot_delta = None
             self.last_actor_object_visual_fallback_delta = None
             self.last_actor_object_visual_fallback_logits = None
-            self.last_actor_object_visual_fallback_gate = None
             self.last_actor_object_visual_quality = None
             self.last_actor_object_compatible_present = None
             self.last_actor_objectful_presence_logits = None
             self.last_actor_objectful_presence = None
             self.last_actor_object_slot_relation_scale = None
             self.last_actor_motion_logits = None
-            if self.actor_motion_head is not None:
-                self.last_actor_motion_logits = self.actor_motion_head(x_actor)
+            self.last_factorized_head_output = None
+            self.last_factorized_presence_logits = None
+            self.last_factorized_objectless_logp = None
+            self.last_factorized_objectful_scores = None
+            self.last_factorized_objectful_scores_full = None
+            self.last_factorized_objectful_logp = None
+            self.last_factorized_objectful_logp_full = None
+            self.last_factorized_visual_delta = None
+            self.last_factorized_visual_delta_objectful = None
+            self.last_factorized_visual_delta_objectful_full = None
+            self.last_factorized_detected_delta = None
+            self.last_factorized_coverage = None
             if self.hparams.ret_feat:
                 return x_actor
-            motion_action_logits = self.actor_head(x_actor)
-            self.last_actor_action_logits = motion_action_logits
-            if self.last_actor_motion_logits is None:
-                self.last_actor_motion_logits = motion_action_logits
-            action_logits = motion_action_logits
-            if self.actor_object_slot_head is not None:
+
+            if self.factorized_interaction_action_head is not None:
                 if boxes is None:
-                    raise ValueError("actor_object_slot_head requires actor boxes")
+                    raise ValueError("actor_object_factorized_head requires actor boxes")
                 if object_boxes is None or object_classes is None:
                     raise ValueError(
-                        "actor_object_slot_head requires object_boxes and "
+                        "actor_object_factorized_head requires object_boxes and "
                         "object_classes"
                     )
                 if object_confs is None or object_valid is None:
                     raise ValueError(
-                        "actor_object_slot_head requires object_confs and "
+                        "actor_object_factorized_head requires object_confs and "
                         "object_valid"
                     )
-                if object_heatmap_scores is None:
-                    object_heatmap_scores = self._object_heatmap_scores_from_predictions(
-                        x_heatmap,
-                        object_boxes,
-                        object_valid,
-                        x_actor.dtype,
-                    )
-                if object_heatmap_scores is None:
-                    object_heatmap_scores = torch.zeros(
-                        (
-                            x_actor.shape[0],
-                            x_actor.shape[1],
-                            object_boxes.shape[1],
-                        ),
-                        device=x_actor.device,
-                        dtype=x_actor.dtype,
-                    )
-                object_heatmap_scores = object_heatmap_scores.detach()
-                visual_tokens = None
-                if x_heatmap_feat is not None:
-                    visual_tokens = x_heatmap_feat.flatten(2).transpose(1, 2)
-                if (
-                    int(
-                        self.hparams.get(
-                            "actor_object_slot_num_visual_slots",
-                            0,
-                        )
-                    )
-                    > 0
-                    and visual_tokens is None
-                ):
+                if x_heatmap_feat is None:
                     raise RuntimeError(
-                        "actor_object_slot_num_visual_slots > 0 requires "
-                        "PO-GUISE heatmap feature tokens. Enable actor "
-                        "interaction/heatmap features so the latent visual "
-                        "slot is grounded in video evidence."
+                        "actor_object_factorized_head requires PO-GUISE heatmap "
+                        "feature tokens. Keep actor_interaction_heatmaps enabled."
                     )
-                slot_output = self.actor_object_slot_head(
+                visual_tokens = x_heatmap_feat.flatten(2).transpose(1, 2)
+                head_output = self.factorized_interaction_action_head(
                     actor_tokens=x_actor,
                     actor_boxes=boxes,
                     actor_valid=valid,
@@ -720,58 +677,63 @@ class POGUISE(pl.LightningModule):
                     object_classes=object_classes,
                     object_confs=object_confs,
                     object_valid=object_valid,
-                    object_heatmap_scores=object_heatmap_scores,
-                    visual_tokens=visual_tokens,
-                    motion_logits=motion_action_logits,
+                    visual_source_tokens=visual_tokens,
                 )
-                action_logits = slot_output["logits"]
-                if slot_output.get("motion_logits") is not None:
-                    self.last_actor_motion_logits = slot_output["motion_logits"]
-                self.last_actor_object_slot_delta = slot_output["slot_delta"]
-                self.last_actor_object_slot_posterior = slot_output[
-                    "slot_posterior"
+                action_scores = head_output["log_probs"]
+                self.last_factorized_head_output = head_output
+                self.last_factorized_presence_logits = head_output["presence_logits"]
+                self.last_factorized_objectless_logp = head_output["objectless_logp"]
+                self.last_factorized_objectful_scores = head_output["objectful_scores"]
+                self.last_factorized_objectful_scores_full = head_output[
+                    "objectful_scores_full"
                 ]
-                self.last_actor_object_best_slot = slot_output["best_slot"]
-                self.last_actor_object_quality = slot_output["object_quality"]
-                self.last_actor_object_quality_logits = slot_output[
-                    "object_quality_logits"
+                self.last_factorized_objectful_logp = head_output["objectful_logp"]
+                self.last_factorized_objectful_logp_full = head_output[
+                    "objectful_logp_full"
                 ]
-                self.last_actor_object_mismatch = slot_output["mismatch"]
-                self.last_actor_object_unknown_delta = slot_output["unknown_delta"]
-                self.last_actor_object_visual_fallback_delta = slot_output.get(
-                    "visual_fallback_delta"
-                )
-                self.last_actor_object_visual_fallback_logits = slot_output.get(
-                    "visual_fallback_logits"
-                )
-                self.last_actor_object_visual_fallback_gate = slot_output.get(
-                    "visual_fallback_gate"
-                )
-                self.last_actor_object_object_slot_delta = slot_output[
-                    "object_slot_delta"
+                self.last_factorized_visual_delta = head_output["visual_delta"]
+                self.last_factorized_visual_delta_objectful = head_output[
+                    "visual_delta_objectful"
                 ]
-                self.last_actor_object_visual_quality = slot_output.get(
-                    "visual_quality"
-                )
-                self.last_actor_object_compatible_present = slot_output.get(
-                    "compatible_present"
-                )
-                self.last_actor_objectful_presence_logits = slot_output.get(
-                    "objectful_presence_logits"
-                )
-                self.last_actor_objectful_presence = slot_output.get(
-                    "objectful_presence"
-                )
-                self.last_actor_object_slot_relation_scale = slot_output[
-                    "relation_logit_scale"
+                self.last_factorized_visual_delta_objectful_full = head_output[
+                    "visual_delta_objectful_full"
                 ]
-                self.last_actor_object_slot_logit_delta = (
-                    action_logits - motion_action_logits
-                )
+                self.last_factorized_detected_delta = head_output["detected_delta"]
+                self.last_factorized_coverage = head_output["coverage"]
+                self.last_actor_action_logits = action_scores
+                self.last_actor_motion_logits = head_output["motion_aux_logits"]
+                self.last_actor_object_slot_delta = head_output["det_slot_scores"]
+                self.last_actor_object_slot_posterior = head_output[
+                    "det_slot_posterior"
+                ]
+                self.last_actor_object_best_slot = head_output[
+                    "det_slot_posterior"
+                ].argmax(dim=-1)
+                self.last_actor_object_quality = head_output["det_quality"]
+                self.last_actor_object_quality_logits = head_output[
+                    "det_quality_logits"
+                ]
+                self.last_actor_object_visual_fallback_delta = head_output[
+                    "visual_delta"
+                ]
+                self.last_actor_object_visual_fallback_logits = head_output[
+                    "visual_delta"
+                ]
+                self.last_actor_object_compatible_present = head_output["coverage"]
+                self.last_actor_object_slot_relation_scale = head_output[
+                    "relation_scale"
+                ]
+            else:
+                if self.actor_motion_head is not None:
+                    self.last_actor_motion_logits = self.actor_motion_head(x_actor)
+                action_scores = self.actor_head(x_actor)
+                self.last_actor_action_logits = action_scores
+                if self.last_actor_motion_logits is None:
+                    self.last_actor_motion_logits = action_scores
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
-                return action_logits, x_heatmap, presence_logits
-            return action_logits, x_heatmap
+                return action_scores, x_heatmap, presence_logits
+            return action_scores, x_heatmap
         if self.hparams.n_landmarks > 0:
             x_class, x_heatmap = self.net(x)
             if self.hparams.ret_feat:
@@ -833,68 +795,27 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--actor_interaction_heatmaps", type=int, default=0)
         parser.add_argument("--num_scene_object_tokens", type=int, default=32)
         parser.add_argument("--num_object_classes", type=int, default=19)
+        parser.add_argument("--actor_object_factorized_head", type=int, default=0)
         parser.add_argument("--actor_object_slot_head", type=int, default=0)
-        parser.add_argument("--actor_object_slot_hidden_dim", type=int, default=512)
-        parser.add_argument("--actor_object_slot_attn_dim", type=int, default=256)
         parser.add_argument(
-            "--actor_object_slot_prior_compatible",
-            type=float,
-            default=0.75,
-        )
-        parser.add_argument(
-            "--actor_object_slot_prior_incompatible",
-            type=float,
-            default=-0.75,
-        )
-        parser.add_argument(
-            "--actor_object_slot_unknown_init_bias",
-            type=float,
-            default=-0.10,
-        )
-        parser.add_argument(
-            "--actor_object_slot_unknown_mismatch_penalty",
-            type=float,
-            default=1.0,
-        )
-        parser.add_argument(
-            "--actor_object_slot_quality_init_bias",
-            type=float,
-            default=-3.0,
-        )
-        parser.add_argument(
-            "--actor_object_slot_prior_quality_floor",
-            type=float,
-            default=0.20,
-        )
-        parser.add_argument(
-            "--actor_object_slot_num_visual_slots",
+            "--actor_object_factorized_hidden_dim",
             type=int,
-            default=0,
+            default=512,
         )
         parser.add_argument(
-            "--actor_object_slot_relation_logit_scale_init",
+            "--actor_object_factorized_relation_scale_init",
             type=float,
-            default=-2.0,
+            default=-1.0,
         )
         parser.add_argument(
-            "--actor_object_slot_relation_logit_bound",
+            "--actor_object_factorized_relation_logit_bound",
             type=float,
             default=2.0,
         )
         parser.add_argument(
-            "--actor_object_slot_max_relation_scale",
+            "--actor_object_factorized_max_relation_scale",
             type=float,
             default=1.5,
-        )
-        parser.add_argument(
-            "--actor_object_slot_objectful_presence_beta",
-            type=float,
-            default=0.0,
-        )
-        parser.add_argument(
-            "--actor_object_slot_objectful_presence_init_bias",
-            type=float,
-            default=0.0,
         )
         parser.add_argument("--trt_safe_attention", type=int, default=0)
         parser.add_argument("--interaction_unfreeze_last_blocks", type=int, default=0)

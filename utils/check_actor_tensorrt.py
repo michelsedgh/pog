@@ -98,7 +98,10 @@ class ActorExport(torch.nn.Module):
             )
         output = self.actor_model(video, **kwargs)
         logits = output[0]
-        presence = output[2]
+        if len(output) >= 3:
+            presence = output[2]
+        else:
+            presence = valid.to(dtype=logits.dtype)
         return logits, presence
 
 
@@ -179,10 +182,17 @@ def main():
     if bool(hparams.get("scene_object_tokens", 0)):
         raise RuntimeError(
             "scene_object_tokens checkpoints use the removed object-selection path. "
-            "Export an actor_object_slot_head checkpoint instead."
+            "Export an actor_object_factorized_head checkpoint instead."
         )
-    actor_object_slot_head = bool(hparams.get("actor_object_slot_head", 0))
-    uses_object_proposals = actor_object_slot_head
+    if bool(hparams.get("actor_object_slot_head", 0)):
+        raise RuntimeError(
+            "actor_object_slot_head checkpoints are no longer supported. "
+            "Export an actor_object_factorized_head checkpoint instead."
+        )
+    actor_object_factorized_head = bool(
+        hparams.get("actor_object_factorized_head", 0)
+    )
+    uses_object_proposals = actor_object_factorized_head
     if uses_object_proposals != bool(engine.uses_object_proposals):
         raise RuntimeError(
             "Checkpoint/engine object-proposal input mismatch: "
@@ -235,7 +245,8 @@ def main():
         "checkpoint_epoch": metadata.get("epoch"),
         "onnx": str(Path(args.onnx)),
         "engine": str(Path(args.engine)),
-        "actor_object_slot_head": actor_object_slot_head,
+        "actor_object_factorized_head": actor_object_factorized_head,
+        "actor_object_slot_head": False,
         "uses_object_proposals": uses_object_proposals,
         "hparam_overrides": hparam_overrides,
         "num_actor_tokens": int(engine.num_actor_tokens),

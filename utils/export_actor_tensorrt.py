@@ -13,6 +13,15 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
+def uses_factorized_object_proposals(hparams):
+    if bool(hparams.get("actor_object_slot_head", 0)):
+        raise RuntimeError(
+            "actor_object_slot_head checkpoints are no longer supported. "
+            "Export an actor_object_factorized_head checkpoint instead."
+        )
+    return bool(hparams.get("actor_object_factorized_head", 0))
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Export a PO-GUISE actor checkpoint to fixed-shape ONNX and TensorRT."
@@ -96,7 +105,7 @@ def default_output_paths(args, hparams):
         if args.max_objects is not None
         else hparams.get("num_scene_object_tokens", 0)
     )
-    uses_object_proposals = bool(hparams.get("actor_object_slot_head", 0))
+    uses_object_proposals = uses_factorized_object_proposals(hparams)
     object_suffix = f"_o{max_objects}" if uses_object_proposals else ""
     fixed = (
         f"{stem}_b{args.batch_size}_t{clip_frames}_k{max_actors}"
@@ -208,10 +217,9 @@ def export_onnx(model, onnx_out, args, clip_frames, max_actors, max_objects, hpa
     if bool(hparams.get("scene_object_tokens", 0)):
         raise RuntimeError(
             "scene_object_tokens checkpoints use the removed object-selection path. "
-            "Export an actor_object_slot_head checkpoint instead."
+            "Export an actor_object_factorized_head checkpoint instead."
         )
-    actor_object_slot_head = bool(hparams.get("actor_object_slot_head", 0))
-    uses_object_proposals = actor_object_slot_head
+    uses_object_proposals = uses_factorized_object_proposals(hparams)
     num_object_classes = int(hparams.get("num_object_classes", 19))
 
     class ActorExport(torch.nn.Module):
@@ -246,16 +254,12 @@ def export_onnx(model, onnx_out, args, clip_frames, max_actors, max_objects, hpa
                 video,
                 **kwargs,
             )
-            if not isinstance(output, (tuple, list)) or len(output) < 3:
-                raise RuntimeError(
-                    "Actor TensorRT export requires presence-head checkpoints."
-                )
+            if not isinstance(output, (tuple, list)) or len(output) < 2:
+                raise RuntimeError(f"Unexpected actor model output: {type(output)}")
             logits = output[0]
-            presence = output[2]
+            presence = output[2] if len(output) >= 3 else valid.to(dtype=logits.dtype)
             if presence is None:
-                raise RuntimeError(
-                    "Actor TensorRT export requires presence-head checkpoints."
-                )
+                presence = valid.to(dtype=logits.dtype)
             return logits, presence
 
     wrapped = ActorExport(model).to(device).eval()
@@ -363,7 +367,7 @@ def checkpoint_payload(checkpoint_path, hparam_overrides=None):
     if bool(hparams.get("scene_object_tokens", 0)):
         raise RuntimeError(
             "scene_object_tokens checkpoints use the removed object-selection path. "
-            "Export an actor_object_slot_head checkpoint instead."
+            "Export an actor_object_factorized_head checkpoint instead."
         )
     original_hparams = dict(hparams)
     if hparam_overrides:
@@ -375,17 +379,16 @@ def checkpoint_payload(checkpoint_path, hparam_overrides=None):
             hparams.get("actor_interaction_heatmaps", 0)
         ),
         "interaction_heatmap_channels": "per_actor_interacted_object",
-        "actor_object_slot_head": int(hparams.get("actor_object_slot_head", 0)),
-        "uses_object_proposals": int(
-            bool(hparams.get("actor_object_slot_head", 0))
+        "actor_object_factorized_head": int(
+            hparams.get("actor_object_factorized_head", 0)
         ),
+        "actor_object_slot_head": 0,
+        "uses_object_proposals": int(uses_factorized_object_proposals(hparams)),
         "num_scene_object_tokens": int(hparams.get("num_scene_object_tokens", 0)),
         "num_object_classes": int(hparams.get("num_object_classes", 19)),
         "actor_object_logit_residual": 0,
         "actor_object_conditioned_action": 0,
-        "actor_object_explanation_slot_head": int(
-            bool(hparams.get("actor_object_slot_head", 0))
-        ),
+        "actor_object_explanation_slot_head": 0,
         "n_frames": int(hparams.get("n_frames", 16)),
         "num_actor_tokens": int(hparams.get("num_actor_tokens", 0)),
         "num_classes": int(hparams.get("num_classes", 31)),
@@ -444,9 +447,9 @@ def internal_export(args):
     if bool(hparams.get("scene_object_tokens", 0)):
         raise RuntimeError(
             "scene_object_tokens checkpoints use the removed object-selection path. "
-            "Export an actor_object_slot_head checkpoint instead."
+            "Export an actor_object_factorized_head checkpoint instead."
         )
-    uses_object_proposals = bool(hparams.get("actor_object_slot_head", 0))
+    uses_object_proposals = uses_factorized_object_proposals(hparams)
     if uses_object_proposals:
         checkpoint_objects = int(hparams.get("num_scene_object_tokens", 0))
         if args.max_objects is not None and args.max_objects != checkpoint_objects:
@@ -559,13 +562,12 @@ def main():
             f"num_actor_tokens={checkpoint_actors}."
         )
     checkpoint_objects = int(hparams.get("num_scene_object_tokens", 0))
-    actor_object_slot_head = bool(hparams.get("actor_object_slot_head", 0))
     if bool(hparams.get("scene_object_tokens", 0)):
         raise RuntimeError(
             "scene_object_tokens checkpoints use the removed object-selection path. "
-            "Export an actor_object_slot_head checkpoint instead."
+            "Export an actor_object_factorized_head checkpoint instead."
         )
-    uses_object_proposals = actor_object_slot_head
+    uses_object_proposals = uses_factorized_object_proposals(hparams)
     max_objects = int(args.max_objects if args.max_objects is not None else checkpoint_objects)
     if uses_object_proposals and max_objects != checkpoint_objects:
         raise ValueError(
@@ -615,7 +617,10 @@ def main():
             "keep_rate_merge": float(hparams.get("keep_rate_merge", 1.0)),
             "merge_type": str(hparams.get("merge_type", "")),
             "trt_safe_attention": int(hparams.get("trt_safe_attention", 0)),
-            "actor_object_slot_head": int(hparams.get("actor_object_slot_head", 0)),
+            "actor_object_factorized_head": int(
+                hparams.get("actor_object_factorized_head", 0)
+            ),
+            "actor_object_slot_head": 0,
             "uses_object_proposals": int(uses_object_proposals),
         },
         "input_shapes": {

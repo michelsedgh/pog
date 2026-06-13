@@ -113,12 +113,21 @@ class ToyotaSMDataset(Dataset):
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
         if bool(kwargs.get("scene_object_tokens", 0)):
             raise ValueError(
-                "scene_object_tokens was removed. Use actor_object_slot_head=1."
+                "scene_object_tokens was removed. Use actor_object_factorized_head=1."
             )
+        self.actor_object_factorized_head = bool(
+            kwargs.get("actor_object_factorized_head", 0)
+        )
         self.actor_object_slot_head = bool(kwargs.get("actor_object_slot_head", 0))
-        if self.actor_object_slot_head and not self.actor_prompt:
-            raise ValueError("actor_object_slot_head requires actor_prompt")
-        self.requires_object_proposals = self.actor_object_slot_head
+        if self.actor_object_slot_head:
+            raise ValueError(
+                "actor_object_slot_head was replaced by "
+                "actor_object_factorized_head. Set --actor_object_factorized_head 1 "
+                "and keep --actor_object_slot_head 0."
+            )
+        if self.actor_object_factorized_head and not self.actor_prompt:
+            raise ValueError("actor_object_factorized_head requires actor_prompt")
+        self.requires_object_proposals = self.actor_object_factorized_head
         self.num_scene_object_tokens = int(kwargs.get("num_scene_object_tokens", 32))
         if self.num_scene_object_tokens <= 0:
             raise ValueError("num_scene_object_tokens must be positive")
@@ -2577,7 +2586,8 @@ class ToyotaSMDataset(Dataset):
     def _load_object_cache(self, file_ids):
         if not self.object_detector_cache:
             raise ValueError(
-                "actor interaction/object-token training requires --object_detector_cache"
+                "actor interaction/object-proposal training requires "
+                "--object_detector_cache"
             )
         if not os.path.exists(self.object_detector_cache):
             raise FileNotFoundError(self.object_detector_cache)

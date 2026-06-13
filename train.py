@@ -256,23 +256,27 @@ def _validate_active_actor_action_path(module):
     model = module.model
     if not getattr(model, "actor_prompt", False):
         return
+    if getattr(model, "actor_object_slot_head_enabled", False):
+        raise RuntimeError(
+            "actor_object_slot_head is deprecated. Use actor_object_factorized_head."
+        )
+    if getattr(model, "actor_object_factorized_head_enabled", False):
+        if getattr(model, "factorized_interaction_action_head", None) is None:
+            raise RuntimeError(
+                "actor_object_factorized_head is enabled but the factorized head "
+                "was not built."
+            )
+        return
     actor_head = getattr(model, "actor_head", None)
     if not isinstance(actor_head, torch.nn.Linear):
         raise RuntimeError(
             "Actor action path must be a plain nn.Linear over actor tokens. "
-            "Object detections should affect action logits through the structured "
-            "actor-object action query decoder, not through a replacement actor head."
+            "Use actor_object_factorized_head for object-proposal action training."
         )
     if getattr(model, "actor_object_conditioned_action", False):
         raise RuntimeError("actor_object_conditioned_action must be disabled.")
     if hasattr(actor_head, "action_head"):
         raise RuntimeError("Legacy actor_head.action_head is still active.")
-    if getattr(model, "actor_object_slot_head_enabled", False):
-        slot_head = getattr(model, "actor_object_slot_head", None)
-        if slot_head is None:
-            raise RuntimeError(
-                "actor_object_slot_head is enabled but the slot head was not built."
-            )
 
 
 def _adapt_heatmap_final_layer_checkpoint(module, checkpoint):
@@ -468,15 +472,20 @@ def build_parser():
     parser.add_argument("--poguiseplus_normalized_heatmap_loss", type=int, default=0)
     parser.add_argument("--poguiseplus_heatmap_mse_scale", type=float, default=1000.0)
     parser.add_argument("--motion_aux_loss_weight", type=float, default=0.25)
+    parser.add_argument("--factorized_presence_loss_weight", type=float, default=1.0)
+    parser.add_argument(
+        "--factorized_objectful_within_loss_weight",
+        type=float,
+        default=0.5,
+    )
     parser.add_argument(
         "--objectless_object_action_suppression_loss_weight",
         type=float,
         default=0.3,
     )
-    parser.add_argument("--object_action_confuser_loss_weight", type=float, default=0.5)
+    parser.add_argument("--object_action_confuser_loss_weight", type=float, default=0.0)
     parser.add_argument("--object_action_confuser_margin", type=float, default=0.75)
     parser.add_argument("--object_slot_target_loss_weight", type=float, default=1.0)
-    parser.add_argument("--object_slot_ignore_missing_object", type=int, default=0)
     parser.add_argument("--object_slot_quality_loss_weight", type=float, default=0.5)
     parser.add_argument("--object_slot_quality_pos_weight", type=float, default=1.0)
     parser.add_argument("--object_slot_quality_neg_weight", type=float, default=0.25)
@@ -486,15 +495,10 @@ def build_parser():
         type=int,
         default=8,
     )
-    parser.add_argument(
-        "--object_slot_unknown_exact_loss_weight",
-        type=float,
-        default=0.0,
-    )
     parser.add_argument("--teacher_object_drop_prob", type=float, default=0.0)
     parser.add_argument("--object_class_dropout_prob", type=float, default=0.0)
     parser.add_argument("--object_class_wrong_prob", type=float, default=0.0)
-    parser.add_argument("--missing_object_ce_weight", type=float, default=0.0)
+    parser.add_argument("--missing_object_full_ce_weight", type=float, default=0.0)
     parser.add_argument("--missing_object_confuser_weight", type=float, default=0.0)
     parser.add_argument("--missing_object_confuser_margin", type=float, default=1.0)
     parser.add_argument(
@@ -507,7 +511,6 @@ def build_parser():
         type=float,
         default=None,
     )
-    parser.add_argument("--objectful_presence_loss_weight", type=float, default=0.0)
     parser.add_argument("--deepspeed_optim", type=int, default=0)
     parser.add_argument("--kp_only", type=int, default=0)
 
@@ -533,12 +536,31 @@ def main():
         raise ValueError("actor_interaction_heatmaps requires actor_prompt")
     if getattr(hparams, "scene_object_tokens", 0):
         raise ValueError(
-            "scene_object_tokens was removed. Use --actor_object_slot_head 1."
+            "scene_object_tokens was removed. Use --actor_object_factorized_head 1."
         )
-    if hparams.actor_object_slot_head and not hparams.actor_prompt:
-        raise ValueError("actor_object_slot_head requires actor_prompt")
-    if hparams.actor_object_slot_head and not hparams.object_detector_cache:
-        raise ValueError("actor_object_slot_head requires --object_detector_cache")
+    if hparams.actor_object_slot_head:
+        raise ValueError(
+            "actor_object_slot_head was replaced by "
+            "--actor_object_factorized_head 1."
+        )
+    if hparams.actor_object_factorized_head and not hparams.actor_prompt:
+        raise ValueError("actor_object_factorized_head requires actor_prompt")
+    if hparams.actor_object_factorized_head and not hparams.actor_interaction_heatmaps:
+        raise ValueError(
+            "actor_object_factorized_head requires --actor_interaction_heatmaps 1"
+        )
+    if hparams.actor_object_factorized_head and not hparams.object_detector_cache:
+        raise ValueError(
+            "actor_object_factorized_head requires --object_detector_cache"
+        )
+    if (
+        hparams.actor_object_factorized_head
+        and float(hparams.missing_object_full_ce_weight) > 0.0
+    ):
+        raise ValueError(
+            "missing_object_full_ce_weight must be 0 with the factorized head; "
+            "use missing_object_confuser_weight instead."
+        )
 
     seed_everything(hparams.seed)
     dataset = _dataset_class(hparams.dataset)
