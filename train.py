@@ -561,6 +561,14 @@ def main():
             "missing_object_full_ce_weight must be 0 with the factorized head; "
             "use missing_object_confuser_weight instead."
         )
+    if (
+        hparams.actor_object_factorized_head
+        and float(getattr(hparams, "label_smoothing", 0.0) or 0.0) != 0.0
+    ):
+        raise ValueError(
+            "label_smoothing is incompatible with factorized action NLL; "
+            "set --label_smoothing 0.0."
+        )
 
     seed_everything(hparams.seed)
     dataset = _dataset_class(hparams.dataset)

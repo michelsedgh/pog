@@ -118,7 +118,6 @@ CORE_COLUMNS = [
     "val_presence_acc",
     "val_presence_objectless_null_rate",
     "val_presence_objectful_interaction_rate",
-    "train_loss_missing_object_full_ce",
     "train_loss_missing_object_confuser",
     "train_loss_missing_object_visual_fallback",
     "train_missing_object_dropout_acc",
@@ -1157,7 +1156,7 @@ def main():
     print("- Teacher-object removal is supporting evidence, not the checkpoint target by itself.")
     print("- Guardrail: val_f1/per-action target accuracy should not collapse while object-use metrics rise.")
     print("- Heatmap/object-channel metrics are secondary; use --verbose when debugging teacher quality.")
-    print("- actor_object_slot_head is the only runtime action-relation path.")
+    print("- actor_object_factorized_head is the runtime action-relation path.")
 
 
 if __name__ == "__main__":

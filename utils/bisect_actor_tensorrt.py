@@ -111,9 +111,12 @@ class ActorStageExport(torch.nn.Module):
             raise ValueError(
                 f"{stage} exceeds network depth {self.net.depth}."
             )
-        self.actor_object_slot_head = bool(
-            getattr(actor_model, "actor_object_slot_head_enabled", False)
-        )
+        if bool(getattr(actor_model, "actor_object_factorized_head_enabled", False)):
+            raise RuntimeError(
+                "utils/bisect_actor_tensorrt.py does not support the factorized "
+                "interaction action head. Use the actor TensorRT export/check "
+                "utilities that run the full PO-GUISE+ actor path."
+            )
 
     def _token_prefix(
         self,
@@ -282,31 +285,6 @@ class ActorStageExport(torch.nn.Module):
 
         x_actor = final_tokens[:, 1 : 1 + self.net.n_actor_tokens, :]
         action_logits = self.actor_model.actor_head(x_actor)
-        actor_object_slot_head = getattr(self.actor_model, "actor_object_slot_head", None)
-        if actor_object_slot_head is not None:
-            if object_boxes is None or object_classes is None:
-                raise RuntimeError("actor_object_slot_head requires object inputs")
-            object_heatmap_scores = torch.zeros(
-                (
-                    x_actor.shape[0],
-                    x_actor.shape[1],
-                    object_boxes.shape[1],
-                ),
-                device=x_actor.device,
-                dtype=x_actor.dtype,
-            )
-            slot_output = actor_object_slot_head(
-                actor_tokens=x_actor,
-                actor_boxes=boxes,
-                actor_valid=valid,
-                object_boxes=object_boxes,
-                object_classes=object_classes,
-                object_confs=object_confs,
-                object_valid=object_valid,
-                object_heatmap_scores=object_heatmap_scores,
-                motion_logits=action_logits,
-            )
-            action_logits = slot_output["logits"]
         presence = self.actor_model.presence_head(x_actor).squeeze(-1)
         return action_logits, presence
 
@@ -475,10 +453,19 @@ def main():
     if bool(hparams.get("scene_object_tokens", 0)):
         raise RuntimeError(
             "scene_object_tokens checkpoints use the removed object-selection path. "
-            "Use an actor_object_slot_head checkpoint instead."
+            "Use --actor_object_factorized_head 1 for object-proposal action training."
         )
-    actor_object_slot_head = bool(hparams.get("actor_object_slot_head", 0))
-    uses_object_proposals = actor_object_slot_head
+    if bool(hparams.get("actor_object_slot_head", 0)):
+        raise RuntimeError(
+            "actor_object_slot_head checkpoints use the removed flat slot head."
+        )
+    if bool(hparams.get("actor_object_factorized_head", 0)):
+        raise RuntimeError(
+            "utils/bisect_actor_tensorrt.py does not support factorized action "
+            "checkpoints because this wrapper does not rebuild heatmap feature "
+            "tokens for the head."
+        )
+    uses_object_proposals = False
     clip_frames = int(args.clip_frames or hparams.get("n_frames", 16))
     max_actors = int(args.max_actors or hparams.get("num_actor_tokens", 0))
     max_objects = int(

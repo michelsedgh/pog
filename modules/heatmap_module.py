@@ -28,6 +28,13 @@ from datasets.toyota_action_taxonomy import (
     toyota_label_dict,
     toyota_objectless_action_names,
 )
+from models.factorized_interaction_action_head import (
+    final_nll_loss,
+    objectful_within_loss as factorized_objectful_within_loss_fn,
+    objectless_margin_loss as factorized_objectless_margin_loss_fn,
+    presence_loss as factorized_presence_loss_fn,
+    restricted_confuser_loss as factorized_restricted_confuser_loss_fn,
+)
 try:
     from grad_weights.nash_mtl import NashMTL
 except ImportError:
@@ -282,11 +289,17 @@ class HeatmapModule(pl.LightningModule):
         # self.lr_patch_embed = hparams.lr_patch_embed
         # self.weight_decay_patch_embed = hparams.weight_decay_patch_embed
         # Create loss module
+        self.label_smoothing = float(hparams.get("label_smoothing", 0.0) or 0.0)
+        if self.actor_object_factorized_head and self.label_smoothing != 0.0:
+            raise ValueError(
+                "label_smoothing is incompatible with factorized action NLL. "
+                "Set --label_smoothing 0.0 when --actor_object_factorized_head 1."
+            )
         if self.actor_prompt:
             self.train_loss = nn.CrossEntropyLoss(
-                label_smoothing=float(hparams.label_smoothing or 0.0)
+                label_smoothing=self.label_smoothing
             )
-        elif hparams.label_smoothing and hparams.mixup:
+        elif self.label_smoothing and hparams.mixup:
             # handled by mixup
             self.train_loss = SoftTargetCrossEntropy()
         else:
@@ -1194,6 +1207,7 @@ class HeatmapModule(pl.LightningModule):
         if quality_logits is None:
             return None
         required = (
+            "object_classes",
             "object_valid",
             "interaction_object_index",
             "interaction_object_index_valid",
@@ -1202,41 +1216,29 @@ class HeatmapModule(pl.LightningModule):
             return None
 
         device = quality_logits.device
-        actions = actions.to(device=device, dtype=torch.long)
-        valid = valid.to(device=device, dtype=torch.bool)
-        object_valid = target["object_valid"].to(device=device, dtype=torch.bool)
-        selected_indices = target["interaction_object_index"].to(
-            device=device,
-            dtype=torch.long,
-        )
-        selected_valid = target["interaction_object_index_valid"].to(
-            device=device,
-            dtype=torch.bool,
-        )
-
         num_objects = int(quality_logits.shape[-1])
         if num_objects <= 0:
             return None
 
+        info = self._exact_teacher_object_info(actions, valid, target, device)
+        if info is None:
+            return None
+        if int(info["object_valid"].shape[-1]) != num_objects:
+            raise RuntimeError(
+                "object quality logits and object_valid disagree on proposal count: "
+                f"{num_objects} vs {int(info['object_valid'].shape[-1])}"
+            )
+
+        actions = info["actions"]
+        valid = info["valid"]
+        object_valid = info["object_valid"]
         objectless = self._labels_in_indices(actions, self.objectless_action_indices)
-        selected_object_slots = selected_indices - 1
-        selected_in_range = (
-            selected_valid
-            & (selected_indices > 0)
-            & (selected_object_slots >= 0)
-            & (selected_object_slots < num_objects)
-        )
-        safe_selected_slots = selected_object_slots.clamp(0, max(num_objects - 1, 0))
-        selected_object_valid = selected_in_range & object_valid.gather(
-            1,
-            safe_selected_slots,
-        )
         object_valid_slots = object_valid[:, None, :].expand_as(quality_logits)
-        exact_object = valid & selected_object_valid & ~objectless
+        exact_object = valid & info["known_action"] & info["compatible_1based"]
         teacher_slot_mask = torch.zeros_like(quality_logits, dtype=torch.bool)
         rows = torch.nonzero(exact_object, as_tuple=False)
         if rows.numel() > 0:
-            object_slots = safe_selected_slots[exact_object]
+            object_slots = info["idx_1based"][exact_object]
             teacher_slot_mask[rows[:, 0], rows[:, 1], object_slots] = True
 
         pos_mask = teacher_slot_mask
@@ -1377,9 +1379,19 @@ class HeatmapModule(pl.LightningModule):
         if not valid.any():
             return None
         actions = actions.to(device=device, dtype=torch.long)
+        objectless_indices = tuple(
+            int(i) for i in self.objectless_action_indices.to("cpu").tolist()
+        )
+        if not objectless_indices:
+            return None
         objectless = self._labels_in_indices(actions, self.objectless_action_indices)
         targets = (~objectless).to(device=device, dtype=torch.long)
-        loss = F.cross_entropy(logits[valid].float(), targets[valid])
+        loss = factorized_presence_loss_fn(
+            presence_logits=logits.float(),
+            labels=actions,
+            actor_valid=valid,
+            objectless_indices=objectless_indices,
+        )
         self.log(
             f"{stage}_loss_factorized_presence",
             loss,
@@ -1431,22 +1443,23 @@ class HeatmapModule(pl.LightningModule):
         device = scores.device
         valid = valid.to(device=device, dtype=torch.bool)
         actions = actions.to(device=device, dtype=torch.long)
-        objectful_indices = torch.as_tensor(
-            tuple(int(i) for i in head.objectful_idx),
+        objectful_indices = tuple(int(i) for i in head.objectful_idx)
+        if not objectful_indices:
+            return None
+        objectful_tensor = torch.as_tensor(
+            objectful_indices,
             device=device,
             dtype=torch.long,
         )
-        target = torch.full_like(actions, -100)
-        for branch_idx, action_idx in enumerate(objectful_indices.tolist()):
-            target = torch.where(
-                actions == int(action_idx),
-                torch.full_like(target, int(branch_idx)),
-                target,
-            )
-        mask = valid & (target >= 0)
+        mask = valid & self._labels_in_indices(actions, objectful_tensor)
         if not mask.any():
             return None
-        loss = F.cross_entropy(scores[mask].float(), target[mask])
+        loss = factorized_objectful_within_loss_fn(
+            objectful_scores=scores.float(),
+            labels=actions,
+            actor_valid=valid,
+            objectful_indices=objectful_indices,
+        )
         self.log(
             f"{stage}_loss_factorized_objectful_within",
             loss,
@@ -1457,11 +1470,71 @@ class HeatmapModule(pl.LightningModule):
             sync_dist=True,
         )
         with torch.no_grad():
-            pred = objectful_indices[scores[mask].argmax(dim=-1)]
+            pred = objectful_tensor[scores[mask].argmax(dim=-1)]
             self._log_scalar(
                 f"{stage}_objectful_branch_acc",
                 (pred == actions[mask]).float().mean(),
                 int(mask.sum().item()),
+            )
+        return loss
+
+    def _factorized_objectless_margin_loss(self, stage, log_probs, actions, valid):
+        if (
+            not self.actor_object_factorized_head
+            or self.objectless_object_action_suppression_loss_weight <= 0
+            or not self.is_toyota
+        ):
+            return None
+        head = getattr(self.model, "factorized_interaction_action_head", None)
+        if head is None:
+            return None
+        objectless_indices = tuple(int(i) for i in head.objectless_idx)
+        objectful_indices = tuple(int(i) for i in head.objectful_idx)
+        if not objectless_indices or not objectful_indices:
+            return None
+        device = log_probs.device
+        valid = valid.to(device=device, dtype=torch.bool)
+        actions = actions.to(device=device, dtype=torch.long)
+        objectless_tensor = torch.as_tensor(
+            objectless_indices,
+            device=device,
+            dtype=torch.long,
+        )
+        objectless_mask = valid & self._labels_in_indices(actions, objectless_tensor)
+        if not objectless_mask.any():
+            return None
+        loss = factorized_objectless_margin_loss_fn(
+            log_probs=log_probs.float(),
+            labels=actions,
+            actor_valid=valid,
+            objectless_indices=objectless_indices,
+            objectful_indices=objectful_indices,
+        )
+        self.log(
+            f"{stage}_loss_factorized_objectless_margin",
+            loss,
+            on_step=stage == "train",
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+        )
+        with torch.no_grad():
+            objectful_tensor = torch.as_tensor(
+                objectful_indices,
+                device=device,
+                dtype=torch.long,
+            )
+            true_score = log_probs.gather(
+                -1,
+                actions.clamp_min(0).unsqueeze(-1),
+            ).squeeze(-1)
+            max_objectful = log_probs.index_select(-1, objectful_tensor).amax(dim=-1)
+            margin = true_score - max_objectful
+            self._log_scalar(
+                f"{stage}_factorized_objectless_margin",
+                margin[objectless_mask].float().mean(),
+                int(objectless_mask.sum().item()),
             )
         return loss
 
@@ -1497,7 +1570,6 @@ class HeatmapModule(pl.LightningModule):
         actions,
         target,
         object_inputs,
-        loss_fn,
     ):
         if (
             not self.actor_object_factorized_head
@@ -1550,20 +1622,12 @@ class HeatmapModule(pl.LightningModule):
 
         main_terms = []
         aux_terms = []
-        if self.missing_object_full_ce_weight > 0.0:
-            ce_loss = loss_fn(dropped_valid_preds, true_labels)
-            main_terms.append(ce_loss * self.missing_object_full_ce_weight)
-            self.log(
-                "train_loss_missing_object_full_ce",
-                ce_loss,
-                on_step=True,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-                sync_dist=True,
-            )
+        confusers = {
+            int(action_idx): tuple(int(i) for i in confuser_indices.tolist())
+            for action_idx, confuser_indices in self.action_confuser_indices.items()
+        }
 
-        if self.missing_object_confuser_weight > 0.0:
+        if self.missing_object_confuser_weight > 0.0 and confusers:
             objectful_scores = getattr(
                 self.model,
                 "last_factorized_objectful_scores_full",
@@ -1574,41 +1638,47 @@ class HeatmapModule(pl.LightningModule):
                     "factorized missing-object confuser loss requires "
                     "last_factorized_objectful_scores_full"
                 )
-            violations = []
-            sample_count = 0
-            dropped_actions = actions.to(device=device, dtype=torch.long)
-            for action_idx, confuser_indices in self.action_confuser_indices.items():
-                confuser_indices = confuser_indices.to(device=device)
-                mask = drop_mask & (dropped_actions == int(action_idx))
-                if not mask.any():
-                    continue
-                true_logits = objectful_scores[..., int(action_idx)][mask]
-                confuser_logits = objectful_scores[mask][:, confuser_indices]
-                margin_error = (
-                    confuser_logits
-                    + float(self.missing_object_confuser_margin)
-                    - true_logits.unsqueeze(1)
-                )
-                violations.append(F.relu(margin_error).reshape(-1))
-                sample_count += int(mask.sum().item())
-            if violations:
-                violation_values = torch.cat(violations, dim=0)
-                confuser_loss = violation_values.mean()
-                main_terms.append(confuser_loss * self.missing_object_confuser_weight)
-                self.log(
-                    "train_loss_missing_object_confuser",
-                    confuser_loss,
-                    on_step=True,
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                    sync_dist=True,
-                )
-                self._log_scalar(
-                    "train_missing_object_confuser_violation_rate",
-                    (violation_values.detach() > 0).float().mean(),
-                    max(sample_count, 1),
-                )
+            confuser_loss = factorized_restricted_confuser_loss_fn(
+                logits_or_scores=objectful_scores.float(),
+                labels=actions.to(device=device, dtype=torch.long),
+                actor_valid=drop_mask,
+                confusers_by_action=confusers,
+            )
+            main_terms.append(confuser_loss * self.missing_object_confuser_weight)
+            self.log(
+                "train_loss_missing_object_confuser",
+                confuser_loss,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+            with torch.no_grad():
+                violation_values = []
+                sample_count = 0
+                dropped_actions = actions.to(device=device, dtype=torch.long)
+                for action_idx, confuser_indices in self.action_confuser_indices.items():
+                    confuser_indices = confuser_indices.to(device=device)
+                    mask = drop_mask & (dropped_actions == int(action_idx))
+                    if not mask.any():
+                        continue
+                    true_logits = objectful_scores[..., int(action_idx)][mask]
+                    confuser_logits = objectful_scores[mask][:, confuser_indices]
+                    margin_error = (
+                        confuser_logits
+                        + float(self.missing_object_confuser_margin)
+                        - true_logits.unsqueeze(1)
+                    )
+                    violation_values.append(F.relu(margin_error).reshape(-1))
+                    sample_count += int(mask.sum().item())
+                if violation_values:
+                    violation_values = torch.cat(violation_values, dim=0)
+                    self._log_scalar(
+                        "train_missing_object_confuser_violation_rate",
+                        (violation_values > 0).float().mean(),
+                        max(sample_count, 1),
+                    )
 
         visual_delta = getattr(
             self.model,
@@ -1618,9 +1688,14 @@ class HeatmapModule(pl.LightningModule):
         if (
             visual_delta is not None
             and self.missing_object_visual_fallback_loss_weight > 0.0
+            and confusers
         ):
-            visual_logits = visual_delta[drop_mask].float()
-            visual_loss = F.cross_entropy(visual_logits, true_labels)
+            visual_loss = factorized_restricted_confuser_loss_fn(
+                logits_or_scores=visual_delta.float(),
+                labels=actions.to(device=device, dtype=torch.long),
+                actor_valid=drop_mask,
+                confusers_by_action=confusers,
+            )
             aux_terms.append(
                 visual_loss * self.missing_object_visual_fallback_loss_weight
             )
@@ -1633,6 +1708,7 @@ class HeatmapModule(pl.LightningModule):
                 logger=True,
                 sync_dist=True,
             )
+            visual_logits = visual_delta[drop_mask].float()
             visual_pred = visual_logits.argmax(dim=-1)
             self._log_scalar(
                 "train_missing_object_visual_fallback_acc",
@@ -2439,9 +2515,9 @@ class HeatmapModule(pl.LightningModule):
         )
         preds, hm_preds, presence_logits = self._unpack_model_data(data)
 
+        loss_action = self._action_loss(preds, actions, loss_fn, valid)
         valid_preds = preds[valid]
         valid_labels = actions[valid]
-        loss_action = self._action_loss(valid_preds, valid_labels, loss_fn)
         self.log(
             f"{stage}_loss_action",
             loss_action,
@@ -2495,6 +2571,19 @@ class HeatmapModule(pl.LightningModule):
                 loss_main_task
                 + loss_objectful_within
                 * self.factorized_objectful_within_loss_weight
+            )
+
+        loss_objectless_margin = self._factorized_objectless_margin_loss(
+            stage,
+            preds,
+            actions,
+            valid,
+        )
+        if loss_objectless_margin is not None:
+            loss_main_task = (
+                loss_main_task
+                + loss_objectless_margin
+                * self.objectless_object_action_suppression_loss_weight
             )
 
         loss_hard_objectless = self._objectless_object_action_suppression_loss(
@@ -2557,7 +2646,6 @@ class HeatmapModule(pl.LightningModule):
                 actions,
                 target,
                 model_object_inputs,
-                loss_fn,
             )
         if missing_main_loss is not None:
             loss_main_task = loss_main_task + missing_main_loss
@@ -2973,9 +3061,15 @@ class HeatmapModule(pl.LightningModule):
         indices = indices.to(device=labels.device, dtype=labels.dtype)
         return (labels.unsqueeze(-1) == indices).any(dim=-1)
 
-    def _action_loss(self, scores, labels, loss_fn):
+    def _action_loss(self, scores, labels, loss_fn, valid=None):
         if self.actor_object_factorized_head:
-            return F.nll_loss(scores.float(), labels)
+            if valid is None:
+                return F.nll_loss(scores.float(), labels)
+            return final_nll_loss(
+                log_probs=scores.float(),
+                labels=labels.to(device=scores.device, dtype=torch.long),
+                actor_valid=valid.to(device=scores.device, dtype=torch.bool),
+            )
         return loss_fn(scores, labels)
 
     def _action_probs(self, scores):
@@ -3027,6 +3121,8 @@ class HeatmapModule(pl.LightningModule):
         valid,
         target,
     ):
+        if self.actor_object_factorized_head:
+            return None
         if self.objectless_object_action_suppression_loss_weight <= 0:
             return None
         hard_mask = self._objectless_hard_negative_mask(

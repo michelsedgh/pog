@@ -230,12 +230,18 @@ class DetectedObjectRelationHead(nn.Module):
         ).unsqueeze(-1)
         compat_back = compat_bkc[:, None, :, :].permute(0, 1, 3, 2).expand(B, A, self.spec.num_actions, K)
 
-        # action-specific detected coverage; soft, not binary
-        proposal_strength = quality[:, :, None, :] * object_confs[:, None, None, :] * object_valid[:, None, None, :].to(quality.dtype)
+        # action loss uses quality only as a gate; explicit quality BCE trains quality.
+        quality_gate = quality.detach()
+        proposal_strength = (
+            quality_gate[:, :, None, :]
+            * object_confs[:, None, None, :]
+            * object_valid[:, None, None, :].to(quality.dtype)
+        )
         coverage = (compat_back * proposal_strength).amax(dim=-1).clamp(0.0, 1.0)  # [B,A,C]
 
         # detected taxonomy prior is inside the objectful expert, not global action competition
         taxonomy_prior = torch.log1p(compat_back * proposal_strength / eps).amax(dim=-1)
+        taxonomy_prior = taxonomy_prior.clamp(max=2.5)
         detected_delta = detected_delta + taxonomy_prior
 
         return {
