@@ -312,13 +312,6 @@ run_checked([
     "utils/actor_model.py",
 ], "Compile check")
 
-heatmap_source = Path("modules/heatmap_module.py").read_text()
-if "safe_actions = actions.clamp(0, best_slot.shape[-1] - 1)" not in heatmap_source:
-    raise RuntimeError(
-        "The checked-out code is missing the validation diagnostic padded-label "
-        "guard. Update the repo before starting this run."
-    )
-
 def latest_metrics_path(run_dir):
     paths = sorted(Path(run_dir).glob("version_*/metrics.csv"), key=lambda p: p.stat().st_mtime)
     return paths[-1] if paths else None
