@@ -161,6 +161,21 @@ class HeatmapModule(pl.LightningModule):
         )
         if self.factorized_objectful_within_loss_weight < 0:
             raise ValueError("factorized_objectful_within_loss_weight must be >= 0")
+        self.factorized_prompt_relation_loss_weight = float(
+            hparams.get("factorized_prompt_relation_loss_weight", 0.0)
+        )
+        if self.factorized_prompt_relation_loss_weight < 0:
+            raise ValueError("factorized_prompt_relation_loss_weight must be >= 0")
+        self.factorized_visual_relation_loss_weight = float(
+            hparams.get("factorized_visual_relation_loss_weight", 0.0)
+        )
+        if self.factorized_visual_relation_loss_weight < 0:
+            raise ValueError("factorized_visual_relation_loss_weight must be >= 0")
+        self.factorized_relation_confuser_margin = float(
+            hparams.get("factorized_relation_confuser_margin", 1.0)
+        )
+        if self.factorized_relation_confuser_margin < 0:
+            raise ValueError("factorized_relation_confuser_margin must be >= 0")
         self.objectless_object_action_suppression_loss_weight = float(
             hparams.get("objectless_object_action_suppression_loss_weight", 0.3)
         )
@@ -2553,6 +2568,113 @@ class HeatmapModule(pl.LightningModule):
                 )
         return loss
 
+    def _factorized_evidence_relation_loss(self, stage, actions, valid, target):
+        if not self.actor_object_factorized_head:
+            return None
+        if (
+            self.factorized_prompt_relation_loss_weight <= 0
+            and self.factorized_visual_relation_loss_weight <= 0
+        ):
+            return None
+
+        prompt_delta = getattr(self.model, "last_factorized_prompt_delta", None)
+        visual_delta = getattr(self.model, "last_factorized_visual_delta", None)
+        if prompt_delta is None and visual_delta is None:
+            return None
+
+        device = (
+            prompt_delta.device
+            if prompt_delta is not None
+            else visual_delta.device
+        )
+        info = self._exact_teacher_object_info(actions, valid, target, device)
+        if info is None:
+            return None
+
+        actions = actions.to(device=device, dtype=torch.long)
+        valid = valid.to(device=device, dtype=torch.bool)
+        known_objectful = info["valid"] & info["known_action"]
+        exact_compatible = known_objectful & info["compatible_1based"]
+        missing_compatible = known_objectful & ~info["any_compatible"]
+
+        terms = []
+        margin_target = self.factorized_relation_confuser_margin
+        if (
+            self.factorized_prompt_relation_loss_weight > 0
+            and prompt_delta is not None
+            and exact_compatible.any()
+        ):
+            prompt_margins = self._true_minus_confuser_margin(
+                prompt_delta.float(),
+                actions,
+                exact_compatible,
+            )
+            if prompt_margins is not None:
+                loss_prompt = F.relu(margin_target - prompt_margins).mean()
+                count = int(prompt_margins.numel())
+                self.log(
+                    f"{stage}_loss_factorized_prompt_relation",
+                    loss_prompt,
+                    on_step=stage == "train",
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                    sync_dist=True,
+                )
+                self._log_scalar(
+                    f"{stage}_factorized_prompt_relation_margin_exact",
+                    prompt_margins.detach().mean(),
+                    count,
+                )
+                self._log_scalar(
+                    f"{stage}_factorized_prompt_relation_margin_sat_exact",
+                    (prompt_margins.detach() >= margin_target).float().mean(),
+                    count,
+                )
+                terms.append(
+                    loss_prompt * self.factorized_prompt_relation_loss_weight
+                )
+
+        if (
+            self.factorized_visual_relation_loss_weight > 0
+            and visual_delta is not None
+            and missing_compatible.any()
+        ):
+            visual_margins = self._true_minus_confuser_margin(
+                visual_delta.float(),
+                actions,
+                missing_compatible,
+            )
+            if visual_margins is not None:
+                loss_visual = F.relu(margin_target - visual_margins).mean()
+                count = int(visual_margins.numel())
+                self.log(
+                    f"{stage}_loss_factorized_visual_relation",
+                    loss_visual,
+                    on_step=stage == "train",
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                    sync_dist=True,
+                )
+                self._log_scalar(
+                    f"{stage}_factorized_visual_relation_margin_missing",
+                    visual_margins.detach().mean(),
+                    count,
+                )
+                self._log_scalar(
+                    f"{stage}_factorized_visual_relation_margin_sat_missing",
+                    (visual_margins.detach() >= margin_target).float().mean(),
+                    count,
+                )
+                terms.append(
+                    loss_visual * self.factorized_visual_relation_loss_weight
+                )
+
+        if not terms:
+            return None
+        return torch.stack(terms).sum()
+
     def _append_nash_mtl_params(self, params):
         if not (
             self.model.hparams.grad_weights
@@ -2819,6 +2941,16 @@ class HeatmapModule(pl.LightningModule):
                 + loss_objectful_within
                 * self.factorized_objectful_within_loss_weight
             )
+
+        loss_factorized_relation = self._factorized_evidence_relation_loss(
+            stage,
+            actions,
+            valid,
+            target,
+        )
+        if loss_factorized_relation is not None:
+            loss_main_task = loss_main_task + loss_factorized_relation
+
         loss_hard_objectless = self._objectless_object_action_suppression_loss(
             stage,
             preds,

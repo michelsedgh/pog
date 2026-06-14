@@ -53,6 +53,12 @@ CORE_COLUMNS = [
     "val_factorized_visual_mix_true_missing",
     "val_factorized_prompt_delta_true_minus_confuser_exact",
     "val_factorized_visual_delta_true_minus_confuser_missing",
+    "val_loss_factorized_prompt_relation",
+    "val_factorized_prompt_relation_margin_exact",
+    "val_factorized_prompt_relation_margin_sat_exact",
+    "val_loss_factorized_visual_relation",
+    "val_factorized_visual_relation_margin_missing",
+    "val_factorized_visual_relation_margin_sat_missing",
     "val_factorized_objectful_true_minus_confuser_exact",
     "val_factorized_objectful_true_minus_confuser_missing",
     "val_loss_objectless_object_action_suppression",
@@ -331,6 +337,10 @@ def print_compact_epoch_summary(epoch_df):
         "val_factorized_visual_mix_true_exact",
         "val_factorized_detected_mix_true_missing",
         "val_factorized_visual_mix_true_missing",
+        "val_factorized_prompt_relation_margin_exact",
+        "val_factorized_visual_relation_margin_missing",
+        "val_factorized_prompt_relation_margin_sat_exact",
+        "val_factorized_visual_relation_margin_sat_missing",
         "val_factorized_objectful_true_minus_confuser_exact",
         "val_factorized_objectful_true_minus_confuser_missing",
         "val_object_counterfactual_teacher_logit_drop",
@@ -405,6 +415,12 @@ def print_compact_best(epoch_df):
         "val_factorized_visual_mix_true_missing",
         "val_factorized_prompt_delta_true_minus_confuser_exact",
         "val_factorized_visual_delta_true_minus_confuser_missing",
+        "val_loss_factorized_prompt_relation",
+        "val_factorized_prompt_relation_margin_exact",
+        "val_factorized_prompt_relation_margin_sat_exact",
+        "val_loss_factorized_visual_relation",
+        "val_factorized_visual_relation_margin_missing",
+        "val_factorized_visual_relation_margin_sat_missing",
         "val_factorized_objectful_true_minus_confuser_exact",
         "val_factorized_objectful_true_minus_confuser_missing",
         "val_object_counterfactual_teacher_logit_drop",
@@ -774,6 +790,30 @@ def print_decision(epoch_df):
         latest,
         "val_factorized_visual_delta_true_minus_confuser_missing",
     )
+    factorized_prompt_relation_loss = metric(
+        latest,
+        "val_loss_factorized_prompt_relation",
+    )
+    factorized_prompt_relation_margin = metric(
+        latest,
+        "val_factorized_prompt_relation_margin_exact",
+    )
+    factorized_prompt_relation_sat = metric(
+        latest,
+        "val_factorized_prompt_relation_margin_sat_exact",
+    )
+    factorized_visual_relation_loss = metric(
+        latest,
+        "val_loss_factorized_visual_relation",
+    )
+    factorized_visual_relation_margin = metric(
+        latest,
+        "val_factorized_visual_relation_margin_missing",
+    )
+    factorized_visual_relation_sat = metric(
+        latest,
+        "val_factorized_visual_relation_margin_sat_missing",
+    )
     factorized_objectful_margin_exact = metric(
         latest,
         "val_factorized_objectful_true_minus_confuser_exact",
@@ -1007,6 +1047,19 @@ def print_decision(epoch_df):
             f"visual_margin_missing {fmt(factorized_visual_margin_missing)}, "
             f"objectful_margin_exact {fmt(factorized_objectful_margin_exact)}, "
             f"objectful_margin_missing {fmt(factorized_objectful_margin_missing)}"
+        )
+    if (
+        pd.notna(factorized_prompt_relation_loss)
+        or pd.notna(factorized_visual_relation_loss)
+    ):
+        print(
+            "factorized relation objectives: "
+            f"prompt_loss {fmt(factorized_prompt_relation_loss)}, "
+            f"prompt_margin {fmt(factorized_prompt_relation_margin)}, "
+            f"prompt_sat {fmt(factorized_prompt_relation_sat)}, "
+            f"visual_loss {fmt(factorized_visual_relation_loss)}, "
+            f"visual_margin {fmt(factorized_visual_relation_margin)}, "
+            f"visual_sat {fmt(factorized_visual_relation_sat)}"
         )
     if pd.notna(prompt_acc) or pd.notna(prompt_loss):
         print(
