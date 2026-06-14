@@ -575,6 +575,8 @@ class POGUISE(pl.LightningModule):
                 x_visual_final = None
                 x_object_prompt = None
             self.last_actor_motion_logits = None
+            self.last_actor_tokens = x_actor
+            self.last_actor_object_prompt_classes = None
             self.last_actor_object_prompt_tokens = None
             self.last_actor_object_prompt_attention_logits = None
             self.last_actor_object_prompt_attention = None
@@ -585,7 +587,7 @@ class POGUISE(pl.LightningModule):
             if self.hparams.ret_feat:
                 return x_actor
 
-            x_actor_for_action = x_actor
+            action_scores = None
             if (
                 self.actor_object_prompt_tokens_enabled
                 and x_object_prompt is not None
@@ -595,64 +597,30 @@ class POGUISE(pl.LightningModule):
                     device=x_object_prompt.device,
                     dtype=torch.bool,
                 )
-                q = self.object_prompt_actor_query(x_actor)
-                k = self.object_prompt_key(x_object_prompt)
-                prompt_logits = torch.einsum("bad,bkd->bak", q, k)
-                prompt_logits = prompt_logits / (q.shape[-1] ** 0.5)
-                prompt_logits = prompt_logits.masked_fill(
-                    ~prompt_valid[:, None, :],
-                    -1.0e4,
-                )
-                prompt_attn = torch.softmax(prompt_logits.float(), dim=-1).to(
-                    dtype=prompt_logits.dtype
-                )
-                prompt_attn = prompt_attn * prompt_valid[:, None, :].to(
-                    dtype=prompt_attn.dtype
-                )
-                prompt_attn_sum = prompt_attn.sum(dim=-1, keepdim=True)
-                prompt_attn = torch.where(
-                    prompt_attn_sum > 0,
-                    prompt_attn / prompt_attn_sum.clamp_min(1.0e-6),
-                    torch.zeros_like(prompt_attn),
-                )
+                if object_classes is not None:
+                    none_id = int(self.hparams.get("num_object_classes", 19))
+                    prompt_classes = object_classes.to(
+                        device=x_object_prompt.device,
+                        dtype=torch.long,
+                    )
+                    prompt_classes = torch.where(
+                        prompt_valid,
+                        prompt_classes.clamp(0, none_id),
+                        torch.full_like(prompt_classes, none_id),
+                    )
+                    self.last_actor_object_prompt_classes = prompt_classes
                 self.last_actor_object_prompt_tokens = x_object_prompt
-                self.last_actor_object_prompt_attention_logits = prompt_logits
-                self.last_actor_object_prompt_attention = prompt_attn
                 self.last_actor_object_prompt_valid = prompt_valid
-                if self.object_context_adapter_enabled:
-                    object_context = torch.einsum(
-                        "bak,bkd->bad",
-                        prompt_attn,
-                        x_object_prompt,
-                    )
-                    adapter_in = torch.cat(
-                        [
-                            x_actor,
-                            object_context,
-                            x_actor * object_context,
-                        ],
-                        dim=-1,
-                    )
-                    gate = torch.sigmoid(self.object_context_gate(adapter_in))
-                    has_prompt = prompt_valid.any(dim=1).to(
-                        device=gate.device,
-                        dtype=gate.dtype,
-                    )
-                    gate = gate * has_prompt[:, None, None]
-                    scale = torch.sigmoid(self.object_context_scale)
-                    delta = self.object_context_adapter(adapter_in)
-                    x_actor_for_action = x_actor + scale * gate * delta
-                    self.last_actor_object_context_gate = gate.detach()
-                    self.last_actor_object_context_scale = scale.detach()
-                    self.last_actor_object_context_delta_norm = (
-                        (scale * gate * delta)
-                        .detach()
-                        .float()
-                        .norm(dim=-1)
-                    )
+                action_scores = self._actor_logits_from_object_prompt_tokens(
+                    x_actor,
+                    x_object_prompt,
+                    prompt_valid,
+                    update_last=True,
+                )
             if self.actor_motion_head is not None:
                 self.last_actor_motion_logits = self.actor_motion_head(x_actor)
-            action_scores = self.actor_head(x_actor_for_action)
+            if action_scores is None:
+                action_scores = self.actor_head(x_actor)
             self.last_actor_action_logits = action_scores
             if self.last_actor_motion_logits is None:
                 self.last_actor_motion_logits = action_scores
@@ -670,16 +638,132 @@ class POGUISE(pl.LightningModule):
                 else self.head(x_class, mode=self.mode)
             )
             return x_class, x_heatmap
-        else:
-            x_class = self.net(x)
-            if self.hparams.ret_feat:
-                return x_class
-            x_class = (
-                self.head(x_class)
-                if not self.hparams.get("linear_probe", 0)
-                else self.head(x_class, mode=self.mode)
+
+        x_class = self.net(x)
+        if self.hparams.ret_feat:
+            return x_class
+        x_class = (
+            self.head(x_class)
+            if not self.hparams.get("linear_probe", 0)
+            else self.head(x_class, mode=self.mode)
+        )
+        return x_class, 0
+
+    def _actor_logits_from_object_prompt_tokens(
+        self,
+        actor_tokens,
+        object_prompt_tokens,
+        object_valid,
+        update_last=False,
+    ):
+        if object_prompt_tokens is None or object_valid is None:
+            return self.actor_head(actor_tokens)
+
+        prompt_valid = object_valid.to(
+            device=object_prompt_tokens.device,
+            dtype=torch.bool,
+        )
+        q = self.object_prompt_actor_query(actor_tokens)
+        k = self.object_prompt_key(object_prompt_tokens)
+        prompt_logits = torch.einsum("bad,bkd->bak", q, k)
+        prompt_logits = prompt_logits / (q.shape[-1] ** 0.5)
+        prompt_logits = prompt_logits.masked_fill(~prompt_valid[:, None, :], -1.0e4)
+        prompt_attn = torch.softmax(prompt_logits.float(), dim=-1).to(
+            dtype=prompt_logits.dtype
+        )
+        prompt_attn = prompt_attn * prompt_valid[:, None, :].to(
+            dtype=prompt_attn.dtype
+        )
+        prompt_attn_sum = prompt_attn.sum(dim=-1, keepdim=True)
+        prompt_attn = torch.where(
+            prompt_attn_sum > 0,
+            prompt_attn / prompt_attn_sum.clamp_min(1.0e-6),
+            torch.zeros_like(prompt_attn),
+        )
+
+        actor_tokens_for_action = actor_tokens
+        gate = None
+        scale = None
+        delta = None
+        if self.object_context_adapter_enabled:
+            object_context = torch.einsum(
+                "bak,bkd->bad",
+                prompt_attn,
+                object_prompt_tokens,
             )
-            return x_class, 0
+            adapter_in = torch.cat(
+                [
+                    actor_tokens,
+                    object_context,
+                    actor_tokens * object_context,
+                ],
+                dim=-1,
+            )
+            gate = torch.sigmoid(self.object_context_gate(adapter_in))
+            has_prompt = prompt_valid.any(dim=1).to(
+                device=gate.device,
+                dtype=gate.dtype,
+            )
+            gate = gate * has_prompt[:, None, None]
+            scale = torch.sigmoid(self.object_context_scale)
+            delta = self.object_context_adapter(adapter_in)
+            actor_tokens_for_action = actor_tokens + scale * gate * delta
+
+        if update_last:
+            self.last_actor_object_prompt_attention_logits = prompt_logits
+            self.last_actor_object_prompt_attention = prompt_attn
+            self.last_actor_object_prompt_valid = prompt_valid
+            if gate is not None and scale is not None and delta is not None:
+                self.last_actor_object_context_gate = gate.detach()
+                self.last_actor_object_context_scale = scale.detach()
+                self.last_actor_object_context_delta_norm = (
+                    (scale * gate * delta).detach().float().norm(dim=-1)
+                )
+
+        return self.actor_head(actor_tokens_for_action)
+
+    def cached_object_prompt_action_logits(
+        self,
+        object_classes=None,
+        object_valid=None,
+    ):
+        actor_tokens = getattr(self, "last_actor_tokens", None)
+        object_prompt_tokens = getattr(self, "last_actor_object_prompt_tokens", None)
+        prompt_valid = getattr(self, "last_actor_object_prompt_valid", None)
+        if actor_tokens is None:
+            raise RuntimeError("No cached actor tokens; run forward before counterfactual logits")
+        if object_prompt_tokens is None or prompt_valid is None:
+            return self.actor_head(actor_tokens)
+
+        prompt_tokens = object_prompt_tokens
+        if object_classes is not None:
+            base_classes = getattr(self, "last_actor_object_prompt_classes", None)
+            if base_classes is None:
+                raise RuntimeError("No cached object classes for counterfactual prompt logits")
+            class_embed = getattr(self.net, "object_class_embed", None)
+            if class_embed is None:
+                raise RuntimeError("Cached object prompt logits require object_class_embed")
+            none_id = int(self.hparams.get("num_object_classes", 19))
+            next_classes = object_classes.to(
+                device=object_prompt_tokens.device,
+                dtype=torch.long,
+            )
+            next_classes = next_classes.clamp(0, none_id)
+            class_delta = class_embed(next_classes) - class_embed(base_classes)
+            prompt_tokens = prompt_tokens + class_delta.to(dtype=prompt_tokens.dtype)
+
+        if object_valid is not None:
+            prompt_valid = object_valid.to(
+                device=object_prompt_tokens.device,
+                dtype=torch.bool,
+            )
+
+        return self._actor_logits_from_object_prompt_tokens(
+            actor_tokens,
+            prompt_tokens,
+            prompt_valid,
+            update_last=False,
+        )
 
     def add_model_specific_args(parent_parser):
         parser = ArgumentParser(parents=[parent_parser], add_help=False)

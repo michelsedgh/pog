@@ -1301,6 +1301,7 @@ class HeatmapModule(pl.LightningModule):
         actions,
         preds,
         target,
+        object_inputs,
     ):
         if (
             stage != "train"
@@ -1319,50 +1320,19 @@ class HeatmapModule(pl.LightningModule):
         if not consistency_mask.any():
             return None
 
-        saved_attrs = {
-            name: getattr(self.model, name, None)
-            for name in (
-                "last_actor_action_logits",
-                "last_actor_motion_logits",
-                "last_actor_object_prompt_tokens",
-                "last_actor_object_prompt_attention_logits",
-                "last_actor_object_prompt_attention",
-                "last_actor_object_prompt_valid",
-                "last_actor_object_context_gate",
-                "last_actor_object_context_scale",
-                "last_actor_object_context_delta_norm",
-            )
-        }
         empty_inputs = self._empty_object_inputs(
             batch_size=int(imgs.shape[0]),
             device=imgs.device,
             dtype=torch.float32,
         )
         distractor_inputs = self._object_distractor_class_inputs(
-            self._object_inputs_from_target(target, imgs.device)
+            object_inputs
         )
-        try:
-            with torch.no_grad():
-                no_object_data = self.model(
-                    imgs,
-                    boxes=boxes,
-                    valid=valid,
-                    action_labels=actions,
-                    **empty_inputs,
-                )
-            no_object_preds = self._unpack_model_data(no_object_data)[0].detach()
-            with torch.no_grad():
-                distractor_data = self.model(
-                    imgs,
-                    boxes=boxes,
-                    valid=valid,
-                    action_labels=actions,
-                    **distractor_inputs,
-                )
-            distractor_preds = self._unpack_model_data(distractor_data)[0].detach()
-        finally:
-            for name, value in saved_attrs.items():
-                setattr(self.model, name, value)
+        with torch.no_grad():
+            no_object_preds = self._cached_object_prompt_logits(empty_inputs).detach()
+            distractor_preds = self._cached_object_prompt_logits(
+                distractor_inputs
+            ).detach()
 
         with_object_logp = F.log_softmax(preds[consistency_mask].float(), dim=-1)
         no_object_prob = F.softmax(
@@ -1419,6 +1389,17 @@ class HeatmapModule(pl.LightningModule):
                 count,
             )
         return loss
+
+    def _cached_object_prompt_logits(self, object_inputs=None):
+        if not hasattr(self.model, "cached_object_prompt_action_logits"):
+            raise RuntimeError(
+                "Object prompt counterfactuals require cached_object_prompt_action_logits"
+            )
+        object_inputs = object_inputs or {}
+        return self.model.cached_object_prompt_action_logits(
+            object_classes=object_inputs.get("object_classes"),
+            object_valid=object_inputs.get("object_valid"),
+        )
 
     def _teacher_object_removed_inputs(
         self,
@@ -1566,14 +1547,10 @@ class HeatmapModule(pl.LightningModule):
             selected_indices,
             selected_valid,
         )
-        counterfactual_data = self.model(
-            imgs,
-            boxes=boxes,
-            valid=valid,
-            action_labels=actions,
-            **counterfactual_inputs,
-        )
-        counterfactual_preds = self._unpack_model_data(counterfactual_data)[0]
+        with torch.no_grad():
+            counterfactual_preds = self._cached_object_prompt_logits(
+                counterfactual_inputs
+            )
 
         true_labels = actions[selected_valid].long()
         base_true_logits = preds[selected_valid].gather(
@@ -1648,20 +1625,6 @@ class HeatmapModule(pl.LightningModule):
         if not has_objectless and not has_exact:
             return None
 
-        saved_attrs = {
-            name: getattr(self.model, name, None)
-            for name in (
-                "last_actor_action_logits",
-                "last_actor_motion_logits",
-                "last_actor_object_prompt_tokens",
-                "last_actor_object_prompt_attention_logits",
-                "last_actor_object_prompt_attention",
-                "last_actor_object_prompt_valid",
-                "last_actor_object_context_gate",
-                "last_actor_object_context_scale",
-                "last_actor_object_context_delta_norm",
-            )
-        }
         empty_inputs = self._empty_object_inputs(
             batch_size=int(imgs.shape[0]),
             device=imgs.device,
@@ -1670,28 +1633,11 @@ class HeatmapModule(pl.LightningModule):
         distractor_inputs = self._object_distractor_class_inputs(
             self._object_inputs_from_target(target, imgs.device)
         )
-        try:
-            with torch.no_grad():
-                dropped_data = self.model(
-                    imgs,
-                    boxes=boxes,
-                    valid=valid,
-                    action_labels=actions,
-                    **empty_inputs,
-                )
-            dropped_preds = self._unpack_model_data(dropped_data)[0].detach()
-            with torch.no_grad():
-                distractor_data = self.model(
-                    imgs,
-                    boxes=boxes,
-                    valid=valid,
-                    action_labels=actions,
-                    **distractor_inputs,
-                )
-            distractor_preds = self._unpack_model_data(distractor_data)[0].detach()
-        finally:
-            for name, value in saved_attrs.items():
-                setattr(self.model, name, value)
+        with torch.no_grad():
+            dropped_preds = self._cached_object_prompt_logits(empty_inputs).detach()
+            distractor_preds = self._cached_object_prompt_logits(
+                distractor_inputs
+            ).detach()
 
         with torch.no_grad():
             base_logp = F.log_softmax(preds.float(), dim=-1)
@@ -1904,53 +1850,107 @@ class HeatmapModule(pl.LightningModule):
             selected_labels.unsqueeze(1),
         ).squeeze(1)
 
-        saved_attrs = {
-            name: getattr(self.model, name, None)
-            for name in (
-                "last_actor_action_logits",
-                "last_actor_motion_logits",
-                "last_actor_object_prompt_tokens",
-                "last_actor_object_prompt_attention_logits",
-                "last_actor_object_prompt_attention",
-                "last_actor_object_prompt_valid",
-                "last_actor_object_context_gate",
-                "last_actor_object_context_scale",
-                "last_actor_object_context_delta_norm",
-            )
-        }
-
         weighted_losses = []
         wrong_preds = None
         dropped_preds = None
         dropped_prompt_mask = None
-        try:
-            if self.object_prompt_wrong_class_loss_weight > 0:
-                wrong_inputs = self._teacher_object_wrong_class_inputs(
-                    object_inputs,
-                    selected_slots,
-                    selected_valid,
+        if self.object_prompt_wrong_class_loss_weight > 0:
+            wrong_inputs = self._teacher_object_wrong_class_inputs(
+                object_inputs,
+                selected_slots,
+                selected_valid,
+                actions,
+            )
+            wrong_preds = self._cached_object_prompt_logits(wrong_inputs)
+            wrong_true_logits = wrong_preds[selected_valid].gather(
+                1,
+                selected_labels.unsqueeze(1),
+            ).squeeze(1)
+            wrong_drop = base_true_logits - wrong_true_logits
+            loss_wrong = F.relu(
+                self.object_prompt_wrong_class_margin - wrong_drop
+            ).mean()
+            count = int(selected_labels.numel())
+            self.log(
+                f"{stage}_loss_object_prompt_wrong_class",
+                loss_wrong,
+                on_step=stage == "train",
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+            self._log_scalar(
+                f"{stage}_object_prompt_correct_minus_wrong_true_logit",
+                wrong_drop.detach().mean(),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_object_prompt_wrong_class_margin_sat_rate",
+                (
+                    wrong_drop.detach()
+                    >= self.object_prompt_wrong_class_margin
+                )
+                .float()
+                .mean(),
+                count,
+            )
+            weighted_losses.append(
+                loss_wrong * self.object_prompt_wrong_class_loss_weight
+            )
+
+        if self.object_prompt_sensitivity_loss_weight > 0:
+            motion_logits = getattr(self.model, "last_actor_motion_logits", None)
+            if motion_logits is not None:
+                motion_logits = motion_logits.to(device=preds.device)
+                motion_margin = self._motion_confuser_margin(
+                    motion_logits.float(),
                     actions,
+                    selected_valid,
                 )
-                wrong_data = self.model(
-                    imgs,
-                    boxes=boxes,
-                    valid=valid,
-                    action_labels=actions,
-                    **wrong_inputs,
+                ambiguous = (
+                    selected_valid
+                    & (
+                        motion_margin
+                        < self.object_prompt_sensitivity_motion_margin_threshold
+                    )
                 )
-                wrong_preds = self._unpack_model_data(wrong_data)[0]
-                wrong_true_logits = wrong_preds[selected_valid].gather(
+            else:
+                ambiguous = torch.zeros_like(selected_valid, dtype=torch.bool)
+
+            self._log_scalar(
+                f"{stage}_object_prompt_sensitivity_ambiguous_rate",
+                ambiguous[selected_valid].float().mean(),
+                int(selected_valid.sum().item()),
+            )
+            if ambiguous.any():
+                dropped_prompt_mask = ambiguous
+                dropped_inputs = self._teacher_object_removed_inputs(
+                    object_inputs,
+                    info["selected_indices"].to(
+                        device=preds.device,
+                        dtype=torch.long,
+                    ),
+                    ambiguous,
+                )
+                dropped_preds = self._cached_object_prompt_logits(dropped_inputs)
+                ambiguous_labels = actions[ambiguous]
+                base_ambiguous_true = preds[ambiguous].gather(
                     1,
-                    selected_labels.unsqueeze(1),
+                    ambiguous_labels.unsqueeze(1),
                 ).squeeze(1)
-                wrong_drop = base_true_logits - wrong_true_logits
-                loss_wrong = F.relu(
-                    self.object_prompt_wrong_class_margin - wrong_drop
+                dropped_true = dropped_preds[ambiguous].gather(
+                    1,
+                    ambiguous_labels.unsqueeze(1),
+                ).squeeze(1)
+                dropped_drop = base_ambiguous_true - dropped_true
+                loss_sensitivity = F.relu(
+                    self.object_prompt_sensitivity_margin - dropped_drop
                 ).mean()
-                count = int(selected_labels.numel())
+                count = int(ambiguous_labels.numel())
                 self.log(
-                    f"{stage}_loss_object_prompt_wrong_class",
-                    loss_wrong,
+                    f"{stage}_loss_object_prompt_sensitivity",
+                    loss_sensitivity,
                     on_step=stage == "train",
                     on_epoch=True,
                     prog_bar=False,
@@ -1958,120 +1958,33 @@ class HeatmapModule(pl.LightningModule):
                     sync_dist=True,
                 )
                 self._log_scalar(
-                    f"{stage}_object_prompt_correct_minus_wrong_true_logit",
-                    wrong_drop.detach().mean(),
+                    f"{stage}_object_prompt_correct_minus_dropped_true_logit_ambiguous",
+                    dropped_drop.detach().mean(),
                     count,
                 )
                 self._log_scalar(
-                    f"{stage}_object_prompt_wrong_class_margin_sat_rate",
+                    f"{stage}_object_prompt_sensitivity_margin_sat_rate",
                     (
-                        wrong_drop.detach()
-                        >= self.object_prompt_wrong_class_margin
+                        dropped_drop.detach()
+                        >= self.object_prompt_sensitivity_margin
                     )
                     .float()
                     .mean(),
                     count,
                 )
                 weighted_losses.append(
-                    loss_wrong * self.object_prompt_wrong_class_loss_weight
+                    loss_sensitivity
+                    * self.object_prompt_sensitivity_loss_weight
                 )
 
-            if self.object_prompt_sensitivity_loss_weight > 0:
-                motion_logits = saved_attrs.get("last_actor_motion_logits")
-                if motion_logits is not None:
-                    motion_logits = motion_logits.to(device=preds.device)
-                    motion_margin = self._motion_confuser_margin(
-                        motion_logits.float(),
-                        actions,
-                        selected_valid,
-                    )
-                    ambiguous = (
-                        selected_valid
-                        & (
-                            motion_margin
-                            < self.object_prompt_sensitivity_motion_margin_threshold
-                        )
-                    )
-                else:
-                    ambiguous = torch.zeros_like(selected_valid, dtype=torch.bool)
-
-                self._log_scalar(
-                    f"{stage}_object_prompt_sensitivity_ambiguous_rate",
-                    ambiguous[selected_valid].float().mean(),
-                    int(selected_valid.sum().item()),
-                )
-                if ambiguous.any():
-                    dropped_prompt_mask = ambiguous
-                    dropped_inputs = self._teacher_object_removed_inputs(
-                        object_inputs,
-                        info["selected_indices"].to(
-                            device=preds.device,
-                            dtype=torch.long,
-                        ),
-                        ambiguous,
-                    )
-                    dropped_data = self.model(
-                        imgs,
-                        boxes=boxes,
-                        valid=valid,
-                        action_labels=actions,
-                        **dropped_inputs,
-                    )
-                    dropped_preds = self._unpack_model_data(dropped_data)[0]
-                    ambiguous_labels = actions[ambiguous]
-                    base_ambiguous_true = preds[ambiguous].gather(
-                        1,
-                        ambiguous_labels.unsqueeze(1),
-                    ).squeeze(1)
-                    dropped_true = dropped_preds[ambiguous].gather(
-                        1,
-                        ambiguous_labels.unsqueeze(1),
-                    ).squeeze(1)
-                    dropped_drop = base_ambiguous_true - dropped_true
-                    loss_sensitivity = F.relu(
-                        self.object_prompt_sensitivity_margin - dropped_drop
-                    ).mean()
-                    count = int(ambiguous_labels.numel())
-                    self.log(
-                        f"{stage}_loss_object_prompt_sensitivity",
-                        loss_sensitivity,
-                        on_step=stage == "train",
-                        on_epoch=True,
-                        prog_bar=False,
-                        logger=True,
-                        sync_dist=True,
-                    )
-                    self._log_scalar(
-                        f"{stage}_object_prompt_correct_minus_dropped_true_logit_ambiguous",
-                        dropped_drop.detach().mean(),
-                        count,
-                    )
-                    self._log_scalar(
-                        f"{stage}_object_prompt_sensitivity_margin_sat_rate",
-                        (
-                            dropped_drop.detach()
-                            >= self.object_prompt_sensitivity_margin
-                        )
-                        .float()
-                        .mean(),
-                        count,
-                    )
-                    weighted_losses.append(
-                        loss_sensitivity
-                        * self.object_prompt_sensitivity_loss_weight
-                    )
-
-            self._log_uselaptop_prompt_counterfactual_margins(
-                stage,
-                actions,
-                selected_valid,
-                wrong_preds,
-                dropped_preds,
-                dropped_prompt_mask,
-            )
-        finally:
-            for name, value in saved_attrs.items():
-                setattr(self.model, name, value)
+        self._log_uselaptop_prompt_counterfactual_margins(
+            stage,
+            actions,
+            selected_valid,
+            wrong_preds,
+            dropped_preds,
+            dropped_prompt_mask,
+        )
 
         if not weighted_losses:
             return None
@@ -2627,7 +2540,7 @@ class HeatmapModule(pl.LightningModule):
                 actions,
                 preds,
                 target,
-                object_inputs,
+                model_object_inputs,
             )
         )
         if stage == "train" and loss_object_prompt_action_coupling is not None:
@@ -2667,6 +2580,7 @@ class HeatmapModule(pl.LightningModule):
                 actions,
                 preds,
                 target,
+                model_object_inputs,
             )
         )
         if (
