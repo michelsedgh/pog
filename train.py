@@ -475,9 +475,29 @@ def build_parser():
         default=0.0,
     )
     parser.add_argument(
+        "--factorized_prompt_relation_loss_final_weight",
+        type=float,
+        default=None,
+    )
+    parser.add_argument(
         "--factorized_visual_relation_loss_weight",
         type=float,
         default=0.0,
+    )
+    parser.add_argument(
+        "--factorized_visual_relation_loss_final_weight",
+        type=float,
+        default=None,
+    )
+    parser.add_argument(
+        "--factorized_relation_loss_decay_start_epoch",
+        type=int,
+        default=0,
+    )
+    parser.add_argument(
+        "--factorized_relation_loss_decay_end_epoch",
+        type=int,
+        default=0,
     )
     parser.add_argument(
         "--factorized_relation_confuser_margin",

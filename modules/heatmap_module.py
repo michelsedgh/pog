@@ -166,11 +166,55 @@ class HeatmapModule(pl.LightningModule):
         )
         if self.factorized_prompt_relation_loss_weight < 0:
             raise ValueError("factorized_prompt_relation_loss_weight must be >= 0")
+        prompt_relation_final = hparams.get(
+            "factorized_prompt_relation_loss_final_weight",
+            None,
+        )
+        self.factorized_prompt_relation_loss_final_weight = (
+            self.factorized_prompt_relation_loss_weight
+            if prompt_relation_final is None
+            else float(prompt_relation_final)
+        )
+        if self.factorized_prompt_relation_loss_final_weight < 0:
+            raise ValueError(
+                "factorized_prompt_relation_loss_final_weight must be >= 0"
+            )
         self.factorized_visual_relation_loss_weight = float(
             hparams.get("factorized_visual_relation_loss_weight", 0.0)
         )
         if self.factorized_visual_relation_loss_weight < 0:
             raise ValueError("factorized_visual_relation_loss_weight must be >= 0")
+        visual_relation_final = hparams.get(
+            "factorized_visual_relation_loss_final_weight",
+            None,
+        )
+        self.factorized_visual_relation_loss_final_weight = (
+            self.factorized_visual_relation_loss_weight
+            if visual_relation_final is None
+            else float(visual_relation_final)
+        )
+        if self.factorized_visual_relation_loss_final_weight < 0:
+            raise ValueError(
+                "factorized_visual_relation_loss_final_weight must be >= 0"
+            )
+        self.factorized_relation_loss_decay_start_epoch = int(
+            hparams.get("factorized_relation_loss_decay_start_epoch", 0)
+        )
+        self.factorized_relation_loss_decay_end_epoch = int(
+            hparams.get("factorized_relation_loss_decay_end_epoch", 0)
+        )
+        if self.factorized_relation_loss_decay_start_epoch < 0:
+            raise ValueError("factorized_relation_loss_decay_start_epoch must be >= 0")
+        if self.factorized_relation_loss_decay_end_epoch < 0:
+            raise ValueError("factorized_relation_loss_decay_end_epoch must be >= 0")
+        if (
+            self.factorized_relation_loss_decay_end_epoch
+            < self.factorized_relation_loss_decay_start_epoch
+        ):
+            raise ValueError(
+                "factorized_relation_loss_decay_end_epoch must be >= "
+                "factorized_relation_loss_decay_start_epoch"
+            )
         self.factorized_relation_confuser_margin = float(
             hparams.get("factorized_relation_confuser_margin", 1.0)
         )
@@ -2568,12 +2612,45 @@ class HeatmapModule(pl.LightningModule):
                 )
         return loss
 
+    def _linear_epoch_weight(self, initial_weight, final_weight, start_epoch, end_epoch):
+        epoch = int(getattr(self, "current_epoch", 0) or 0)
+        initial_weight = float(initial_weight)
+        final_weight = float(final_weight)
+        start_epoch = int(start_epoch)
+        end_epoch = int(end_epoch)
+        if end_epoch <= start_epoch:
+            return initial_weight
+        if epoch <= start_epoch:
+            return initial_weight
+        if epoch >= end_epoch:
+            return final_weight
+        ratio = float(epoch - start_epoch) / float(end_epoch - start_epoch)
+        return initial_weight + (final_weight - initial_weight) * ratio
+
+    def _factorized_prompt_relation_effective_weight(self):
+        return self._linear_epoch_weight(
+            self.factorized_prompt_relation_loss_weight,
+            self.factorized_prompt_relation_loss_final_weight,
+            self.factorized_relation_loss_decay_start_epoch,
+            self.factorized_relation_loss_decay_end_epoch,
+        )
+
+    def _factorized_visual_relation_effective_weight(self):
+        return self._linear_epoch_weight(
+            self.factorized_visual_relation_loss_weight,
+            self.factorized_visual_relation_loss_final_weight,
+            self.factorized_relation_loss_decay_start_epoch,
+            self.factorized_relation_loss_decay_end_epoch,
+        )
+
     def _factorized_evidence_relation_loss(self, stage, actions, valid, target):
         if not self.actor_object_factorized_head:
             return None
+        prompt_weight = self._factorized_prompt_relation_effective_weight()
+        visual_weight = self._factorized_visual_relation_effective_weight()
         if (
-            self.factorized_prompt_relation_loss_weight <= 0
-            and self.factorized_visual_relation_loss_weight <= 0
+            prompt_weight <= 0
+            and visual_weight <= 0
         ):
             return None
 
@@ -2596,11 +2673,23 @@ class HeatmapModule(pl.LightningModule):
         known_objectful = info["valid"] & info["known_action"]
         exact_compatible = known_objectful & info["compatible_1based"]
         missing_compatible = known_objectful & ~info["any_compatible"]
+        if known_objectful.any():
+            count = int(known_objectful.sum().item())
+            self._log_scalar(
+                f"{stage}_factorized_prompt_relation_effective_weight",
+                torch.as_tensor(prompt_weight, device=device, dtype=torch.float32),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_factorized_visual_relation_effective_weight",
+                torch.as_tensor(visual_weight, device=device, dtype=torch.float32),
+                count,
+            )
 
         terms = []
         margin_target = self.factorized_relation_confuser_margin
         if (
-            self.factorized_prompt_relation_loss_weight > 0
+            prompt_weight > 0
             and prompt_delta is not None
             and exact_compatible.any()
         ):
@@ -2631,12 +2720,10 @@ class HeatmapModule(pl.LightningModule):
                     (prompt_margins.detach() >= margin_target).float().mean(),
                     count,
                 )
-                terms.append(
-                    loss_prompt * self.factorized_prompt_relation_loss_weight
-                )
+                terms.append(loss_prompt * prompt_weight)
 
         if (
-            self.factorized_visual_relation_loss_weight > 0
+            visual_weight > 0
             and visual_delta is not None
             and missing_compatible.any()
         ):
@@ -2667,9 +2754,7 @@ class HeatmapModule(pl.LightningModule):
                     (visual_margins.detach() >= margin_target).float().mean(),
                     count,
                 )
-                terms.append(
-                    loss_visual * self.factorized_visual_relation_loss_weight
-                )
+                terms.append(loss_visual * visual_weight)
 
         if not terms:
             return None

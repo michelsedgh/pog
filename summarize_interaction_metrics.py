@@ -53,6 +53,8 @@ CORE_COLUMNS = [
     "val_factorized_visual_mix_true_missing",
     "val_factorized_prompt_delta_true_minus_confuser_exact",
     "val_factorized_visual_delta_true_minus_confuser_missing",
+    "val_factorized_prompt_relation_effective_weight",
+    "val_factorized_visual_relation_effective_weight",
     "val_loss_factorized_prompt_relation",
     "val_factorized_prompt_relation_margin_exact",
     "val_factorized_prompt_relation_margin_sat_exact",
@@ -337,6 +339,8 @@ def print_compact_epoch_summary(epoch_df):
         "val_factorized_visual_mix_true_exact",
         "val_factorized_detected_mix_true_missing",
         "val_factorized_visual_mix_true_missing",
+        "val_factorized_prompt_relation_effective_weight",
+        "val_factorized_visual_relation_effective_weight",
         "val_factorized_prompt_relation_margin_exact",
         "val_factorized_visual_relation_margin_missing",
         "val_factorized_prompt_relation_margin_sat_exact",
@@ -415,6 +419,8 @@ def print_compact_best(epoch_df):
         "val_factorized_visual_mix_true_missing",
         "val_factorized_prompt_delta_true_minus_confuser_exact",
         "val_factorized_visual_delta_true_minus_confuser_missing",
+        "val_factorized_prompt_relation_effective_weight",
+        "val_factorized_visual_relation_effective_weight",
         "val_loss_factorized_prompt_relation",
         "val_factorized_prompt_relation_margin_exact",
         "val_factorized_prompt_relation_margin_sat_exact",
@@ -790,6 +796,14 @@ def print_decision(epoch_df):
         latest,
         "val_factorized_visual_delta_true_minus_confuser_missing",
     )
+    factorized_prompt_relation_weight = metric(
+        latest,
+        "val_factorized_prompt_relation_effective_weight",
+    )
+    factorized_visual_relation_weight = metric(
+        latest,
+        "val_factorized_visual_relation_effective_weight",
+    )
     factorized_prompt_relation_loss = metric(
         latest,
         "val_loss_factorized_prompt_relation",
@@ -1054,9 +1068,11 @@ def print_decision(epoch_df):
     ):
         print(
             "factorized relation objectives: "
+            f"prompt_weight {fmt(factorized_prompt_relation_weight)}, "
             f"prompt_loss {fmt(factorized_prompt_relation_loss)}, "
             f"prompt_margin {fmt(factorized_prompt_relation_margin)}, "
             f"prompt_sat {fmt(factorized_prompt_relation_sat)}, "
+            f"visual_weight {fmt(factorized_visual_relation_weight)}, "
             f"visual_loss {fmt(factorized_visual_relation_loss)}, "
             f"visual_margin {fmt(factorized_visual_relation_margin)}, "
             f"visual_sat {fmt(factorized_visual_relation_sat)}"
