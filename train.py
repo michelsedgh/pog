@@ -297,7 +297,6 @@ def _validate_no_deprecated_object_path(checkpoint):
                 "object_interaction",
                 "specialist",
                 "object_action_fusion",
-                "factorized_interaction_action_head",
             )
         ):
             return True
@@ -313,7 +312,7 @@ def _validate_no_deprecated_object_path(checkpoint):
         raise ValueError(
             "Deprecated object specialist checkpoint detected. The active "
             "actor-object path uses object prompt tokens inside the transformer "
-            "and one base actor-token action head. "
+            "and the factorized interaction action head. "
             f"First deprecated keys: {preview}"
         )
 
@@ -442,6 +441,12 @@ def build_parser():
         default=10.0,
     )
     parser.add_argument("--motion_aux_loss_weight", type=float, default=0.25)
+    parser.add_argument("--factorized_presence_loss_weight", type=float, default=1.0)
+    parser.add_argument(
+        "--factorized_objectful_within_loss_weight",
+        type=float,
+        default=0.5,
+    )
     parser.add_argument("--object_prompt_grounding_loss_weight", type=float, default=0.0)
     parser.add_argument(
         "--objectless_prompt_consistency_loss_weight",
@@ -497,13 +502,22 @@ def main():
             "actor_object_slot_head was replaced by "
             "--actor_object_prompt_tokens 1."
         )
-    if getattr(hparams, "actor_object_factorized_head", 0):
-        raise ValueError(
-            "actor_object_factorized_head was removed from the active runtime path. "
-            "Use --actor_object_prompt_tokens 1 with the plain actor_head."
-        )
     if hparams.actor_object_prompt_tokens and not hparams.actor_prompt:
         raise ValueError("actor_object_prompt_tokens requires actor_prompt")
+    if getattr(hparams, "actor_object_factorized_head", 0):
+        if not hparams.actor_object_prompt_tokens:
+            raise ValueError(
+                "actor_object_factorized_head requires --actor_object_prompt_tokens 1"
+            )
+        if getattr(hparams, "object_context_adapter", 0):
+            raise ValueError(
+                "actor_object_factorized_head requires --object_context_adapter 0; "
+                "runtime objects must enter only inside the factorized objectful branch."
+            )
+        if not hparams.actor_interaction_heatmaps:
+            raise ValueError(
+                "actor_object_factorized_head requires --actor_interaction_heatmaps 1"
+            )
     if (
         hparams.actor_object_prompt_tokens
         and not hparams.object_detector_cache

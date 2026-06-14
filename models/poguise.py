@@ -8,7 +8,17 @@ import torch
 import os
 import os.path
 import pickle
-from datasets.object_vocab import NUM_OBJECT_CLASSES
+from datasets.object_vocab import NUM_OBJECT_CLASSES, OBJECT_TO_ID
+from datasets.toyota_action_taxonomy import (
+    toyota_action_object_map,
+    toyota_action_to_index,
+    toyota_confuser_action_names,
+    toyota_objectless_action_names,
+)
+from models.factorized_interaction_action_head import (
+    FactorizedActionObjectSpec,
+    FactorizedInteractionActionHead,
+)
 
 
 def load_state_dict(
@@ -146,6 +156,9 @@ class POGUISE(pl.LightningModule):
         self.actor_object_prompt_tokens_enabled = bool(
             self.hparams.get("actor_object_prompt_tokens", 0)
         )
+        self.actor_object_factorized_head_enabled = bool(
+            self.hparams.get("actor_object_factorized_head", 0)
+        )
         self.object_context_adapter_enabled = bool(
             self.hparams.get("object_context_adapter", 0)
         )
@@ -160,11 +173,17 @@ class POGUISE(pl.LightningModule):
                 "scene_object_tokens was removed. Use actor_object_prompt_tokens=1 "
                 "for runtime object prompts inside the transformer trunk."
             )
-        if bool(self.hparams.get("actor_object_factorized_head", 0)):
-            raise ValueError(
-                "actor_object_factorized_head was removed from the active runtime "
-                "path. Use actor_object_prompt_tokens=1 with the plain actor_head."
-            )
+        if self.actor_object_factorized_head_enabled:
+            if not self.actor_object_prompt_tokens_enabled:
+                raise ValueError(
+                    "actor_object_factorized_head requires actor_object_prompt_tokens"
+                )
+            if self.object_context_adapter_enabled:
+                raise ValueError(
+                    "object_context_adapter must be 0 with "
+                    "actor_object_factorized_head. Object prompts are used only "
+                    "inside the factorized interaction branch."
+                )
         if self.actor_object_prompt_tokens_enabled and not self.actor_prompt:
             raise ValueError("actor_object_prompt_tokens requires actor_prompt")
         if self.object_context_adapter_enabled and not self.actor_object_prompt_tokens_enabled:
@@ -173,6 +192,14 @@ class POGUISE(pl.LightningModule):
             )
         if self.actor_interaction_heatmaps and not self.actor_prompt:
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
+        if (
+            self.actor_object_factorized_head_enabled
+            and not self.actor_interaction_heatmaps
+        ):
+            raise ValueError(
+                "actor_object_factorized_head requires actor_interaction_heatmaps "
+                "so the objectful branch has detector-free visual fallback tokens."
+            )
         if "interaction_object_classes" in self.hparams:
             raise ValueError(
                 "interaction_object_classes was removed. Actor-object heatmaps "
@@ -190,6 +217,7 @@ class POGUISE(pl.LightningModule):
                     "interaction_warmup_freeze_actor_path requires freeze_backbone"
                 )
         self.use_register_tokens = bool(self.hparams.get("use_register_tokens", 0))
+        self.factorized_interaction_action_head = None
         self._create_network()
         # freeze backbone if specified
         if self.hparams.freeze_backbone:
@@ -314,13 +342,20 @@ class POGUISE(pl.LightningModule):
         self.net.head = nn.Identity(self.net.num_features, self.net.num_features)
         self.head = nn.Linear(self.net.num_features, self.hparams.num_classes)
         if self.actor_prompt:
-            self.actor_head = nn.Linear(
-                self.net.num_features,
-                self.hparams.num_classes,
+            self.actor_head = (
+                None
+                if self.actor_object_factorized_head_enabled
+                else nn.Linear(
+                    self.net.num_features,
+                    self.hparams.num_classes,
+                )
             )
             self.actor_motion_head = (
                 nn.Linear(self.net.num_features, self.hparams.num_classes)
-                if float(self.hparams.get("motion_aux_loss_weight", 0.25)) > 0.0
+                if (
+                    not self.actor_object_factorized_head_enabled
+                    and float(self.hparams.get("motion_aux_loss_weight", 0.25)) > 0.0
+                )
                 else None
             )
             self.presence_head = (
@@ -366,6 +401,38 @@ class POGUISE(pl.LightningModule):
                         self.object_context_gate[-1].bias,
                         float(self.hparams.get("object_context_gate_bias", -1.0)),
                     )
+            if self.actor_object_factorized_head_enabled:
+                spec = self._factorized_action_object_spec()
+                self.factorized_interaction_action_head = (
+                    FactorizedInteractionActionHead(
+                        self.net.num_features,
+                        spec=spec,
+                        hidden_dim=int(
+                            self.hparams.get(
+                                "actor_object_factorized_hidden_dim",
+                                512,
+                            )
+                        ),
+                        relation_scale_init=float(
+                            self.hparams.get(
+                                "actor_object_factorized_relation_scale_init",
+                                -1.0,
+                            )
+                        ),
+                        relation_logit_bound=float(
+                            self.hparams.get(
+                                "actor_object_factorized_relation_logit_bound",
+                                2.0,
+                            )
+                        ),
+                        max_relation_scale=float(
+                            self.hparams.get(
+                                "actor_object_factorized_max_relation_scale",
+                                1.5,
+                            )
+                        ),
+                    )
+                )
         if self.hparams.get("linear_probe", 0):
             self._freeze_backbone()
             self.head = Classifier(
@@ -376,6 +443,86 @@ class POGUISE(pl.LightningModule):
                 use_dropout=False,
                 # dropout=0.5,
             )
+
+    def _toyota_action_settings(self):
+        task_type = self.hparams.get("task_type", "CS")
+        action_taxonomy = self.hparams.get("toyota_action_taxonomy", "toyota_31")
+        return task_type, action_taxonomy
+
+    def _factorized_action_object_spec(self):
+        dataset = self.hparams.get("dataset", None)
+        dataset_name = (
+            dataset
+            if isinstance(dataset, str)
+            else getattr(dataset, "__name__", str(dataset))
+        )
+        dataset_module = "" if isinstance(dataset, str) else getattr(
+            dataset,
+            "__module__",
+            "",
+        )
+        is_toyotasm = (
+            dataset_name == "toyotasm"
+            or dataset_name == "ToyotaSMDataset"
+            or dataset_module == "datasets.toyotasm"
+            or self.hparams.get("dataset_artifact", None) == "toyotasm"
+        )
+        if not is_toyotasm:
+            raise ValueError("actor_object_factorized_head currently requires toyotasm")
+
+        task_type, action_taxonomy = self._toyota_action_settings()
+        action_to_index = toyota_action_to_index(task_type, action_taxonomy)
+        action_object_map = toyota_action_object_map(task_type, action_taxonomy)
+        objectless_names = toyota_objectless_action_names(
+            task_type,
+            action_taxonomy,
+        )
+        num_actions = int(self.hparams.num_classes)
+        num_object_classes = int(
+            self.hparams.get("num_object_classes", NUM_OBJECT_CLASSES)
+        )
+
+        objectless_indices = []
+        for action_name in objectless_names:
+            action_idx = action_to_index.get(action_name)
+            if action_idx is not None:
+                objectless_indices.append(int(action_idx))
+        if not objectless_indices:
+            raise ValueError("factorized head found no objectless actions")
+
+        compat = torch.zeros(num_object_classes, num_actions, dtype=torch.float32)
+        for action_name, object_names in action_object_map.items():
+            action_idx = action_to_index.get(action_name)
+            if action_idx is None:
+                continue
+            for object_name in object_names:
+                object_id = OBJECT_TO_ID.get(object_name)
+                if object_id is not None and int(object_id) < num_object_classes:
+                    compat[int(object_id), int(action_idx)] = 1.0
+        if not compat.any():
+            raise ValueError("factorized head found no object/action compatibility map")
+
+        confusers_by_action = {}
+        for action_name, action_idx in action_to_index.items():
+            confusers = []
+            for confuser_name in toyota_confuser_action_names(
+                action_name,
+                task_type,
+                action_taxonomy,
+            ):
+                confuser_idx = action_to_index.get(confuser_name)
+                if confuser_idx is not None:
+                    confusers.append(int(confuser_idx))
+            if confusers:
+                confusers_by_action[int(action_idx)] = tuple(sorted(set(confusers)))
+
+        return FactorizedActionObjectSpec(
+            num_actions=num_actions,
+            num_object_classes=num_object_classes,
+            objectless_action_indices=tuple(sorted(set(objectless_indices))),
+            compat_matrix=compat,
+            confusers_by_action=confusers_by_action,
+        )
 
     def _freeze_backbone(self):
         print("Freezing backbone")
@@ -425,6 +572,9 @@ class POGUISE(pl.LightningModule):
                         param.requires_grad = False
                 if hasattr(self, "object_context_scale"):
                     self.object_context_scale.requires_grad = False
+                if self.factorized_interaction_action_head is not None:
+                    for param in self.factorized_interaction_action_head.parameters():
+                        param.requires_grad = False
         interaction_unfreeze_last_blocks = int(
             self.hparams.get("interaction_unfreeze_last_blocks", 0) or 0
         )
@@ -490,6 +640,9 @@ class POGUISE(pl.LightningModule):
                 if self.presence_head is not None:
                     for param in self.presence_head.parameters():
                         param.requires_grad = True
+                if self.factorized_interaction_action_head is not None:
+                    for param in self.factorized_interaction_action_head.parameters():
+                        param.requires_grad = True
                 if hasattr(self, "object_prompt_actor_query"):
                     for param in self.object_prompt_actor_query.parameters():
                         param.requires_grad = True
@@ -504,6 +657,9 @@ class POGUISE(pl.LightningModule):
                         param.requires_grad = True
                 if hasattr(self, "object_context_scale"):
                     self.object_context_scale.requires_grad = True
+                if self.factorized_interaction_action_head is not None:
+                    for param in self.factorized_interaction_action_head.parameters():
+                        param.requires_grad = True
     def _freeze_stages(self):
         if self.frozen_stages >= 0:
             self.patch_embed.eval()
@@ -585,10 +741,23 @@ class POGUISE(pl.LightningModule):
             self.last_actor_object_context_gate = None
             self.last_actor_object_context_scale = None
             self.last_actor_object_context_delta_norm = None
+            self.last_factorized_head_output = None
+            self.last_factorized_presence_logits = None
+            self.last_factorized_objectless_logp = None
+            self.last_factorized_objectful_scores = None
+            self.last_factorized_objectful_scores_full = None
+            self.last_factorized_objectful_logp = None
+            self.last_factorized_objectful_logp_full = None
+            self.last_factorized_prompt_delta = None
+            self.last_factorized_visual_delta = None
+            self.last_factorized_coverage = None
+            self.last_factorized_relation_scale = None
+            self.last_factorized_cache = None
             if self.hparams.ret_feat:
                 return x_actor
 
             action_scores = None
+            prompt_valid = None
             if (
                 self.actor_object_prompt_tokens_enabled
                 and x_object_prompt is not None
@@ -612,6 +781,78 @@ class POGUISE(pl.LightningModule):
                     self.last_actor_object_prompt_classes = prompt_classes
                 self.last_actor_object_prompt_tokens = x_object_prompt
                 self.last_actor_object_prompt_valid = prompt_valid
+
+            if self.factorized_interaction_action_head is not None:
+                if boxes is None or valid is None:
+                    raise ValueError("actor_object_factorized_head requires actor boxes")
+                if x_object_prompt is None or prompt_valid is None:
+                    raise RuntimeError(
+                        "actor_object_factorized_head requires runtime object prompt tokens"
+                    )
+                if object_classes is None or object_confs is None or object_valid is None:
+                    raise ValueError(
+                        "actor_object_factorized_head requires object_classes, "
+                        "object_confs, and object_valid"
+                    )
+                visual_sources = []
+                if x_heatmap_feat is not None:
+                    visual_sources.append(x_heatmap_feat.flatten(2).transpose(1, 2))
+                if x_visual_final is not None:
+                    visual_sources.append(x_visual_final)
+                visual_source_tokens = (
+                    torch.cat(visual_sources, dim=1)
+                    if len(visual_sources) > 0
+                    else None
+                )
+                head_output = self.factorized_interaction_action_head(
+                    actor_tokens=x_actor,
+                    actor_valid=valid,
+                    object_prompt_tokens=x_object_prompt,
+                    object_classes=object_classes,
+                    object_confs=object_confs,
+                    object_valid=object_valid,
+                    visual_source_tokens=visual_source_tokens,
+                )
+                action_scores = head_output["log_probs"]
+                self.last_factorized_head_output = head_output
+                self.last_factorized_presence_logits = head_output["presence_logits"]
+                self.last_factorized_objectless_logp = head_output["objectless_logp"]
+                self.last_factorized_objectful_scores = head_output[
+                    "objectful_scores"
+                ]
+                self.last_factorized_objectful_scores_full = head_output[
+                    "objectful_scores_full"
+                ]
+                self.last_factorized_objectful_logp = head_output["objectful_logp"]
+                self.last_factorized_objectful_logp_full = head_output[
+                    "objectful_logp_full"
+                ]
+                self.last_factorized_prompt_delta = head_output["prompt_delta"]
+                self.last_factorized_visual_delta = head_output["visual_delta"]
+                self.last_factorized_coverage = head_output["coverage"]
+                self.last_factorized_relation_scale = head_output["relation_scale"]
+                self.last_actor_motion_logits = head_output["motion_aux_logits"]
+                self.last_actor_object_prompt_attention_logits = head_output[
+                    "prompt_attention_logits"
+                ]
+                self.last_actor_object_prompt_attention = head_output[
+                    "prompt_attention"
+                ]
+                self.last_actor_object_prompt_valid = prompt_valid
+                self.last_factorized_cache = {
+                    "actor_tokens": x_actor,
+                    "actor_valid": valid,
+                    "object_prompt_tokens": x_object_prompt,
+                    "object_classes": object_classes,
+                    "object_confs": object_confs,
+                    "object_valid": object_valid,
+                    "visual_source_tokens": visual_source_tokens,
+                }
+            elif (
+                self.actor_object_prompt_tokens_enabled
+                and x_object_prompt is not None
+                and prompt_valid is not None
+            ):
                 action_scores = self._actor_logits_from_object_prompt_tokens(
                     x_actor,
                     x_object_prompt,
@@ -728,11 +969,56 @@ class POGUISE(pl.LightningModule):
         object_classes=None,
         object_valid=None,
     ):
+        if self.factorized_interaction_action_head is not None:
+            cache = getattr(self, "last_factorized_cache", None)
+            if cache is None:
+                raise RuntimeError(
+                    "No cached factorized prompt state; run forward before "
+                    "counterfactual logits"
+                )
+            prompt_tokens = cache["object_prompt_tokens"]
+            prompt_classes = cache["object_classes"]
+            if object_classes is not None:
+                base_classes = getattr(self, "last_actor_object_prompt_classes", None)
+                if base_classes is None:
+                    raise RuntimeError(
+                        "No cached object classes for counterfactual prompt logits"
+                    )
+                class_embed = getattr(self.net, "object_class_embed", None)
+                if class_embed is None:
+                    raise RuntimeError(
+                        "Cached object prompt logits require object_class_embed"
+                    )
+                none_id = int(self.hparams.get("num_object_classes", 19))
+                prompt_classes = object_classes.to(
+                    device=prompt_tokens.device,
+                    dtype=torch.long,
+                ).clamp(0, none_id)
+                class_delta = class_embed(prompt_classes) - class_embed(base_classes)
+                prompt_tokens = prompt_tokens + class_delta.to(dtype=prompt_tokens.dtype)
+            prompt_valid = (
+                cache["object_valid"]
+                if object_valid is None
+                else object_valid.to(device=prompt_tokens.device, dtype=torch.bool)
+            )
+            out = self.factorized_interaction_action_head(
+                actor_tokens=cache["actor_tokens"],
+                actor_valid=cache["actor_valid"],
+                object_prompt_tokens=prompt_tokens,
+                object_classes=prompt_classes,
+                object_confs=cache["object_confs"],
+                object_valid=prompt_valid,
+                visual_source_tokens=cache["visual_source_tokens"],
+            )
+            return out["log_probs"]
+
         actor_tokens = getattr(self, "last_actor_tokens", None)
         object_prompt_tokens = getattr(self, "last_actor_object_prompt_tokens", None)
         prompt_valid = getattr(self, "last_actor_object_prompt_valid", None)
         if actor_tokens is None:
             raise RuntimeError("No cached actor tokens; run forward before counterfactual logits")
+        if self.actor_head is None:
+            raise RuntimeError("Flat actor_head is unavailable in factorized mode")
         if object_prompt_tokens is None or prompt_valid is None:
             return self.actor_head(actor_tokens)
 
@@ -807,6 +1093,23 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--num_scene_object_tokens", type=int, default=32)
         parser.add_argument("--num_object_classes", type=int, default=19)
         parser.add_argument("--actor_object_prompt_tokens", type=int, default=0)
+        parser.add_argument("--actor_object_factorized_head", type=int, default=0)
+        parser.add_argument("--actor_object_factorized_hidden_dim", type=int, default=512)
+        parser.add_argument(
+            "--actor_object_factorized_relation_scale_init",
+            type=float,
+            default=-1.0,
+        )
+        parser.add_argument(
+            "--actor_object_factorized_relation_logit_bound",
+            type=float,
+            default=2.0,
+        )
+        parser.add_argument(
+            "--actor_object_factorized_max_relation_scale",
+            type=float,
+            default=1.5,
+        )
         parser.add_argument("--object_context_adapter", type=int, default=0)
         parser.add_argument("--object_context_scale_init", type=float, default=-2.0)
         parser.add_argument("--object_context_gate_bias", type=float, default=-1.0)

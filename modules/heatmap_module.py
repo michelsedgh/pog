@@ -73,7 +73,7 @@ class HeatmapModule(pl.LightningModule):
                 "scene_object_tokens was removed. Use actor_object_prompt_tokens=1 "
                 "for runtime object prompts."
             )
-        actor_object_factorized_head = bool(
+        self.actor_object_factorized_head = bool(
             hparams.get("actor_object_factorized_head", 0)
         )
         self.actor_object_prompt_tokens = bool(
@@ -86,10 +86,9 @@ class HeatmapModule(pl.LightningModule):
                 "actor_object_prompt_tokens. Set --actor_object_prompt_tokens 1 "
                 "and keep --actor_object_slot_head 0."
             )
-        if actor_object_factorized_head:
+        if self.actor_object_factorized_head and not self.actor_object_prompt_tokens:
             raise ValueError(
-                "actor_object_factorized_head was removed from the active runtime "
-                "path. Use actor_object_prompt_tokens=1 with the plain actor_head."
+                "actor_object_factorized_head requires actor_object_prompt_tokens"
             )
         self.uses_object_proposals = self.actor_object_prompt_tokens
         if self.actor_object_prompt_tokens and not self.actor_prompt:
@@ -146,6 +145,22 @@ class HeatmapModule(pl.LightningModule):
         )
         if self.motion_aux_loss_weight < 0:
             raise ValueError("motion_aux_loss_weight must be >= 0")
+        self.factorized_presence_loss_weight = float(
+            hparams.get(
+                "factorized_presence_loss_weight",
+                1.0 if self.actor_object_factorized_head else 0.0,
+            )
+        )
+        if self.factorized_presence_loss_weight < 0:
+            raise ValueError("factorized_presence_loss_weight must be >= 0")
+        self.factorized_objectful_within_loss_weight = float(
+            hparams.get(
+                "factorized_objectful_within_loss_weight",
+                0.5 if self.actor_object_factorized_head else 0.0,
+            )
+        )
+        if self.factorized_objectful_within_loss_weight < 0:
+            raise ValueError("factorized_objectful_within_loss_weight must be >= 0")
         self.objectless_object_action_suppression_loss_weight = float(
             hparams.get("objectless_object_action_suppression_loss_weight", 0.3)
         )
@@ -475,6 +490,13 @@ class HeatmapModule(pl.LightningModule):
             object_context_scale = getattr(self.model, "object_context_scale", None)
             if object_context_scale is not None:
                 params.append(object_context_scale)
+            factorized_head = getattr(
+                self.model,
+                "factorized_interaction_action_head",
+                None,
+            )
+            if factorized_head is not None:
+                params += list(factorized_head.parameters())
             for name, param in self.model.net.named_parameters():
                 if self._actor_prompt_param_name(name):
                     params.append(param)
@@ -2219,15 +2241,174 @@ class HeatmapModule(pl.LightningModule):
                 context_scale.to(device=device).float(),
                 count,
             )
-        self._log_scalar(
-            f"{stage}_actor_object_prompt_token_count",
-            torch.as_tensor(
-                float(prompt_valid.shape[-1]),
-                device=device,
+            self._log_scalar(
+                f"{stage}_actor_object_prompt_token_count",
+                torch.as_tensor(
+                    float(prompt_valid.shape[-1]),
+                    device=device,
                 dtype=torch.float32,
             ),
-            count,
+                count,
+            )
+
+    def _true_minus_confuser_margin(self, values, actions, mask):
+        if values is None or not mask.any():
+            return None
+        actions = actions.to(device=values.device, dtype=torch.long)
+        mask = mask.to(device=values.device, dtype=torch.bool)
+        margins = []
+        for batch_idx, actor_idx in torch.nonzero(mask, as_tuple=False).tolist():
+            action_idx = int(actions[batch_idx, actor_idx].item())
+            confusers = self.action_confuser_indices_by_index.get(action_idx)
+            if confusers is None or int(confusers.numel()) == 0:
+                continue
+            confusers = confusers.to(device=values.device, dtype=torch.long)
+            confusers = confusers[
+                (confusers >= 0) & (confusers < int(values.shape[-1]))
+            ]
+            if int(confusers.numel()) == 0:
+                continue
+            true_value = values[batch_idx, actor_idx, action_idx]
+            max_confuser = values[batch_idx, actor_idx, confusers].max()
+            margins.append(true_value - max_confuser)
+        if not margins:
+            return None
+        return torch.stack(margins)
+
+    def _gather_true_action_value(self, values, actions):
+        actions = actions.to(device=values.device, dtype=torch.long)
+        safe_actions = actions.clamp(0, int(values.shape[-1]) - 1)
+        return values.gather(-1, safe_actions.unsqueeze(-1)).squeeze(-1)
+
+    def _log_factorized_interaction_diagnostics(
+        self,
+        stage,
+        actions,
+        valid,
+        target,
+    ):
+        if stage == "train" or not self.actor_object_factorized_head:
+            return
+        coverage = getattr(self.model, "last_factorized_coverage", None)
+        prompt_delta = getattr(self.model, "last_factorized_prompt_delta", None)
+        visual_delta = getattr(self.model, "last_factorized_visual_delta", None)
+        objectful_scores = getattr(
+            self.model,
+            "last_factorized_objectful_scores_full",
+            None,
         )
+        if coverage is None or prompt_delta is None or visual_delta is None:
+            return
+
+        device = coverage.device
+        info = self._exact_teacher_object_info(actions, valid, target, device)
+        if info is None:
+            return
+        actions = actions.to(device=device, dtype=torch.long)
+        valid = valid.to(device=device, dtype=torch.bool)
+        known_objectful = info["valid"] & info["known_action"]
+        exact_compatible = known_objectful & info["compatible_1based"]
+        missing_compatible = known_objectful & ~info["any_compatible"]
+
+        relation_scale = getattr(self.model, "last_factorized_relation_scale", None)
+        if relation_scale is not None and known_objectful.any():
+            self._log_scalar(
+                f"{stage}_factorized_relation_scale",
+                relation_scale.to(device=device).float(),
+                int(known_objectful.sum().item()),
+            )
+
+        coverage = coverage.float()
+        prompt_delta = prompt_delta.float()
+        visual_delta = visual_delta.float()
+        detected_path = coverage.clamp(1.0e-4, 1.0 - 1.0e-4).log() + prompt_delta
+        missing_path = torch.log1p(
+            -coverage.clamp(1.0e-4, 1.0 - 1.0e-4)
+        ) + visual_delta
+        mix = torch.softmax(
+            torch.stack([detected_path, missing_path], dim=-1),
+            dim=-1,
+        )
+        detected_mix_true = self._gather_true_action_value(mix[..., 0], actions)
+        visual_mix_true = self._gather_true_action_value(mix[..., 1], actions)
+        coverage_true = self._gather_true_action_value(coverage, actions)
+
+        if exact_compatible.any():
+            count = int(exact_compatible.sum().item())
+            self._log_scalar(
+                f"{stage}_factorized_coverage_true_exact",
+                coverage_true[exact_compatible].mean(),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_factorized_detected_mix_true_exact",
+                detected_mix_true[exact_compatible].mean(),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_factorized_visual_mix_true_exact",
+                visual_mix_true[exact_compatible].mean(),
+                count,
+            )
+            prompt_margin = self._true_minus_confuser_margin(
+                prompt_delta,
+                actions,
+                exact_compatible,
+            )
+            if prompt_margin is not None:
+                self._log_scalar(
+                    f"{stage}_factorized_prompt_delta_true_minus_confuser_exact",
+                    prompt_margin.mean(),
+                    int(prompt_margin.numel()),
+                )
+            if objectful_scores is not None:
+                objectful_margin = self._true_minus_confuser_margin(
+                    objectful_scores.float(),
+                    actions,
+                    exact_compatible,
+                )
+                if objectful_margin is not None:
+                    self._log_scalar(
+                        f"{stage}_factorized_objectful_true_minus_confuser_exact",
+                        objectful_margin.mean(),
+                        int(objectful_margin.numel()),
+                    )
+
+        if missing_compatible.any():
+            count = int(missing_compatible.sum().item())
+            self._log_scalar(
+                f"{stage}_factorized_detected_mix_true_missing",
+                detected_mix_true[missing_compatible].mean(),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_factorized_visual_mix_true_missing",
+                visual_mix_true[missing_compatible].mean(),
+                count,
+            )
+            visual_margin = self._true_minus_confuser_margin(
+                visual_delta,
+                actions,
+                missing_compatible,
+            )
+            if visual_margin is not None:
+                self._log_scalar(
+                    f"{stage}_factorized_visual_delta_true_minus_confuser_missing",
+                    visual_margin.mean(),
+                    int(visual_margin.numel()),
+                )
+            if objectful_scores is not None:
+                objectful_margin = self._true_minus_confuser_margin(
+                    objectful_scores.float(),
+                    actions,
+                    missing_compatible,
+                )
+                if objectful_margin is not None:
+                    self._log_scalar(
+                        f"{stage}_factorized_objectful_true_minus_confuser_missing",
+                        objectful_margin.mean(),
+                        int(objectful_margin.numel()),
+                    )
 
     def _motion_aux_loss(self, stage, actions, valid):
         if self.motion_aux_loss_weight <= 0:
@@ -2255,6 +2436,121 @@ class HeatmapModule(pl.LightningModule):
             (pred_labels == actions[valid]).float().mean(),
             int(valid.sum().item()),
         )
+        return loss
+
+    def _factorized_presence_loss(self, stage, actions, valid):
+        if (
+            not self.actor_object_factorized_head
+            or self.factorized_presence_loss_weight <= 0
+        ):
+            return None
+        presence_logits = getattr(self.model, "last_factorized_presence_logits", None)
+        if presence_logits is None:
+            return None
+        valid = valid.to(device=presence_logits.device, dtype=torch.bool)
+        actions = actions.to(device=presence_logits.device, dtype=torch.long)
+        mask = valid & (actions >= 0) & (actions < int(self.num_classes))
+        if not mask.any():
+            return None
+        objectless = self._labels_in_indices(actions, self.objectless_action_indices)
+        target = (~objectless).long()
+        loss = F.cross_entropy(presence_logits[mask].float(), target[mask])
+        self.log(
+            f"{stage}_loss_factorized_presence",
+            loss,
+            on_step=stage == "train",
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+        )
+        pred = presence_logits.argmax(dim=-1)
+        self._log_scalar(
+            f"{stage}_factorized_presence_acc",
+            (pred[mask] == target[mask]).float().mean(),
+            int(mask.sum().item()),
+        )
+        objectless_mask = mask & objectless
+        if objectless_mask.any():
+            self._log_scalar(
+                f"{stage}_factorized_presence_objectless_null_rate",
+                (pred[objectless_mask] == 0).float().mean(),
+                int(objectless_mask.sum().item()),
+            )
+        objectful_mask = mask & ~objectless
+        if objectful_mask.any():
+            self._log_scalar(
+                f"{stage}_factorized_presence_objectful_interaction_rate",
+                (pred[objectful_mask] == 1).float().mean(),
+                int(objectful_mask.sum().item()),
+            )
+        return loss
+
+    def _factorized_objectful_within_loss(self, stage, actions, valid):
+        if (
+            not self.actor_object_factorized_head
+            or self.factorized_objectful_within_loss_weight <= 0
+        ):
+            return None
+        scores = getattr(self.model, "last_factorized_objectful_scores", None)
+        head = getattr(self.model, "factorized_interaction_action_head", None)
+        if scores is None or head is None:
+            return None
+        objectful_index = head.objectful_index.to(device=scores.device, dtype=torch.long)
+        valid = valid.to(device=scores.device, dtype=torch.bool)
+        actions = actions.to(device=scores.device, dtype=torch.long)
+        target = torch.full_like(actions, -100)
+        for branch_idx, action_idx in enumerate(objectful_index.tolist()):
+            target = torch.where(
+                actions == int(action_idx),
+                torch.full_like(target, int(branch_idx)),
+                target,
+            )
+        mask = valid & (target >= 0)
+        if not mask.any():
+            return None
+        loss = F.cross_entropy(scores[mask].float(), target[mask])
+        self.log(
+            f"{stage}_loss_factorized_objectful_within",
+            loss,
+            on_step=stage == "train",
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+        )
+        pred = scores.argmax(dim=-1)
+        self._log_scalar(
+            f"{stage}_objectful_branch_acc",
+            (pred[mask] == target[mask]).float().mean(),
+            int(mask.sum().item()),
+        )
+        objectless_logp = getattr(self.model, "last_factorized_objectless_logp", None)
+        if objectless_logp is not None and int(self.objectless_action_indices.numel()) > 0:
+            objectless_index = self.objectless_action_indices.to(
+                device=objectless_logp.device,
+                dtype=torch.long,
+            )
+            objectless_target = torch.full_like(actions, -100)
+            for branch_idx, action_idx in enumerate(objectless_index.tolist()):
+                objectless_target = torch.where(
+                    actions == int(action_idx),
+                    torch.full_like(objectless_target, int(branch_idx)),
+                    objectless_target,
+                )
+            objectless_mask = valid & (objectless_target >= 0)
+            if objectless_mask.any():
+                objectless_pred = objectless_logp.argmax(dim=-1)
+                self._log_scalar(
+                    f"{stage}_objectless_branch_acc",
+                    (
+                        objectless_pred[objectless_mask]
+                        == objectless_target[objectless_mask]
+                    )
+                    .float()
+                    .mean(),
+                    int(objectless_mask.sum().item()),
+                )
         return loss
 
     def _append_nash_mtl_params(self, params):
@@ -2501,6 +2797,28 @@ class HeatmapModule(pl.LightningModule):
                 logger=True,
                 sync_dist=True,
             )
+        loss_factorized_presence = self._factorized_presence_loss(
+            stage,
+            actions,
+            valid,
+        )
+        if loss_factorized_presence is not None:
+            loss_main_task = (
+                loss_main_task
+                + loss_factorized_presence * self.factorized_presence_loss_weight
+            )
+
+        loss_objectful_within = self._factorized_objectful_within_loss(
+            stage,
+            actions,
+            valid,
+        )
+        if loss_objectful_within is not None:
+            loss_main_task = (
+                loss_main_task
+                + loss_objectful_within
+                * self.factorized_objectful_within_loss_weight
+            )
         loss_hard_objectless = self._objectless_object_action_suppression_loss(
             stage,
             preds,
@@ -2547,6 +2865,12 @@ class HeatmapModule(pl.LightningModule):
             loss_main_task = loss_main_task + loss_object_prompt_action_coupling
 
         self._log_actor_object_prompt_diagnostics(
+            stage,
+            actions,
+            valid,
+            target,
+        )
+        self._log_factorized_interaction_diagnostics(
             stage,
             actions,
             valid,
@@ -3027,6 +3351,14 @@ class HeatmapModule(pl.LightningModule):
         return (labels.unsqueeze(-1) == indices).any(dim=-1)
 
     def _action_loss(self, scores, labels, loss_fn, valid=None):
+        if self.actor_object_factorized_head:
+            labels = labels.to(device=scores.device, dtype=torch.long)
+            if valid is not None:
+                valid = valid.to(device=scores.device, dtype=torch.bool)
+                if not valid.any():
+                    return scores.sum() * 0.0
+                return F.nll_loss(scores[valid].float(), labels[valid])
+            return F.nll_loss(scores.float(), labels)
         if valid is not None:
             valid = valid.to(device=scores.device, dtype=torch.bool)
             if not valid.any():

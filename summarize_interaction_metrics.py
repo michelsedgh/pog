@@ -38,6 +38,23 @@ CORE_COLUMNS = [
     "val_loss_interaction_heatmap_center",
     "val_loss_main_deploy",
     "val_loss_grounding_aux",
+    "val_loss_factorized_presence",
+    "val_factorized_presence_acc",
+    "val_factorized_presence_objectless_null_rate",
+    "val_factorized_presence_objectful_interaction_rate",
+    "val_loss_factorized_objectful_within",
+    "val_objectless_branch_acc",
+    "val_objectful_branch_acc",
+    "val_factorized_relation_scale",
+    "val_factorized_coverage_true_exact",
+    "val_factorized_detected_mix_true_exact",
+    "val_factorized_visual_mix_true_exact",
+    "val_factorized_detected_mix_true_missing",
+    "val_factorized_visual_mix_true_missing",
+    "val_factorized_prompt_delta_true_minus_confuser_exact",
+    "val_factorized_visual_delta_true_minus_confuser_missing",
+    "val_factorized_objectful_true_minus_confuser_exact",
+    "val_factorized_objectful_true_minus_confuser_missing",
     "val_loss_objectless_object_action_suppression",
     "val_loss_object_prompt_grounding",
     "val_object_prompt_grounding_acc",
@@ -305,6 +322,17 @@ def print_compact_epoch_summary(epoch_df):
         "val_group_phone_tv_acc",
         "val_group_drink_cup_bottle_glass_acc",
         "val_group_drink_acc",
+        "val_factorized_presence_acc",
+        "val_factorized_presence_objectless_null_rate",
+        "val_factorized_presence_objectful_interaction_rate",
+        "val_objectless_branch_acc",
+        "val_objectful_branch_acc",
+        "val_factorized_detected_mix_true_exact",
+        "val_factorized_visual_mix_true_exact",
+        "val_factorized_detected_mix_true_missing",
+        "val_factorized_visual_mix_true_missing",
+        "val_factorized_objectful_true_minus_confuser_exact",
+        "val_factorized_objectful_true_minus_confuser_missing",
         "val_object_counterfactual_teacher_logit_drop",
         "val_object_prompt_grounding_acc",
         "val_object_prompt_grounding_true_prob",
@@ -364,6 +392,21 @@ def print_compact_best(epoch_df):
         "val_group_objectless_acc",
         "val_group_laptop_book_tv_acc",
         "val_group_phone_tv_acc",
+        "val_factorized_presence_acc",
+        "val_factorized_presence_objectless_null_rate",
+        "val_factorized_presence_objectful_interaction_rate",
+        "val_objectless_branch_acc",
+        "val_objectful_branch_acc",
+        "val_factorized_relation_scale",
+        "val_factorized_coverage_true_exact",
+        "val_factorized_detected_mix_true_exact",
+        "val_factorized_visual_mix_true_exact",
+        "val_factorized_detected_mix_true_missing",
+        "val_factorized_visual_mix_true_missing",
+        "val_factorized_prompt_delta_true_minus_confuser_exact",
+        "val_factorized_visual_delta_true_minus_confuser_missing",
+        "val_factorized_objectful_true_minus_confuser_exact",
+        "val_factorized_objectful_true_minus_confuser_missing",
         "val_object_counterfactual_teacher_logit_drop",
         "val_object_prompt_grounding_acc",
         "val_object_prompt_grounding_true_prob",
@@ -691,6 +734,54 @@ def print_decision(epoch_df):
     deploy_key_min = metric(latest, "val_deploy_key_action_min")
     object_mapped_acc = metric(latest, "val_group_object_mapped_acc")
     objectless_acc = metric(latest, "val_group_objectless_acc")
+    factorized_presence_acc = metric(latest, "val_factorized_presence_acc")
+    factorized_objectless_null = metric(
+        latest,
+        "val_factorized_presence_objectless_null_rate",
+    )
+    factorized_objectful_interaction = metric(
+        latest,
+        "val_factorized_presence_objectful_interaction_rate",
+    )
+    objectless_branch_acc = metric(latest, "val_objectless_branch_acc")
+    objectful_branch_acc = metric(latest, "val_objectful_branch_acc")
+    factorized_relation_scale = metric(latest, "val_factorized_relation_scale")
+    factorized_coverage_exact = metric(
+        latest,
+        "val_factorized_coverage_true_exact",
+    )
+    factorized_detected_mix_exact = metric(
+        latest,
+        "val_factorized_detected_mix_true_exact",
+    )
+    factorized_visual_mix_exact = metric(
+        latest,
+        "val_factorized_visual_mix_true_exact",
+    )
+    factorized_detected_mix_missing = metric(
+        latest,
+        "val_factorized_detected_mix_true_missing",
+    )
+    factorized_visual_mix_missing = metric(
+        latest,
+        "val_factorized_visual_mix_true_missing",
+    )
+    factorized_prompt_margin_exact = metric(
+        latest,
+        "val_factorized_prompt_delta_true_minus_confuser_exact",
+    )
+    factorized_visual_margin_missing = metric(
+        latest,
+        "val_factorized_visual_delta_true_minus_confuser_missing",
+    )
+    factorized_objectful_margin_exact = metric(
+        latest,
+        "val_factorized_objectful_true_minus_confuser_exact",
+    )
+    factorized_objectful_margin_missing = metric(
+        latest,
+        "val_factorized_objectful_true_minus_confuser_missing",
+    )
 
     pos = metric(latest, "val_interaction_heatmap_positive_mean")
     pred_max = metric(latest, "val_interaction_heatmap_pred_max")
@@ -890,6 +981,32 @@ def print_decision(epoch_df):
             "action groups: "
             f"object_mapped {fmt(object_mapped_acc)}, "
             f"objectless {fmt(objectless_acc)}"
+        )
+    if pd.notna(factorized_presence_acc):
+        print(
+            "factorized mode: "
+            f"presence_acc {fmt(factorized_presence_acc)}, "
+            f"objectless_null {fmt(factorized_objectless_null)}, "
+            f"objectful_interaction {fmt(factorized_objectful_interaction)}, "
+            f"objectless_branch {fmt(objectless_branch_acc)}, "
+            f"objectful_branch {fmt(objectful_branch_acc)}"
+        )
+    if (
+        pd.notna(factorized_detected_mix_exact)
+        or pd.notna(factorized_visual_mix_missing)
+    ):
+        print(
+            "factorized evidence: "
+            f"scale {fmt(factorized_relation_scale)}, "
+            f"coverage_exact {fmt(factorized_coverage_exact)}, "
+            f"detected_exact {fmt(factorized_detected_mix_exact)}, "
+            f"visual_exact {fmt(factorized_visual_mix_exact)}, "
+            f"detected_missing {fmt(factorized_detected_mix_missing)}, "
+            f"visual_missing {fmt(factorized_visual_mix_missing)}, "
+            f"prompt_margin_exact {fmt(factorized_prompt_margin_exact)}, "
+            f"visual_margin_missing {fmt(factorized_visual_margin_missing)}, "
+            f"objectful_margin_exact {fmt(factorized_objectful_margin_exact)}, "
+            f"objectful_margin_missing {fmt(factorized_objectful_margin_missing)}"
         )
     if pd.notna(prompt_acc) or pd.notna(prompt_loss):
         print(
@@ -1229,15 +1346,14 @@ def main():
     print_decision(epoch_df)
 
     print("\nREAD THIS:")
-    print("- Main proof: val_f1/per-action accuracy stay healthy while object prompts and heatmaps improve.")
-    print("- Runtime detections should guide actor/visual representation, not add direct action logits.")
-    print("- Exact compatible detections should raise object-prompt grounding and object-context adapter use.")
-    print("- Prompt grounding alone is not enough; watch correct-vs-wrong and ambiguous dropped-prompt margins.")
-    print("- Teacher-object removal is supporting evidence, but ambiguous prompt sensitivity is the causal target.")
-    print("- Guardrail: val_f1/per-action target accuracy should not collapse while object-use metrics rise.")
-    print("- Objectless distractor-prompt object-action rate must stay low.")
+    print("- Main proof: val_f1/per-action accuracy stay healthy while object prompts, heatmaps, and factorized branch metrics improve.")
+    print("- Runtime detections should affect only the factorized objectful branch, not mutate objectless actor-token decisions.")
+    print("- Exact compatible detections should raise prompt grounding and detected-mix weight for the true action.")
+    print("- Missing compatible detections should raise visual-mix weight and true-vs-confuser margins inside the objectful branch.")
+    print("- Presence NULL/objectful rates tell you whether failures are mode arbitration or within-branch classification.")
+    print("- Objectless hard-negative accuracy and object-action pred rate remain the main objectless protection checks.")
     print("- Heatmap/object-channel metrics are secondary; use --verbose when debugging teacher quality.")
-    print("- actor_object_prompt_tokens is the clean runtime object path.")
+    print("- actor_object_prompt_tokens + actor_object_factorized_head is the clean runtime object path.")
 
 
 if __name__ == "__main__":

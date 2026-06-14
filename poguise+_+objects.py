@@ -398,7 +398,7 @@ def run_training_with_epoch_summaries(cmd, run_name, epoch_dir, poll_secs=20):
     return str(run_dir)
 
 TS = datetime.now().strftime("%Y%m%d_%H%M%S")
-RUN_NAME = f"actor_object_context_prompt_conservative_epoch15_{TS}"
+RUN_NAME = f"actor_object_prompt_factorized_epoch15_{TS}"
 EPOCH_DIR = str(Path(DATA_DIR) / "checkpoints" / RUN_NAME / "epoch_checkpoints")
 
 cmd = [
@@ -431,11 +431,13 @@ cmd = [
 
     "--actor_interaction_heatmaps", "1",
 
-    # Runtime detections are transformer prompt tokens, not action-logit experts.
+    # Runtime detections are transformer prompt tokens; final action scoring is factorized.
     "--actor_object_prompt_tokens", "1",
-    "--object_context_adapter", "1",
-    "--object_context_scale_init", "-3.0",
-    "--object_context_gate_bias", "-2.0",
+    "--actor_object_factorized_head", "1",
+    "--object_context_adapter", "0",
+    "--actor_object_factorized_relation_scale_init", "-1.0",
+    "--actor_object_factorized_relation_logit_bound", "2.0",
+    "--actor_object_factorized_max_relation_scale", "1.5",
     "--actor_object_prompt_box_prior_weight", "0.05",
     "--actor_object_prompt_box_prior_expand", "1.25",
     "--num_scene_object_tokens", "32",
@@ -495,13 +497,15 @@ cmd = [
     "--poguiseplus_interaction_heatmap_center_temperature", "10.0",
 
     "--motion_aux_loss_weight", "0.35",
+    "--factorized_presence_loss_weight", "1.0",
+    "--factorized_objectful_within_loss_weight", "0.5",
     "--object_prompt_grounding_loss_weight", "0.30",
     "--object_prompt_wrong_class_loss_weight", "0.10",
     "--object_prompt_wrong_class_margin", "0.20",
     "--object_prompt_sensitivity_loss_weight", "0.05",
     "--object_prompt_sensitivity_margin", "0.20",
     "--object_prompt_sensitivity_motion_margin_threshold", "1.0",
-    "--objectless_prompt_consistency_loss_weight", "0.50",
+    "--objectless_prompt_consistency_loss_weight", "0.0",
     "--objectless_object_action_suppression_loss_weight", "0.60",
     "--object_class_dropout_prob", "0.0",
     "--object_class_wrong_prob", "0.0",
