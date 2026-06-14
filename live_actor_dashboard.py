@@ -22,12 +22,24 @@ TRAINING_SPAN_FRAMES = 128
 MODEL_INPUT_SIZE = 224
 MODEL_SHORT_SIDE = 256
 DETECTION_EVERY_FRAME = 1
-ACTION_EVERY_FRAME = 1
-ACTION_SMOOTHING_WINDOW = 1
+DEFAULT_ACTION_EVERY_FRAMES = 8
+DEFAULT_ACTION_SMOOTHING_WINDOW = 5
+DEFAULT_ACTION_SWITCH_MARGIN = 0.08
+DEFAULT_ACTION_STATE_ALPHA = 0.75
+DEFAULT_ACTION_STATE_PERSISTENCE_BONUS = 0.6
 MIN_OBJECT_TRACK_SAMPLE_COUNT = 2
 
 
 ACTION_CLASSES = toyota_action_names("CS", "toyota_31")
+STATE_ACTION_OBJECTS = {
+    "Uselaptop": {"laptop", "keyboard_mouse"},
+    "Readbook": {"book"},
+    "Usetelephone": {"phone"},
+    "Usetablet": {"phone", "laptop"},
+    "WatchTV": {"tv_monitor", "remote"},
+    "Eat.Attable": {"dining_table", "food_snack", "bowl", "utensil"},
+    "Eat_Attable": {"dining_table", "food_snack", "bowl", "utensil"},
+}
 
 
 def parse_args():
@@ -46,6 +58,12 @@ def parse_args():
         default=None,
         help="Optional TensorRT actor engine. If set, checkpoint is used only for metadata/comparison.",
     )
+    parser.add_argument(
+        "--actor-dtype",
+        choices=("fp32", "fp16"),
+        default="fp32",
+        help="PyTorch actor dtype. Ignored when --actor-engine is set.",
+    )
     parser.add_argument("--camera", type=str, default="0")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=7860)
@@ -53,9 +71,46 @@ def parse_args():
     parser.add_argument("--det-threshold", type=float, default=0.35)
     parser.add_argument("--object-threshold", type=float, default=0.25)
     parser.add_argument("--person-class-id", type=int, default=None)
+    parser.add_argument("--person-nms-iou-threshold", type=float, default=0.65)
     parser.add_argument("--track-iou-threshold", type=float, default=0.30)
     parser.add_argument("--track-hold-frames", type=int, default=10)
     parser.add_argument("--camera-buffer-size", type=int, default=1)
+    parser.add_argument(
+        "--action-every-frames",
+        type=int,
+        default=DEFAULT_ACTION_EVERY_FRAMES,
+        help=(
+            "Run the actor model every N camera frames after the 128-frame "
+            "clip buffer is ready. This stabilizes highly overlapping live windows."
+        ),
+    )
+    parser.add_argument(
+        "--action-smoothing-window",
+        type=int,
+        default=DEFAULT_ACTION_SMOOTHING_WINDOW,
+        help="Number of per-track actor predictions to average before display.",
+    )
+    parser.add_argument(
+        "--action-switch-margin",
+        type=float,
+        default=DEFAULT_ACTION_SWITCH_MARGIN,
+        help=(
+            "Smoothed probability margin required before a tracked actor label "
+            "switches to a different action."
+        ),
+    )
+    parser.add_argument(
+        "--action-state-alpha",
+        type=float,
+        default=DEFAULT_ACTION_STATE_ALPHA,
+        help="Exponential action-state carryover. Set 0 to disable state smoothing.",
+    )
+    parser.add_argument(
+        "--action-state-persistence-bonus",
+        type=float,
+        default=DEFAULT_ACTION_STATE_PERSISTENCE_BONUS,
+        help="Bonus for the previous state when its expected object remains visible.",
+    )
     parser.add_argument("--jpeg-quality", type=int, default=80)
     parser.add_argument(
         "--crop-mode",
@@ -79,18 +134,88 @@ def parse_args():
         raise ValueError("--detector-engine is required for live inference.")
     if args.track_hold_frames < 0:
         raise ValueError("--track-hold-frames must be >= 0")
+    if args.action_every_frames <= 0:
+        raise ValueError("--action-every-frames must be positive")
+    if args.action_smoothing_window <= 0:
+        raise ValueError("--action-smoothing-window must be positive")
+    if args.action_switch_margin < 0:
+        raise ValueError("--action-switch-margin must be >= 0")
+    if not 0.0 <= args.action_state_alpha < 1.0:
+        raise ValueError("--action-state-alpha must be in [0, 1)")
+    if args.action_state_persistence_bonus < 0:
+        raise ValueError("--action-state-persistence-bonus must be >= 0")
     if not 0.0 <= args.track_iou_threshold <= 1.0:
         raise ValueError("--track-iou-threshold must be in [0, 1]")
     if not 0.0 <= args.det_threshold <= 1.0:
         raise ValueError("--det-threshold must be in [0, 1]")
     if not 0.0 <= args.object_threshold <= 1.0:
         raise ValueError("--object-threshold must be in [0, 1]")
+    if not 0.0 <= args.person_nms_iou_threshold <= 1.0:
+        raise ValueError("--person-nms-iou-threshold must be in [0, 1]")
     return args
 
 
 def configure_action_classes(args):
     global ACTION_CLASSES
     ACTION_CLASSES = toyota_action_names(args.task_type, args.toyota_action_taxonomy)
+
+
+def expected_object_ids_for_action(action_label):
+    object_names = STATE_ACTION_OBJECTS.get(str(action_label), set())
+    return {
+        int(OBJECT_TO_ID[object_name])
+        for object_name in object_names
+        if object_name in OBJECT_TO_ID
+    }
+
+
+def softmax_numpy(logits):
+    logits = np.asarray(logits, dtype=np.float32)
+    logits = logits - float(np.max(logits))
+    exp = np.exp(logits)
+    denom = float(exp.sum())
+    if denom <= 0.0:
+        return np.full_like(exp, 1.0 / max(exp.size, 1))
+    return exp / denom
+
+
+def object_class_ids_near_actor_box(actor_box_norm, packed_objects):
+    actor_box = np.asarray(actor_box_norm, dtype=np.float32)
+    if actor_box.shape != (4,):
+        return set()
+    x1, y1, x2, y2 = [float(value) for value in actor_box]
+    width = max(x2 - x1, 1.0e-6)
+    height = max(y2 - y1, 1.0e-6)
+    pad_x = max(0.08, width * 0.35)
+    pad_y = max(0.08, height * 0.35)
+    expanded = np.asarray(
+        [
+            max(0.0, x1 - pad_x),
+            max(0.0, y1 - pad_y),
+            min(1.0, x2 + pad_x),
+            min(1.0, y2 + pad_y),
+        ],
+        dtype=np.float32,
+    )
+    object_ids = set()
+    for item in packed_objects:
+        object_box = item.get("box_norm")
+        if object_box is None:
+            continue
+        object_box = np.asarray(object_box, dtype=np.float32)
+        if object_box.shape != (4,):
+            continue
+        center_x = float((object_box[0] + object_box[2]) * 0.5)
+        center_y = float((object_box[1] + object_box[3]) * 0.5)
+        center_inside = (
+            float(expanded[0]) <= center_x <= float(expanded[2])
+            and float(expanded[1]) <= center_y <= float(expanded[3])
+        )
+        overlaps = bbox_iou_xyxy(expanded, object_box) > 0.0
+        if center_inside or overlaps:
+            object_ids.add(int(item.get("object_class_id", -1)))
+    object_ids.discard(-1)
+    return object_ids
 
 
 def required_clip_buffer():
@@ -274,6 +399,28 @@ def detector_class_to_object_id(detector, class_id):
     return OBJECT_TO_ID.get(object_name)
 
 
+def nms_xyxy(boxes_xyxy, scores, iou_threshold):
+    boxes = np.asarray(boxes_xyxy, dtype=np.float32)
+    scores = np.asarray(scores, dtype=np.float32)
+    if len(boxes) == 0:
+        return np.zeros((0,), dtype=np.int64)
+    order = np.argsort(-scores)
+    keep = []
+    while len(order) > 0:
+        current = int(order[0])
+        keep.append(current)
+        if len(order) == 1:
+            break
+        rest = order[1:]
+        rest_keep = [
+            int(index)
+            for index in rest
+            if bbox_iou_xyxy(boxes[current], boxes[int(index)]) <= float(iou_threshold)
+        ]
+        order = np.asarray(rest_keep, dtype=np.int64)
+    return np.asarray(keep, dtype=np.int64)
+
+
 def detections_to_people_and_objects(
     detector,
     person_ids,
@@ -282,6 +429,7 @@ def detections_to_people_and_objects(
     object_threshold,
     max_actors,
     max_objects,
+    person_nms_iou_threshold=0.65,
 ):
     threshold = min(float(person_threshold), float(object_threshold))
     detections = detector.predict(Image.fromarray(frame_rgb), threshold=threshold)
@@ -303,6 +451,13 @@ def detections_to_people_and_objects(
     people_xyxy = xyxy[person_keep]
     people_conf = confidence[person_keep]
     if len(people_xyxy) > 0:
+        nms_keep = nms_xyxy(
+            people_xyxy,
+            people_conf,
+            person_nms_iou_threshold,
+        )
+        people_xyxy = people_xyxy[nms_keep]
+        people_conf = people_conf[nms_keep]
         order = np.argsort(-people_conf)[:max_actors]
         people_xyxy = people_xyxy[order]
         people_conf = people_conf[order]
@@ -515,35 +670,95 @@ def bbox_iou_xyxy(box_a, box_b):
 
 
 class ActionTrack:
-    def __init__(self, track_id, bbox_xyxy, frame_index):
+    def __init__(
+        self,
+        track_id,
+        bbox_xyxy,
+        frame_index,
+        smoothing_window,
+        switch_margin,
+        state_alpha,
+        state_persistence_bonus,
+    ):
         self.track_id = int(track_id)
         self.bbox_xyxy = np.asarray(bbox_xyxy, dtype=np.float32)
         self.last_seen = int(frame_index)
-        self.action_probs = deque(maxlen=ACTION_SMOOTHING_WINDOW)
-        self.presence_probs = deque(maxlen=ACTION_SMOOTHING_WINDOW)
+        self.action_probs = deque(maxlen=int(smoothing_window))
+        self.presence_probs = deque(maxlen=int(smoothing_window))
+        self.switch_margin = float(switch_margin)
+        self.state_alpha = float(state_alpha)
+        self.state_persistence_bonus = float(state_persistence_bonus)
+        self.stable_action_id = None
+        self.state_logits = None
+        self.state_probs = None
+        self.state_object_bonus_applied = False
         self.latest_extra_payload = {}
 
     def update_detection(self, bbox_xyxy, frame_index):
         self.bbox_xyxy = np.asarray(bbox_xyxy, dtype=np.float32)
         self.last_seen = int(frame_index)
 
-    def update_action(self, probs, presence, extra_payload=None):
-        self.action_probs.append(np.asarray(probs, dtype=np.float32).copy())
+    def update_action(self, probs, presence, extra_payload=None, object_class_ids=None):
+        probs = np.asarray(probs, dtype=np.float32).copy()
+        self.action_probs.append(probs)
         self.presence_probs.append(float(presence))
         if extra_payload is not None:
             self.latest_extra_payload = dict(extra_payload)
+        self._update_action_state(probs, object_class_ids or set())
+
+    def _update_action_state(self, probs, object_class_ids):
+        if self.state_alpha <= 0.0:
+            self.state_probs = None
+            self.state_logits = None
+            self.state_object_bonus_applied = False
+            return
+        logits = np.log(np.clip(probs, 1.0e-6, 1.0)).astype(np.float32)
+        if self.state_logits is not None:
+            logits = logits + self.state_alpha * self.state_logits
+        self.state_object_bonus_applied = False
+        if self.stable_action_id is not None:
+            action_label = ACTION_CLASSES[int(self.stable_action_id)]
+            expected_ids = expected_object_ids_for_action(action_label)
+            if expected_ids and expected_ids.intersection(set(object_class_ids)):
+                logits[int(self.stable_action_id)] += self.state_persistence_bonus
+                self.state_object_bonus_applied = True
+        logits = logits - float(np.max(logits))
+        self.state_logits = logits
+        self.state_probs = softmax_numpy(logits)
 
     def action_payload(self):
         if not self.action_probs:
             return {}
-        probs = np.mean(np.stack(tuple(self.action_probs), axis=0), axis=0)
-        action_id = int(probs.argmax())
+        raw_smoothed_probs = np.mean(np.stack(tuple(self.action_probs), axis=0), axis=0)
+        probs = (
+            self.state_probs
+            if self.state_probs is not None
+            else raw_smoothed_probs
+        )
+        top_action_id = int(probs.argmax())
+        if self.stable_action_id is None:
+            self.stable_action_id = top_action_id
+        elif top_action_id != self.stable_action_id:
+            top_prob = float(probs[top_action_id])
+            stable_prob = float(probs[self.stable_action_id])
+            if top_prob >= stable_prob + self.switch_margin:
+                self.stable_action_id = top_action_id
+        action_id = int(self.stable_action_id)
         payload = {
             "track_id": self.track_id,
             "label": ACTION_CLASSES[action_id],
             "action_conf": float(probs[action_id]),
             "smooth_count": len(self.action_probs),
+            "action_switch_margin": self.switch_margin,
         }
+        if self.state_probs is not None:
+            payload["state_smoothed"] = True
+            payload["action_state_alpha"] = self.state_alpha
+            payload["action_state_persistence_bonus"] = self.state_persistence_bonus
+            payload["state_object_bonus_applied"] = bool(
+                self.state_object_bonus_applied
+            )
+            payload["raw_smooth_action_conf"] = float(raw_smoothed_probs[action_id])
         if self.presence_probs:
             payload["presence"] = float(np.mean(self.presence_probs))
         payload.update(self.latest_extra_payload)
@@ -551,18 +766,25 @@ class ActionTrack:
 
 
 class TorchActorBackend:
-    def __init__(self, checkpoint_path):
+    def __init__(self, checkpoint_path, actor_dtype="fp32"):
         from utils.actor_model import load_actor_model
 
         if not torch.cuda.is_available():
             raise RuntimeError("Live actor inference requires CUDA.")
         self.device = torch.device("cuda")
+        if actor_dtype == "fp32":
+            dtype = torch.float32
+        elif actor_dtype == "fp16":
+            dtype = torch.float16
+        else:
+            raise ValueError(f"Unsupported PyTorch actor dtype: {actor_dtype}")
         self.model, self.hparams = load_actor_model(
             checkpoint_path,
             self.device,
-            dtype=torch.float32,
+            dtype=dtype,
         )
-        self.precision = "fp32"
+        self.dtype = dtype
+        self.precision = actor_dtype
         self.num_actor_tokens = int(self.hparams.get("num_actor_tokens", 0))
         self.clip_frames = int(self.hparams.get("n_frames", 16))
         self.input_size = MODEL_INPUT_SIZE
@@ -605,7 +827,11 @@ class TorchActorBackend:
             raise RuntimeError("Checkpoint object proposal count must be positive.")
 
     def __call__(self, clip, boxes, valid, object_inputs=None):
-        model_kwargs = {"boxes": boxes, "valid": valid}
+        clip = clip.to(device=self.device, dtype=self.dtype)
+        model_kwargs = {
+            "boxes": boxes.to(device=self.device, dtype=self.dtype),
+            "valid": valid.to(device=self.device, dtype=torch.bool),
+        }
         if self.uses_object_proposals:
             if object_inputs is None:
                 raise RuntimeError(
@@ -621,7 +847,26 @@ class TorchActorBackend:
             missing = sorted(expected_keys - set(object_inputs))
             if missing:
                 raise RuntimeError(f"Missing object input keys: {missing}")
-            model_kwargs.update(object_inputs)
+            model_kwargs.update(
+                {
+                    "object_boxes": object_inputs["object_boxes"].to(
+                        device=self.device,
+                        dtype=self.dtype,
+                    ),
+                    "object_classes": object_inputs["object_classes"].to(
+                        device=self.device,
+                        dtype=torch.long,
+                    ),
+                    "object_confs": object_inputs["object_confs"].to(
+                        device=self.device,
+                        dtype=self.dtype,
+                    ),
+                    "object_valid": object_inputs["object_valid"].to(
+                        device=self.device,
+                        dtype=torch.bool,
+                    ),
+                }
+            )
         elif object_inputs is not None:
             raise RuntimeError(
                 "Object inputs were passed to a checkpoint without object proposals."
@@ -682,7 +927,7 @@ class TensorRTLiveActorBackend:
 def load_actor_backend(args):
     if args.actor_engine:
         return TensorRTLiveActorBackend(args.actor_engine)
-    return TorchActorBackend(args.checkpoint)
+    return TorchActorBackend(args.checkpoint, actor_dtype=args.actor_dtype)
 
 
 def run_actor_smoke(args, actor):
@@ -949,6 +1194,7 @@ class LiveRunner:
             detector_backend=self.detector_backend_name,
             crop_mode=self.args.crop_mode,
             live_object_tokens=bool(self.args.live_object_tokens),
+            person_nms_iou_threshold=float(self.args.person_nms_iou_threshold),
         )
         self.detection_buffer = deque(maxlen=TRAINING_SPAN_FRAMES)
         self.people_buffer = deque(maxlen=TRAINING_SPAN_FRAMES)
@@ -962,12 +1208,18 @@ class LiveRunner:
         self.last_detection_frame = None
         self.last_detector_ms = None
         self.last_actor_ms = None
+        self.last_action_frame = None
         self.next_track_id = 1
         self.tracks = {}
         self.current_track_ids = []
         self.state.update(
-            action_smoothing_window=ACTION_SMOOTHING_WINDOW,
-            action_every=ACTION_EVERY_FRAME,
+            action_smoothing_window=int(self.args.action_smoothing_window),
+            action_every=int(self.args.action_every_frames),
+            action_switch_margin=float(self.args.action_switch_margin),
+            action_state_alpha=float(self.args.action_state_alpha),
+            action_state_persistence_bonus=float(
+                self.args.action_state_persistence_bonus
+            ),
             detect_every=DETECTION_EVERY_FRAME,
             clip_frames=TRAINING_CLIP_FRAMES,
             clip_sampling="linspace",
@@ -1011,6 +1263,10 @@ class LiveRunner:
                     track_id,
                     box,
                     self.frame_count,
+                    self.args.action_smoothing_window,
+                    self.args.action_switch_margin,
+                    self.args.action_state_alpha,
+                    self.args.action_state_persistence_bonus,
                 )
             else:
                 self.tracks[track_id].update_detection(box, self.frame_count)
@@ -1083,6 +1339,7 @@ class LiveRunner:
                     self.args.object_threshold,
                     self.max_actors,
                     self.max_objects,
+                    self.args.person_nms_iou_threshold,
                 )
                 self.last_detector_ms = (time.perf_counter() - started) * 1000.0
                 self.last_detection_frame = self.frame_count
@@ -1100,7 +1357,15 @@ class LiveRunner:
                 self.detection_buffer.append(detection_record)
                 self.people_buffer.append(people_record)
                 clip_ready = len(camera_frames) >= required_clip_buffer()
-                action_due = clip_ready
+                frames_since_action = (
+                    None
+                    if self.last_action_frame is None
+                    else self.frame_count - self.last_action_frame
+                )
+                action_due = clip_ready and (
+                    self.last_action_frame is None
+                    or frames_since_action >= int(self.args.action_every_frames)
+                )
                 people_history_ready = len(self.people_buffer) >= required_clip_buffer()
                 object_history_ready = len(self.detection_buffer) >= required_clip_buffer()
 
@@ -1221,6 +1486,7 @@ class LiveRunner:
                             object_inputs,
                         )
                         self.last_actor_ms = (time.perf_counter() - started) * 1000.0
+                        self.last_action_frame = self.frame_count
                         if logits.shape[-1] != len(ACTION_CLASSES):
                             raise RuntimeError(
                                 "Actor output class count does not match dashboard "
@@ -1231,6 +1497,11 @@ class LiveRunner:
                         presence_probs = (
                             torch.sigmoid(presence_logits[0]).detach().cpu().numpy()
                         )
+                        packed_object_class_ids = {
+                            int(item["object_class_id"])
+                            for item in packed_objects
+                            if "object_class_id" in item
+                        }
                         kept_actor_idx = np.flatnonzero(keep)[: self.max_actors]
                         for slot, actor_idx in enumerate(kept_actor_idx):
                             if actor_idx >= len(self.current_track_ids):
@@ -1252,10 +1523,24 @@ class LiveRunner:
                                     for index in top_indices
                                 ],
                             }
+                            local_object_class_ids = object_class_ids_near_actor_box(
+                                boxes_norm[int(actor_idx)],
+                                packed_objects,
+                            )
+                            if (
+                                not local_object_class_ids
+                                and len(kept_actor_idx) == 1
+                            ):
+                                local_object_class_ids = packed_object_class_ids
+                            raw_payload["state_object_class_ids"] = sorted(
+                                int(object_id)
+                                for object_id in local_object_class_ids
+                            )
                             track.update_action(
                                 action_probs[slot],
                                 presence_probs[slot],
                                 raw_payload,
+                                local_object_class_ids,
                             )
                             actors[int(actor_idx)].update(
                                 track.action_payload()
@@ -1280,7 +1565,13 @@ class LiveRunner:
                             f"real_span={clip_span_sec:.1f}s "
                             f"cam_fps={capture_info['capture_fps']:.1f} "
                             f"crop={self.args.crop_mode} "
-                            f"smooth={ACTION_SMOOTHING_WINDOW} "
+                            f"action_every={int(self.args.action_every_frames)} "
+                            f"smooth={int(self.args.action_smoothing_window)} "
+                            f"switch_margin={float(self.args.action_switch_margin):.2f} "
+                            f"state_alpha={float(self.args.action_state_alpha):.2f} "
+                            "state_bonus="
+                            f"{float(self.args.action_state_persistence_bonus):.2f} "
+                            f"person_nms={float(self.args.person_nms_iou_threshold):.2f} "
                             f"min_obj_samples={MIN_OBJECT_TRACK_SAMPLE_COUNT} "
                             f"live_objects={int(self.args.live_object_tokens)} "
                             f"obj_hist={int(object_history_ready)} "

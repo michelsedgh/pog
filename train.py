@@ -452,6 +452,15 @@ def build_parser():
         type=float,
         default=0.3,
     )
+    parser.add_argument("--object_prompt_wrong_class_loss_weight", type=float, default=0.0)
+    parser.add_argument("--object_prompt_wrong_class_margin", type=float, default=0.20)
+    parser.add_argument("--object_prompt_sensitivity_loss_weight", type=float, default=0.0)
+    parser.add_argument("--object_prompt_sensitivity_margin", type=float, default=0.20)
+    parser.add_argument(
+        "--object_prompt_sensitivity_motion_margin_threshold",
+        type=float,
+        default=1.0,
+    )
     parser.add_argument("--object_class_dropout_prob", type=float, default=0.0)
     parser.add_argument("--object_class_wrong_prob", type=float, default=0.0)
     parser.add_argument("--deepspeed_optim", type=int, default=0)

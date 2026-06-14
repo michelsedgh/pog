@@ -22,6 +22,7 @@ from datasets.object_vocab import (
 from datasets.toyota_action_taxonomy import (
     toyota_action_names,
     toyota_action_object_map,
+    toyota_confuser_action_names,
     toyota_action_to_index,
     toyota_group_action_names,
     toyota_label_dict,
@@ -162,6 +163,29 @@ class HeatmapModule(pl.LightningModule):
         )
         if self.objectless_prompt_consistency_loss_weight < 0:
             raise ValueError("objectless_prompt_consistency_loss_weight must be >= 0")
+        self.object_prompt_wrong_class_loss_weight = float(
+            hparams.get("object_prompt_wrong_class_loss_weight", 0.0)
+        )
+        if self.object_prompt_wrong_class_loss_weight < 0:
+            raise ValueError("object_prompt_wrong_class_loss_weight must be >= 0")
+        self.object_prompt_wrong_class_margin = float(
+            hparams.get("object_prompt_wrong_class_margin", 0.20)
+        )
+        if self.object_prompt_wrong_class_margin < 0:
+            raise ValueError("object_prompt_wrong_class_margin must be >= 0")
+        self.object_prompt_sensitivity_loss_weight = float(
+            hparams.get("object_prompt_sensitivity_loss_weight", 0.0)
+        )
+        if self.object_prompt_sensitivity_loss_weight < 0:
+            raise ValueError("object_prompt_sensitivity_loss_weight must be >= 0")
+        self.object_prompt_sensitivity_margin = float(
+            hparams.get("object_prompt_sensitivity_margin", 0.20)
+        )
+        if self.object_prompt_sensitivity_margin < 0:
+            raise ValueError("object_prompt_sensitivity_margin must be >= 0")
+        self.object_prompt_sensitivity_motion_margin_threshold = float(
+            hparams.get("object_prompt_sensitivity_motion_margin_threshold", 1.0)
+        )
         self.object_class_dropout_prob = float(
             hparams.get("object_class_dropout_prob", 0.0)
         )
@@ -197,11 +221,19 @@ class HeatmapModule(pl.LightningModule):
                 self.action_taxonomy,
             )
             self.action_object_ids_by_index = self._build_action_object_ids_by_index()
+            self.action_confuser_indices_by_index = (
+                self._build_action_confuser_indices_by_index()
+            )
+            self.action_wrong_object_ids_by_index = (
+                self._build_action_wrong_object_ids_by_index()
+            )
         else:
             self.action_names = [str(index) for index in range(self.num_classes)]
             self.action_to_index = {}
             self.action_object_map = {}
             self.action_object_ids_by_index = {}
+            self.action_confuser_indices_by_index = {}
+            self.action_wrong_object_ids_by_index = {}
 
         # Create model
         self.lr = hparams.lr
@@ -313,6 +345,9 @@ class HeatmapModule(pl.LightningModule):
                 "model.presence_head",
                 "model.object_prompt_actor_query",
                 "model.object_prompt_key",
+                "model.object_context_adapter",
+                "model.object_context_gate",
+                "model.object_context_scale",
             ]
             if self.model.hparams.get("use_register_tokens", 0):
                 allowed_missing.append("model.net.register_tokens")
@@ -433,6 +468,13 @@ class HeatmapModule(pl.LightningModule):
                 params += list(self.model.object_prompt_actor_query.parameters())
             if getattr(self.model, "object_prompt_key", None) is not None:
                 params += list(self.model.object_prompt_key.parameters())
+            if getattr(self.model, "object_context_adapter", None) is not None:
+                params += list(self.model.object_context_adapter.parameters())
+            if getattr(self.model, "object_context_gate", None) is not None:
+                params += list(self.model.object_context_gate.parameters())
+            object_context_scale = getattr(self.model, "object_context_scale", None)
+            if object_context_scale is not None:
+                params.append(object_context_scale)
             for name, param in self.model.net.named_parameters():
                 if self._actor_prompt_param_name(name):
                     params.append(param)
@@ -483,6 +525,73 @@ class HeatmapModule(pl.LightningModule):
                     dtype=torch.long,
                 )
         return action_object_ids
+
+    def _build_action_confuser_indices_by_index(self):
+        action_confusers = {}
+        for action_name, action_idx in self.action_to_index.items():
+            confuser_indices = [
+                int(self.action_to_index[confuser_name])
+                for confuser_name in toyota_confuser_action_names(
+                    action_name,
+                    self.task_type,
+                    self.action_taxonomy,
+                )
+                if confuser_name in self.action_to_index
+            ]
+            if confuser_indices:
+                action_confusers[int(action_idx)] = torch.tensor(
+                    confuser_indices,
+                    dtype=torch.long,
+                )
+        return action_confusers
+
+    def _build_action_wrong_object_ids_by_index(self):
+        default_wrong_names = (
+            "book",
+            "laptop",
+            "phone",
+            "tv_monitor",
+            "cup",
+            "bottle",
+            "glass",
+        )
+        default_wrong_ids = [
+            int(OBJECT_TO_ID[name])
+            for name in default_wrong_names
+            if name in OBJECT_TO_ID
+        ]
+        action_wrong_objects = {}
+        for action_name, action_idx in self.action_to_index.items():
+            true_ids = set()
+            for object_name in self.action_object_map.get(action_name, ()):
+                if object_name in OBJECT_TO_ID:
+                    true_ids.add(int(OBJECT_TO_ID[object_name]))
+
+            wrong_ids = []
+            for confuser_name in toyota_confuser_action_names(
+                action_name,
+                self.task_type,
+                self.action_taxonomy,
+            ):
+                for object_name in self.action_object_map.get(confuser_name, ()):
+                    if object_name not in OBJECT_TO_ID:
+                        continue
+                    object_id = int(OBJECT_TO_ID[object_name])
+                    if object_id not in true_ids and object_id not in wrong_ids:
+                        wrong_ids.append(object_id)
+
+            if not wrong_ids:
+                wrong_ids = [
+                    object_id
+                    for object_id in default_wrong_ids
+                    if object_id not in true_ids
+                ]
+            if wrong_ids:
+                action_wrong_objects[int(action_idx)] = torch.tensor(
+                    wrong_ids,
+                    dtype=torch.long,
+                )
+        return action_wrong_objects
 
     def _build_group_indices(self):
         if not self.is_toyota:
@@ -1219,12 +1328,18 @@ class HeatmapModule(pl.LightningModule):
                 "last_actor_object_prompt_attention_logits",
                 "last_actor_object_prompt_attention",
                 "last_actor_object_prompt_valid",
+                "last_actor_object_context_gate",
+                "last_actor_object_context_scale",
+                "last_actor_object_context_delta_norm",
             )
         }
         empty_inputs = self._empty_object_inputs(
             batch_size=int(imgs.shape[0]),
             device=imgs.device,
             dtype=torch.float32,
+        )
+        distractor_inputs = self._object_distractor_class_inputs(
+            self._object_inputs_from_target(target, imgs.device)
         )
         try:
             with torch.no_grad():
@@ -1236,6 +1351,15 @@ class HeatmapModule(pl.LightningModule):
                     **empty_inputs,
                 )
             no_object_preds = self._unpack_model_data(no_object_data)[0].detach()
+            with torch.no_grad():
+                distractor_data = self.model(
+                    imgs,
+                    boxes=boxes,
+                    valid=valid,
+                    action_labels=actions,
+                    **distractor_inputs,
+                )
+            distractor_preds = self._unpack_model_data(distractor_data)[0].detach()
         finally:
             for name, value in saved_attrs.items():
                 setattr(self.model, name, value)
@@ -1245,7 +1369,21 @@ class HeatmapModule(pl.LightningModule):
             no_object_preds[consistency_mask].float(),
             dim=-1,
         )
-        loss = F.kl_div(with_object_logp, no_object_prob, reduction="batchmean")
+        distractor_prob = F.softmax(
+            distractor_preds[consistency_mask].float(),
+            dim=-1,
+        )
+        loss_no_object = F.kl_div(
+            with_object_logp,
+            no_object_prob,
+            reduction="batchmean",
+        )
+        loss_distractor = F.kl_div(
+            with_object_logp,
+            distractor_prob,
+            reduction="batchmean",
+        )
+        loss = 0.5 * (loss_no_object + loss_distractor)
         count = int(consistency_mask.sum().item())
         self.log(
             f"{stage}_loss_objectless_prompt_consistency",
@@ -1259,14 +1397,25 @@ class HeatmapModule(pl.LightningModule):
         with torch.no_grad():
             pred_with = preds[consistency_mask].argmax(dim=-1)
             pred_without = no_object_preds[consistency_mask].argmax(dim=-1)
+            pred_distractor = distractor_preds[consistency_mask].argmax(dim=-1)
             self._log_scalar(
                 "train_objectless_prompt_consistency_pred_match",
                 (pred_with == pred_without).float().mean(),
                 count,
             )
             self._log_scalar(
+                "train_objectless_prompt_distractor_pred_match",
+                (pred_with == pred_distractor).float().mean(),
+                count,
+            )
+            self._log_scalar(
                 "train_objectless_prompt_consistency_kl",
                 loss.detach(),
+                count,
+            )
+            self._log_scalar(
+                "train_objectless_prompt_distractor_kl",
+                loss_distractor.detach(),
                 count,
             )
         return loss
@@ -1293,6 +1442,90 @@ class HeatmapModule(pl.LightningModule):
         output["object_boxes"][batch_idx, object_slots] = 0
         output["object_confs"][batch_idx, object_slots] = 0
         output["object_classes"][batch_idx, object_slots] = none_id
+        return output
+
+    @staticmethod
+    def _first_actor_per_sample_mask(mask):
+        if mask.ndim != 2:
+            raise RuntimeError(
+                "first-actor mask expects [B,A], got "
+                f"{tuple(mask.shape)}"
+            )
+        output = torch.zeros_like(mask, dtype=torch.bool)
+        for batch_idx in range(mask.shape[0]):
+            slots = torch.nonzero(mask[batch_idx], as_tuple=False)
+            if int(slots.numel()) == 0:
+                continue
+            output[batch_idx, int(slots[0, 0].item())] = True
+        return output
+
+    def _wrong_object_ids_for_actions(self, actions):
+        values = []
+        for action in actions.detach().cpu().tolist():
+            object_ids = self.action_wrong_object_ids_by_index.get(int(action))
+            if object_ids is None or int(object_ids.numel()) == 0:
+                values.append(int(NUM_OBJECT_CLASSES))
+            else:
+                values.append(int(object_ids[0].item()))
+        return torch.tensor(values, device=actions.device, dtype=torch.long)
+
+    def _teacher_object_wrong_class_inputs(
+        self,
+        object_inputs,
+        object_slots,
+        selected_valid,
+        actions,
+    ):
+        output = {name: value.clone() for name, value in object_inputs.items()}
+        if not selected_valid.any():
+            return output
+        rows = torch.nonzero(selected_valid, as_tuple=False)
+        batch_idx = rows[:, 0]
+        actor_actions = actions[selected_valid].to(dtype=torch.long)
+        wrong_ids = self._wrong_object_ids_for_actions(actor_actions)
+        object_slots = object_slots[selected_valid].to(
+            device=batch_idx.device,
+            dtype=torch.long,
+        )
+        valid_wrong = wrong_ids < int(NUM_OBJECT_CLASSES)
+        if not valid_wrong.any():
+            return output
+        batch_idx = batch_idx[valid_wrong]
+        object_slots = object_slots[valid_wrong]
+        wrong_ids = wrong_ids[valid_wrong]
+        output["object_valid"][batch_idx, object_slots] = True
+        output["object_classes"][batch_idx, object_slots] = wrong_ids
+        return output
+
+    def _object_distractor_class_inputs(self, object_inputs):
+        output = {name: value.clone() for name, value in object_inputs.items()}
+        object_valid = output.get("object_valid")
+        object_classes = output.get("object_classes")
+        if object_valid is None or object_classes is None or not object_valid.any():
+            return output
+        distractor_ids = torch.tensor(
+            [
+                int(OBJECT_TO_ID[name])
+                for name in ("laptop", "book", "phone", "tv_monitor")
+                if name in OBJECT_TO_ID
+            ],
+            device=object_classes.device,
+            dtype=torch.long,
+        )
+        if int(distractor_ids.numel()) == 0:
+            return output
+        slot_ids = torch.arange(
+            object_classes.shape[1],
+            device=object_classes.device,
+            dtype=torch.long,
+        )
+        replacement = distractor_ids[slot_ids.remainder(distractor_ids.numel())]
+        replacement = replacement.unsqueeze(0).expand_as(object_classes)
+        output["object_classes"] = torch.where(
+            object_valid,
+            replacement,
+            object_classes,
+        )
         return output
 
     def _log_object_counterfactual_eval(
@@ -1424,12 +1657,18 @@ class HeatmapModule(pl.LightningModule):
                 "last_actor_object_prompt_attention_logits",
                 "last_actor_object_prompt_attention",
                 "last_actor_object_prompt_valid",
+                "last_actor_object_context_gate",
+                "last_actor_object_context_scale",
+                "last_actor_object_context_delta_norm",
             )
         }
         empty_inputs = self._empty_object_inputs(
             batch_size=int(imgs.shape[0]),
             device=imgs.device,
             dtype=torch.float32,
+        )
+        distractor_inputs = self._object_distractor_class_inputs(
+            self._object_inputs_from_target(target, imgs.device)
         )
         try:
             with torch.no_grad():
@@ -1441,6 +1680,15 @@ class HeatmapModule(pl.LightningModule):
                     **empty_inputs,
                 )
             dropped_preds = self._unpack_model_data(dropped_data)[0].detach()
+            with torch.no_grad():
+                distractor_data = self.model(
+                    imgs,
+                    boxes=boxes,
+                    valid=valid,
+                    action_labels=actions,
+                    **distractor_inputs,
+                )
+            distractor_preds = self._unpack_model_data(distractor_data)[0].detach()
         finally:
             for name, value in saved_attrs.items():
                 setattr(self.model, name, value)
@@ -1452,6 +1700,8 @@ class HeatmapModule(pl.LightningModule):
             dropped_prob = dropped_logp.exp()
             base_pred = preds.argmax(dim=-1)
             dropped_pred = dropped_preds.argmax(dim=-1)
+            distractor_logp = F.log_softmax(distractor_preds.float(), dim=-1)
+            distractor_pred = distractor_preds.argmax(dim=-1)
 
             if has_objectless:
                 labels = actions[objectless_visible]
@@ -1465,6 +1715,11 @@ class HeatmapModule(pl.LightningModule):
                 ).squeeze(1)
                 consistency_kl = F.kl_div(
                     dropped_logp[objectless_visible],
+                    base_prob[objectless_visible],
+                    reduction="batchmean",
+                )
+                distractor_kl = F.kl_div(
+                    distractor_logp[objectless_visible],
                     base_prob[objectless_visible],
                     reduction="batchmean",
                 )
@@ -1492,6 +1747,24 @@ class HeatmapModule(pl.LightningModule):
                     (dropped_pred[objectless_visible] == labels).float().mean(),
                     count,
                 )
+                self._log_scalar(
+                    f"{stage}_object_prompt_distractor_objectless_pred_match",
+                    (
+                        base_pred[objectless_visible]
+                        == distractor_pred[objectless_visible]
+                    ).float().mean(),
+                    count,
+                )
+                self._log_scalar(
+                    f"{stage}_object_prompt_distractor_objectless_kl",
+                    distractor_kl,
+                    count,
+                )
+                self._log_scalar(
+                    f"{stage}_object_prompt_distractor_objectless_acc",
+                    (distractor_pred[objectless_visible] == labels).float().mean(),
+                    count,
+                )
                 object_action_indices = self.group_indices.get("object_mapped")
                 if (
                     object_action_indices is not None
@@ -1512,6 +1785,19 @@ class HeatmapModule(pl.LightningModule):
                     self._log_scalar(
                         f"{stage}_object_prompt_drop_objectless_object_action_pred_rate",
                         object_action_rate,
+                        count,
+                    )
+                    distractor_object_action_rate = (
+                        self._labels_in_indices(
+                            distractor_pred[objectless_visible],
+                            object_action_indices,
+                        )
+                        .float()
+                        .mean()
+                    )
+                    self._log_scalar(
+                        f"{stage}_object_prompt_distractor_objectless_object_action_pred_rate",
+                        distractor_object_action_rate,
                         count,
                     )
 
@@ -1559,6 +1845,285 @@ class HeatmapModule(pl.LightningModule):
                 )
         return None
 
+    def _motion_confuser_margin(self, motion_logits, actions, selected_valid):
+        margins = torch.full(
+            actions.shape,
+            float("inf"),
+            device=actions.device,
+            dtype=motion_logits.dtype,
+        )
+        rows = torch.nonzero(selected_valid, as_tuple=False)
+        for row in rows:
+            batch_idx = int(row[0].item())
+            actor_idx = int(row[1].item())
+            action_idx = int(actions[batch_idx, actor_idx].item())
+            confusers = self.action_confuser_indices_by_index.get(action_idx)
+            if confusers is None or int(confusers.numel()) == 0:
+                continue
+            confusers = confusers.to(device=actions.device, dtype=torch.long)
+            true_logit = motion_logits[batch_idx, actor_idx, action_idx]
+            max_confuser = motion_logits[batch_idx, actor_idx, confusers].max()
+            margins[batch_idx, actor_idx] = true_logit - max_confuser
+        return margins
+
+    def _object_prompt_action_coupling_loss(
+        self,
+        stage,
+        imgs,
+        boxes,
+        valid,
+        actions,
+        preds,
+        target,
+        object_inputs,
+    ):
+        if not self.uses_object_proposals:
+            return None
+        if (
+            self.object_prompt_wrong_class_loss_weight <= 0
+            and self.object_prompt_sensitivity_loss_weight <= 0
+        ):
+            return None
+        info = self._exact_teacher_object_info(actions, valid, target, preds.device)
+        if info is None:
+            return None
+        exact_compatible = (
+            info["valid"]
+            & info["known_action"]
+            & info["compatible_1based"]
+        )
+        selected_valid = self._first_actor_per_sample_mask(exact_compatible)
+        if not selected_valid.any():
+            return None
+
+        actions = actions.to(device=preds.device, dtype=torch.long)
+        selected_labels = actions[selected_valid]
+        selected_slots = info["idx_1based"].to(device=preds.device, dtype=torch.long)
+        base_true_logits = preds[selected_valid].gather(
+            1,
+            selected_labels.unsqueeze(1),
+        ).squeeze(1)
+
+        saved_attrs = {
+            name: getattr(self.model, name, None)
+            for name in (
+                "last_actor_action_logits",
+                "last_actor_motion_logits",
+                "last_actor_object_prompt_tokens",
+                "last_actor_object_prompt_attention_logits",
+                "last_actor_object_prompt_attention",
+                "last_actor_object_prompt_valid",
+                "last_actor_object_context_gate",
+                "last_actor_object_context_scale",
+                "last_actor_object_context_delta_norm",
+            )
+        }
+
+        weighted_losses = []
+        wrong_preds = None
+        dropped_preds = None
+        dropped_prompt_mask = None
+        try:
+            if self.object_prompt_wrong_class_loss_weight > 0:
+                wrong_inputs = self._teacher_object_wrong_class_inputs(
+                    object_inputs,
+                    selected_slots,
+                    selected_valid,
+                    actions,
+                )
+                wrong_data = self.model(
+                    imgs,
+                    boxes=boxes,
+                    valid=valid,
+                    action_labels=actions,
+                    **wrong_inputs,
+                )
+                wrong_preds = self._unpack_model_data(wrong_data)[0]
+                wrong_true_logits = wrong_preds[selected_valid].gather(
+                    1,
+                    selected_labels.unsqueeze(1),
+                ).squeeze(1)
+                wrong_drop = base_true_logits - wrong_true_logits
+                loss_wrong = F.relu(
+                    self.object_prompt_wrong_class_margin - wrong_drop
+                ).mean()
+                count = int(selected_labels.numel())
+                self.log(
+                    f"{stage}_loss_object_prompt_wrong_class",
+                    loss_wrong,
+                    on_step=stage == "train",
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                    sync_dist=True,
+                )
+                self._log_scalar(
+                    f"{stage}_object_prompt_correct_minus_wrong_true_logit",
+                    wrong_drop.detach().mean(),
+                    count,
+                )
+                self._log_scalar(
+                    f"{stage}_object_prompt_wrong_class_margin_sat_rate",
+                    (
+                        wrong_drop.detach()
+                        >= self.object_prompt_wrong_class_margin
+                    )
+                    .float()
+                    .mean(),
+                    count,
+                )
+                weighted_losses.append(
+                    loss_wrong * self.object_prompt_wrong_class_loss_weight
+                )
+
+            if self.object_prompt_sensitivity_loss_weight > 0:
+                motion_logits = saved_attrs.get("last_actor_motion_logits")
+                if motion_logits is not None:
+                    motion_logits = motion_logits.to(device=preds.device)
+                    motion_margin = self._motion_confuser_margin(
+                        motion_logits.float(),
+                        actions,
+                        selected_valid,
+                    )
+                    ambiguous = (
+                        selected_valid
+                        & (
+                            motion_margin
+                            < self.object_prompt_sensitivity_motion_margin_threshold
+                        )
+                    )
+                else:
+                    ambiguous = torch.zeros_like(selected_valid, dtype=torch.bool)
+
+                self._log_scalar(
+                    f"{stage}_object_prompt_sensitivity_ambiguous_rate",
+                    ambiguous[selected_valid].float().mean(),
+                    int(selected_valid.sum().item()),
+                )
+                if ambiguous.any():
+                    dropped_prompt_mask = ambiguous
+                    dropped_inputs = self._teacher_object_removed_inputs(
+                        object_inputs,
+                        info["selected_indices"].to(
+                            device=preds.device,
+                            dtype=torch.long,
+                        ),
+                        ambiguous,
+                    )
+                    dropped_data = self.model(
+                        imgs,
+                        boxes=boxes,
+                        valid=valid,
+                        action_labels=actions,
+                        **dropped_inputs,
+                    )
+                    dropped_preds = self._unpack_model_data(dropped_data)[0]
+                    ambiguous_labels = actions[ambiguous]
+                    base_ambiguous_true = preds[ambiguous].gather(
+                        1,
+                        ambiguous_labels.unsqueeze(1),
+                    ).squeeze(1)
+                    dropped_true = dropped_preds[ambiguous].gather(
+                        1,
+                        ambiguous_labels.unsqueeze(1),
+                    ).squeeze(1)
+                    dropped_drop = base_ambiguous_true - dropped_true
+                    loss_sensitivity = F.relu(
+                        self.object_prompt_sensitivity_margin - dropped_drop
+                    ).mean()
+                    count = int(ambiguous_labels.numel())
+                    self.log(
+                        f"{stage}_loss_object_prompt_sensitivity",
+                        loss_sensitivity,
+                        on_step=stage == "train",
+                        on_epoch=True,
+                        prog_bar=False,
+                        logger=True,
+                        sync_dist=True,
+                    )
+                    self._log_scalar(
+                        f"{stage}_object_prompt_correct_minus_dropped_true_logit_ambiguous",
+                        dropped_drop.detach().mean(),
+                        count,
+                    )
+                    self._log_scalar(
+                        f"{stage}_object_prompt_sensitivity_margin_sat_rate",
+                        (
+                            dropped_drop.detach()
+                            >= self.object_prompt_sensitivity_margin
+                        )
+                        .float()
+                        .mean(),
+                        count,
+                    )
+                    weighted_losses.append(
+                        loss_sensitivity
+                        * self.object_prompt_sensitivity_loss_weight
+                    )
+
+            self._log_uselaptop_prompt_counterfactual_margins(
+                stage,
+                actions,
+                selected_valid,
+                wrong_preds,
+                dropped_preds,
+                dropped_prompt_mask,
+            )
+        finally:
+            for name, value in saved_attrs.items():
+                setattr(self.model, name, value)
+
+        if not weighted_losses:
+            return None
+        return torch.stack(weighted_losses).sum()
+
+    def _log_uselaptop_prompt_counterfactual_margins(
+        self,
+        stage,
+        actions,
+        selected_valid,
+        wrong_preds,
+        dropped_preds,
+        dropped_prompt_mask,
+    ):
+        uselaptop_idx = self.action_to_index.get("Uselaptop")
+        readbook_idx = self.action_to_index.get("Readbook")
+        watchtv_idx = self.action_to_index.get("WatchTV")
+        if uselaptop_idx is None:
+            return
+        uselaptop_mask = selected_valid & (actions == int(uselaptop_idx))
+        if not uselaptop_mask.any():
+            return
+        count = int(uselaptop_mask.sum().item())
+        if wrong_preds is not None and readbook_idx is not None:
+            margin = (
+                wrong_preds[uselaptop_mask][:, int(uselaptop_idx)]
+                - wrong_preds[uselaptop_mask][:, int(readbook_idx)]
+            )
+            self._log_scalar(
+                f"{stage}_object_prompt_wrong_Uselaptop_minus_Readbook_margin",
+                margin.detach().mean(),
+                count,
+            )
+        if (
+            dropped_preds is not None
+            and dropped_prompt_mask is not None
+            and watchtv_idx is not None
+        ):
+            uselaptop_mask = dropped_prompt_mask & (actions == int(uselaptop_idx))
+            if not uselaptop_mask.any():
+                return
+            count = int(uselaptop_mask.sum().item())
+            margin = (
+                dropped_preds[uselaptop_mask][:, int(uselaptop_idx)]
+                - dropped_preds[uselaptop_mask][:, int(watchtv_idx)]
+            )
+            self._log_scalar(
+                f"{stage}_object_prompt_dropped_Uselaptop_minus_WatchTV_margin",
+                margin.detach().mean(),
+                count,
+            )
+
     def _log_actor_object_prompt_diagnostics(
         self,
         stage,
@@ -1576,6 +2141,21 @@ class HeatmapModule(pl.LightningModule):
         prompt_valid = getattr(
             self.model,
             "last_actor_object_prompt_valid",
+            None,
+        )
+        context_gate = getattr(
+            self.model,
+            "last_actor_object_context_gate",
+            None,
+        )
+        context_scale = getattr(
+            self.model,
+            "last_actor_object_context_scale",
+            None,
+        )
+        context_delta_norm = getattr(
+            self.model,
+            "last_actor_object_context_delta_norm",
             None,
         )
         if prompt_attention is None or prompt_valid is None:
@@ -1629,6 +2209,22 @@ class HeatmapModule(pl.LightningModule):
                 entropy_norm[objectless_visible].mean(),
                 count,
             )
+            if context_gate is not None:
+                self._log_scalar(
+                    f"{stage}_object_context_gate_objectless_visible_mean",
+                    context_gate.to(device=device).float().squeeze(-1)[
+                        objectless_visible
+                    ].mean(),
+                    count,
+                )
+            if context_delta_norm is not None:
+                self._log_scalar(
+                    f"{stage}_object_context_delta_norm_objectless_visible_mean",
+                    context_delta_norm.to(device=device).float()[
+                        objectless_visible
+                    ].mean(),
+                    count,
+                )
 
         valid_known = info["valid"] & info["known_action"]
         if valid_known.any():
@@ -1688,6 +2284,28 @@ class HeatmapModule(pl.LightningModule):
             true_prob.mean(),
             count,
         )
+        if context_gate is not None:
+            self._log_scalar(
+                f"{stage}_object_context_gate_exact_compatible_mean",
+                context_gate.to(device=device).float().squeeze(-1)[
+                    exact_compatible
+                ].mean(),
+                count,
+            )
+        if context_delta_norm is not None:
+            self._log_scalar(
+                f"{stage}_object_context_delta_norm_exact_compatible_mean",
+                context_delta_norm.to(device=device).float()[
+                    exact_compatible
+                ].mean(),
+                count,
+            )
+        if context_scale is not None:
+            self._log_scalar(
+                f"{stage}_object_context_scale",
+                context_scale.to(device=device).float(),
+                count,
+            )
         self._log_scalar(
             f"{stage}_actor_object_prompt_token_count",
             torch.as_tensor(
@@ -1999,6 +2617,21 @@ class HeatmapModule(pl.LightningModule):
                 loss_object_prompt_grounding
                 * self.object_prompt_grounding_loss_weight
             )
+
+        loss_object_prompt_action_coupling = (
+            self._object_prompt_action_coupling_loss(
+                stage,
+                imgs,
+                boxes,
+                valid,
+                actions,
+                preds,
+                target,
+                object_inputs,
+            )
+        )
+        if stage == "train" and loss_object_prompt_action_coupling is not None:
+            loss_main_task = loss_main_task + loss_object_prompt_action_coupling
 
         self._log_actor_object_prompt_diagnostics(
             stage,

@@ -146,6 +146,9 @@ class POGUISE(pl.LightningModule):
         self.actor_object_prompt_tokens_enabled = bool(
             self.hparams.get("actor_object_prompt_tokens", 0)
         )
+        self.object_context_adapter_enabled = bool(
+            self.hparams.get("object_context_adapter", 0)
+        )
         if bool(self.hparams.get("actor_object_slot_head", 0)):
             raise ValueError(
                 "actor_object_slot_head was replaced by "
@@ -164,6 +167,10 @@ class POGUISE(pl.LightningModule):
             )
         if self.actor_object_prompt_tokens_enabled and not self.actor_prompt:
             raise ValueError("actor_object_prompt_tokens requires actor_prompt")
+        if self.object_context_adapter_enabled and not self.actor_object_prompt_tokens_enabled:
+            raise ValueError(
+                "object_context_adapter requires actor_object_prompt_tokens"
+            )
         if self.actor_interaction_heatmaps and not self.actor_prompt:
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
         if "interaction_object_classes" in self.hparams:
@@ -332,6 +339,32 @@ class POGUISE(pl.LightningModule):
                     self.net.num_features,
                     bias=False,
                 )
+                if self.object_context_adapter_enabled:
+                    dim = self.net.num_features
+                    gate_hidden = max(dim // 4, 64)
+                    self.object_context_adapter = nn.Sequential(
+                        nn.LayerNorm(3 * dim),
+                        nn.Linear(3 * dim, dim),
+                        nn.GELU(),
+                        nn.Linear(dim, dim),
+                    )
+                    self.object_context_gate = nn.Sequential(
+                        nn.LayerNorm(3 * dim),
+                        nn.Linear(3 * dim, gate_hidden),
+                        nn.GELU(),
+                        nn.Linear(gate_hidden, 1),
+                    )
+                    self.object_context_scale = nn.Parameter(
+                        torch.tensor(
+                            float(self.hparams.get("object_context_scale_init", -2.0))
+                        )
+                    )
+                    nn.init.zeros_(self.object_context_adapter[-1].weight)
+                    nn.init.zeros_(self.object_context_adapter[-1].bias)
+                    nn.init.constant_(
+                        self.object_context_gate[-1].bias,
+                        float(self.hparams.get("object_context_gate_bias", -1.0)),
+                    )
         if self.hparams.get("linear_probe", 0):
             self._freeze_backbone()
             self.head = Classifier(
@@ -383,6 +416,14 @@ class POGUISE(pl.LightningModule):
                 if hasattr(self, "object_prompt_key"):
                     for param in self.object_prompt_key.parameters():
                         param.requires_grad = False
+                if hasattr(self, "object_context_adapter"):
+                    for param in self.object_context_adapter.parameters():
+                        param.requires_grad = False
+                if hasattr(self, "object_context_gate"):
+                    for param in self.object_context_gate.parameters():
+                        param.requires_grad = False
+                if hasattr(self, "object_context_scale"):
+                    self.object_context_scale.requires_grad = False
         interaction_unfreeze_last_blocks = int(
             self.hparams.get("interaction_unfreeze_last_blocks", 0) or 0
         )
@@ -454,6 +495,14 @@ class POGUISE(pl.LightningModule):
                 if hasattr(self, "object_prompt_key"):
                     for param in self.object_prompt_key.parameters():
                         param.requires_grad = True
+                if hasattr(self, "object_context_adapter"):
+                    for param in self.object_context_adapter.parameters():
+                        param.requires_grad = True
+                if hasattr(self, "object_context_gate"):
+                    for param in self.object_context_gate.parameters():
+                        param.requires_grad = True
+                if hasattr(self, "object_context_scale"):
+                    self.object_context_scale.requires_grad = True
     def _freeze_stages(self):
         if self.frozen_stages >= 0:
             self.patch_embed.eval()
@@ -530,15 +579,13 @@ class POGUISE(pl.LightningModule):
             self.last_actor_object_prompt_attention_logits = None
             self.last_actor_object_prompt_attention = None
             self.last_actor_object_prompt_valid = None
+            self.last_actor_object_context_gate = None
+            self.last_actor_object_context_scale = None
+            self.last_actor_object_context_delta_norm = None
             if self.hparams.ret_feat:
                 return x_actor
 
-            if self.actor_motion_head is not None:
-                self.last_actor_motion_logits = self.actor_motion_head(x_actor)
-            action_scores = self.actor_head(x_actor)
-            self.last_actor_action_logits = action_scores
-            if self.last_actor_motion_logits is None:
-                self.last_actor_motion_logits = action_scores
+            x_actor_for_action = x_actor
             if (
                 self.actor_object_prompt_tokens_enabled
                 and x_object_prompt is not None
@@ -556,13 +603,59 @@ class POGUISE(pl.LightningModule):
                     ~prompt_valid[:, None, :],
                     -1.0e4,
                 )
+                prompt_attn = torch.softmax(prompt_logits.float(), dim=-1).to(
+                    dtype=prompt_logits.dtype
+                )
+                prompt_attn = prompt_attn * prompt_valid[:, None, :].to(
+                    dtype=prompt_attn.dtype
+                )
+                prompt_attn_sum = prompt_attn.sum(dim=-1, keepdim=True)
+                prompt_attn = torch.where(
+                    prompt_attn_sum > 0,
+                    prompt_attn / prompt_attn_sum.clamp_min(1.0e-6),
+                    torch.zeros_like(prompt_attn),
+                )
                 self.last_actor_object_prompt_tokens = x_object_prompt
                 self.last_actor_object_prompt_attention_logits = prompt_logits
-                self.last_actor_object_prompt_attention = torch.softmax(
-                    prompt_logits.float(),
-                    dim=-1,
-                ).to(dtype=prompt_logits.dtype)
+                self.last_actor_object_prompt_attention = prompt_attn
                 self.last_actor_object_prompt_valid = prompt_valid
+                if self.object_context_adapter_enabled:
+                    object_context = torch.einsum(
+                        "bak,bkd->bad",
+                        prompt_attn,
+                        x_object_prompt,
+                    )
+                    adapter_in = torch.cat(
+                        [
+                            x_actor,
+                            object_context,
+                            x_actor * object_context,
+                        ],
+                        dim=-1,
+                    )
+                    gate = torch.sigmoid(self.object_context_gate(adapter_in))
+                    has_prompt = prompt_valid.any(dim=1).to(
+                        device=gate.device,
+                        dtype=gate.dtype,
+                    )
+                    gate = gate * has_prompt[:, None, None]
+                    scale = torch.sigmoid(self.object_context_scale)
+                    delta = self.object_context_adapter(adapter_in)
+                    x_actor_for_action = x_actor + scale * gate * delta
+                    self.last_actor_object_context_gate = gate.detach()
+                    self.last_actor_object_context_scale = scale.detach()
+                    self.last_actor_object_context_delta_norm = (
+                        (scale * gate * delta)
+                        .detach()
+                        .float()
+                        .norm(dim=-1)
+                    )
+            if self.actor_motion_head is not None:
+                self.last_actor_motion_logits = self.actor_motion_head(x_actor)
+            action_scores = self.actor_head(x_actor_for_action)
+            self.last_actor_action_logits = action_scores
+            if self.last_actor_motion_logits is None:
+                self.last_actor_motion_logits = action_scores
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
                 return action_scores, x_heatmap, presence_logits
@@ -629,6 +722,9 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--num_scene_object_tokens", type=int, default=32)
         parser.add_argument("--num_object_classes", type=int, default=19)
         parser.add_argument("--actor_object_prompt_tokens", type=int, default=0)
+        parser.add_argument("--object_context_adapter", type=int, default=0)
+        parser.add_argument("--object_context_scale_init", type=float, default=-2.0)
+        parser.add_argument("--object_context_gate_bias", type=float, default=-1.0)
         parser.add_argument(
             "--actor_object_prompt_box_prior_weight",
             type=float,

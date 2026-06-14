@@ -52,11 +52,29 @@ CORE_COLUMNS = [
     "val_object_prompt_attention_objectless_visible_mean",
     "val_object_prompt_attention_objectless_visible_max",
     "val_object_prompt_attention_objectless_visible_entropy",
+    "val_object_context_gate_exact_compatible_mean",
+    "val_object_context_gate_objectless_visible_mean",
+    "val_object_context_delta_norm_exact_compatible_mean",
+    "val_object_context_delta_norm_objectless_visible_mean",
+    "val_object_context_scale",
+    "val_loss_object_prompt_wrong_class",
+    "val_object_prompt_correct_minus_wrong_true_logit",
+    "val_object_prompt_wrong_class_margin_sat_rate",
+    "val_loss_object_prompt_sensitivity",
+    "val_object_prompt_sensitivity_ambiguous_rate",
+    "val_object_prompt_correct_minus_dropped_true_logit_ambiguous",
+    "val_object_prompt_sensitivity_margin_sat_rate",
+    "val_object_prompt_wrong_Uselaptop_minus_Readbook_margin",
+    "val_object_prompt_dropped_Uselaptop_minus_WatchTV_margin",
     "val_object_prompt_drop_objectless_pred_match",
     "val_object_prompt_drop_objectless_true_prob_delta",
     "val_object_prompt_drop_objectless_kl",
     "val_object_prompt_drop_objectless_acc",
     "val_object_prompt_drop_objectless_object_action_pred_rate",
+    "val_object_prompt_distractor_objectless_pred_match",
+    "val_object_prompt_distractor_objectless_kl",
+    "val_object_prompt_distractor_objectless_acc",
+    "val_object_prompt_distractor_objectless_object_action_pred_rate",
     "val_object_prompt_drop_exact_true_logit_drop",
     "val_object_prompt_drop_exact_true_prob_drop",
     "val_object_prompt_drop_exact_pred_match",
@@ -95,6 +113,8 @@ CORE_COLUMNS = [
     "train_loss_objectless_prompt_consistency",
     "train_objectless_prompt_consistency_pred_match",
     "train_objectless_prompt_consistency_kl",
+    "train_objectless_prompt_distractor_pred_match",
+    "train_objectless_prompt_distractor_kl",
 ]
 
 GROUPS = [
@@ -291,9 +311,14 @@ def print_compact_epoch_summary(epoch_df):
         "val_object_prompt_exact_correct_object_rate",
         "val_object_prompt_exact_correct_object_prob",
         "val_object_prompt_attention_exact_teacher_mean",
+        "val_object_context_gate_exact_compatible_mean",
+        "val_object_context_scale",
+        "val_object_prompt_correct_minus_wrong_true_logit",
+        "val_object_prompt_correct_minus_dropped_true_logit_ambiguous",
         "val_object_prompt_attention_objectless_visible_max",
         "val_object_prompt_drop_objectless_pred_match",
         "val_object_prompt_drop_objectless_kl",
+        "val_object_prompt_distractor_objectless_object_action_pred_rate",
         "val_object_prompt_drop_exact_true_logit_drop",
         "val_actor_object_prompt_token_count",
         "val_interaction_heatmap_positive_mean",
@@ -345,9 +370,17 @@ def print_compact_best(epoch_df):
         "val_object_prompt_exact_correct_object_rate",
         "val_object_prompt_exact_correct_object_prob",
         "val_object_prompt_attention_exact_teacher_mean",
+        "val_object_context_gate_exact_compatible_mean",
+        "val_object_context_delta_norm_exact_compatible_mean",
+        "val_object_context_scale",
+        "val_object_prompt_correct_minus_wrong_true_logit",
+        "val_object_prompt_correct_minus_dropped_true_logit_ambiguous",
+        "val_object_prompt_wrong_Uselaptop_minus_Readbook_margin",
+        "val_object_prompt_dropped_Uselaptop_minus_WatchTV_margin",
         "val_object_prompt_attention_objectless_visible_max",
         "val_object_prompt_drop_objectless_pred_match",
         "val_object_prompt_drop_objectless_kl",
+        "val_object_prompt_distractor_objectless_object_action_pred_rate",
         "val_object_prompt_drop_exact_true_logit_drop",
         "val_object_prompt_drop_exact_true_prob_drop",
         "val_actor_object_prompt_token_count",
@@ -705,6 +738,51 @@ def print_decision(epoch_df):
         latest,
         "val_object_prompt_attention_objectless_visible_entropy",
     )
+    context_gate_exact = metric(
+        latest,
+        "val_object_context_gate_exact_compatible_mean",
+    )
+    context_gate_objectless = metric(
+        latest,
+        "val_object_context_gate_objectless_visible_mean",
+    )
+    context_delta_exact = metric(
+        latest,
+        "val_object_context_delta_norm_exact_compatible_mean",
+    )
+    context_delta_objectless = metric(
+        latest,
+        "val_object_context_delta_norm_objectless_visible_mean",
+    )
+    context_scale = metric(latest, "val_object_context_scale")
+    wrong_prompt_drop = metric(
+        latest,
+        "val_object_prompt_correct_minus_wrong_true_logit",
+    )
+    wrong_prompt_sat = metric(
+        latest,
+        "val_object_prompt_wrong_class_margin_sat_rate",
+    )
+    sensitivity_ambiguous_rate = metric(
+        latest,
+        "val_object_prompt_sensitivity_ambiguous_rate",
+    )
+    sensitivity_drop = metric(
+        latest,
+        "val_object_prompt_correct_minus_dropped_true_logit_ambiguous",
+    )
+    sensitivity_sat = metric(
+        latest,
+        "val_object_prompt_sensitivity_margin_sat_rate",
+    )
+    wrong_laptop_readbook = metric(
+        latest,
+        "val_object_prompt_wrong_Uselaptop_minus_Readbook_margin",
+    )
+    dropped_laptop_watchtv = metric(
+        latest,
+        "val_object_prompt_dropped_Uselaptop_minus_WatchTV_margin",
+    )
     prompt_drop_objectless_match = metric(
         latest,
         "val_object_prompt_drop_objectless_pred_match",
@@ -724,6 +802,22 @@ def print_decision(epoch_df):
     prompt_drop_objectless_object_rate = metric(
         latest,
         "val_object_prompt_drop_objectless_object_action_pred_rate",
+    )
+    prompt_distractor_objectless_match = metric(
+        latest,
+        "val_object_prompt_distractor_objectless_pred_match",
+    )
+    prompt_distractor_objectless_kl = metric(
+        latest,
+        "val_object_prompt_distractor_objectless_kl",
+    )
+    prompt_distractor_objectless_acc = metric(
+        latest,
+        "val_object_prompt_distractor_objectless_acc",
+    )
+    prompt_distractor_objectless_object_rate = metric(
+        latest,
+        "val_object_prompt_distractor_objectless_object_action_pred_rate",
     )
     prompt_drop_exact_logit = metric(
         latest,
@@ -820,6 +914,26 @@ def print_decision(epoch_df):
             f"objectless_max {fmt(prompt_objectless_attention_max)}, "
             f"objectless_entropy {fmt(prompt_objectless_attention_entropy)}"
         )
+    if pd.notna(context_gate_exact) or pd.notna(context_scale):
+        print(
+            "object context adapter: "
+            f"gate_exact {fmt(context_gate_exact)}, "
+            f"gate_objectless {fmt(context_gate_objectless)}, "
+            f"delta_exact {fmt(context_delta_exact)}, "
+            f"delta_objectless {fmt(context_delta_objectless)}, "
+            f"scale {fmt(context_scale)}"
+        )
+    if pd.notna(wrong_prompt_drop) or pd.notna(sensitivity_drop):
+        print(
+            "prompt counterfactual training: "
+            f"correct_minus_wrong {fmt(wrong_prompt_drop)}, "
+            f"wrong_sat {fmt(wrong_prompt_sat)}, "
+            f"ambiguous_rate {fmt(sensitivity_ambiguous_rate)}, "
+            f"correct_minus_dropped_amb {fmt(sensitivity_drop)}, "
+            f"sensitivity_sat {fmt(sensitivity_sat)}, "
+            f"u_wrong_minus_read {fmt(wrong_laptop_readbook)}, "
+            f"u_dropped_minus_watch {fmt(dropped_laptop_watchtv)}"
+        )
     if (
         pd.notna(prompt_drop_objectless_match)
         or pd.notna(prompt_drop_exact_logit)
@@ -831,6 +945,10 @@ def print_decision(epoch_df):
             f"objectless_prob_delta {fmt(prompt_drop_objectless_prob_delta)}, "
             f"objectless_acc {fmt(prompt_drop_objectless_acc)}, "
             f"objectless_obj_rate {fmt(prompt_drop_objectless_object_rate)}, "
+            f"distractor_match {fmt(prompt_distractor_objectless_match)}, "
+            f"distractor_kl {fmt(prompt_distractor_objectless_kl)}, "
+            f"distractor_acc {fmt(prompt_distractor_objectless_acc)}, "
+            f"distractor_obj_rate {fmt(prompt_distractor_objectless_object_rate)}, "
             f"exact_logit_drop {fmt(prompt_drop_exact_logit)}, "
             f"exact_prob_drop {fmt(prompt_drop_exact_prob)}, "
             f"exact_match {fmt(prompt_drop_exact_match)}, "
@@ -933,6 +1051,29 @@ def print_row(title, row):
             f"objectless_max {metric(row, 'val_object_prompt_attention_objectless_visible_max'):.4f}, "
             f"objectless_entropy {metric(row, 'val_object_prompt_attention_objectless_visible_entropy'):.4f}"
         )
+    if pd.notna(metric(row, "val_object_context_gate_exact_compatible_mean")):
+        print(
+            "object context adapter: "
+            f"gate_exact {metric(row, 'val_object_context_gate_exact_compatible_mean'):.4f}, "
+            f"gate_objectless {metric(row, 'val_object_context_gate_objectless_visible_mean'):.4f}, "
+            f"delta_exact {metric(row, 'val_object_context_delta_norm_exact_compatible_mean'):.4f}, "
+            f"delta_objectless {metric(row, 'val_object_context_delta_norm_objectless_visible_mean'):.4f}, "
+            f"scale {metric(row, 'val_object_context_scale'):.4f}"
+        )
+    if pd.notna(metric(row, "val_object_prompt_correct_minus_wrong_true_logit")):
+        print(
+            "prompt counterfactual training: "
+            f"correct_minus_wrong {metric(row, 'val_object_prompt_correct_minus_wrong_true_logit'):.4f}, "
+            f"wrong_sat {metric(row, 'val_object_prompt_wrong_class_margin_sat_rate'):.4f}, "
+            f"ambiguous_rate {metric(row, 'val_object_prompt_sensitivity_ambiguous_rate'):.4f}, "
+            "correct_minus_dropped_amb "
+            f"{metric(row, 'val_object_prompt_correct_minus_dropped_true_logit_ambiguous'):.4f}, "
+            f"sensitivity_sat {metric(row, 'val_object_prompt_sensitivity_margin_sat_rate'):.4f}, "
+            "u_wrong_minus_read "
+            f"{metric(row, 'val_object_prompt_wrong_Uselaptop_minus_Readbook_margin'):.4f}, "
+            "u_dropped_minus_watch "
+            f"{metric(row, 'val_object_prompt_dropped_Uselaptop_minus_WatchTV_margin'):.4f}"
+        )
     if pd.notna(metric(row, "val_object_prompt_drop_objectless_pred_match")):
         print(
             "object-prompt drop: "
@@ -943,6 +1084,14 @@ def print_row(title, row):
             f"objectless_acc {metric(row, 'val_object_prompt_drop_objectless_acc'):.4f}, "
             "objectless_obj_rate "
             f"{metric(row, 'val_object_prompt_drop_objectless_object_action_pred_rate'):.4f}, "
+            "distractor_match "
+            f"{metric(row, 'val_object_prompt_distractor_objectless_pred_match'):.4f}, "
+            "distractor_kl "
+            f"{metric(row, 'val_object_prompt_distractor_objectless_kl'):.4f}, "
+            "distractor_acc "
+            f"{metric(row, 'val_object_prompt_distractor_objectless_acc'):.4f}, "
+            "distractor_obj_rate "
+            f"{metric(row, 'val_object_prompt_distractor_objectless_object_action_pred_rate'):.4f}, "
             f"exact_logit_drop {metric(row, 'val_object_prompt_drop_exact_true_logit_drop'):.4f}, "
             f"exact_prob_drop {metric(row, 'val_object_prompt_drop_exact_true_prob_drop'):.4f}, "
             f"exact_match {metric(row, 'val_object_prompt_drop_exact_pred_match'):.4f}, "
@@ -1082,9 +1231,11 @@ def main():
     print("\nREAD THIS:")
     print("- Main proof: val_f1/per-action accuracy stay healthy while object prompts and heatmaps improve.")
     print("- Runtime detections should guide actor/visual representation, not add direct action logits.")
-    print("- Exact compatible detections should raise object-prompt grounding, not create a second classifier.")
-    print("- Teacher-object removal is supporting evidence, not the checkpoint target by itself.")
+    print("- Exact compatible detections should raise object-prompt grounding and object-context adapter use.")
+    print("- Prompt grounding alone is not enough; watch correct-vs-wrong and ambiguous dropped-prompt margins.")
+    print("- Teacher-object removal is supporting evidence, but ambiguous prompt sensitivity is the causal target.")
     print("- Guardrail: val_f1/per-action target accuracy should not collapse while object-use metrics rise.")
+    print("- Objectless distractor-prompt object-action rate must stay low.")
     print("- Heatmap/object-channel metrics are secondary; use --verbose when debugging teacher quality.")
     print("- actor_object_prompt_tokens is the clean runtime object path.")
 

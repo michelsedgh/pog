@@ -260,6 +260,23 @@ class ToyotaSMDataset(Dataset):
         if self.toyota_min_pose_frames < 1:
             raise ValueError("toyota_min_pose_frames must be >= 1")
         self.current_epoch = int(kwargs.get("toyota_current_epoch", 0))
+        self.objectful_low_motion_aug_prob = float(
+            kwargs.get("objectful_low_motion_aug_prob", 0.0)
+        )
+        if not 0 <= self.objectful_low_motion_aug_prob <= 1:
+            raise ValueError("objectful_low_motion_aug_prob must be in [0, 1]")
+        self.objectful_low_motion_action_names = {
+            action_name
+            for action_name in (
+                "Uselaptop",
+                "Readbook",
+                "WatchTV",
+                "Usetelephone",
+                "Usetablet",
+                "Eat.Attable",
+            )
+            if action_name in self.action_names
+        }
         self.synthetic_warmup_epochs = int(
             kwargs.get("toyota_synthetic_warmup_epochs", 3)
         )
@@ -517,6 +534,7 @@ class ToyotaSMDataset(Dataset):
         parser.add_argument("--toyota_min_pose_frames", type=int, default=1)
         parser.add_argument("--toyota_pose_landmarks", type=int, default=13)
         parser.add_argument("--toyota_current_epoch", type=int, default=0)
+        parser.add_argument("--objectful_low_motion_aug_prob", type=float, default=0.0)
         parser.add_argument("--toyota_synthetic_warmup_epochs", type=int, default=3)
         parser.add_argument("--toyota_synthetic_two_actor_prob", type=float, default=0.0)
         parser.add_argument("--toyota_synthetic_three_actor_prob", type=float, default=0.0)
@@ -775,6 +793,44 @@ class ToyotaSMDataset(Dataset):
         ):
             frames_idx = self._ensure_pose_frame_indices(frames_idx, pose_available)
         return frames_idx
+
+    def _maybe_low_motion_objectful_frame_indices(
+        self,
+        frames_idx,
+        file_id,
+        action_name,
+        n_frames,
+    ):
+        if (
+            self.set_type != "train"
+            or self.objectful_low_motion_aug_prob <= 0
+            or action_name not in self.objectful_low_motion_action_names
+            or np.random.random() >= self.objectful_low_motion_aug_prob
+        ):
+            return frames_idx
+
+        frames_idx = np.asarray(frames_idx, dtype=int)
+        if frames_idx.size == 0:
+            return frames_idx
+
+        expected_frames = self._expected_interaction_frames(file_id, action_name)
+        frame_min = int(frames_idx.min())
+        frame_max = int(frames_idx.max())
+        expected_frames = expected_frames[
+            (expected_frames >= frame_min) & (expected_frames <= frame_max)
+        ]
+        if expected_frames.size > 0:
+            center = int(expected_frames[np.random.randint(0, expected_frames.size)])
+        else:
+            center = int(frames_idx[np.random.randint(0, frames_idx.size)])
+
+        original_span = max(int(frame_max - frame_min), 1)
+        low_motion_radius = max(1, int(round(original_span * 0.08)))
+        start = max(0, center - low_motion_radius)
+        end = min(int(n_frames) - 1, center + low_motion_radius)
+        if end < start:
+            start = end = max(0, min(int(n_frames) - 1, center))
+        return np.linspace(start, end, self.n_frames, dtype=int)
 
     def _ensure_pose_frame_indices(self, frames_idx, pose_available):
         pose_available = np.asarray(pose_available, dtype=bool)
@@ -1114,6 +1170,12 @@ class ToyotaSMDataset(Dataset):
                     file_id,
                     action_name,
                 )
+            frames_idx = self._maybe_low_motion_objectful_frame_indices(
+                frames_idx,
+                file_id,
+                action_name,
+                n_frames,
+            )
             frames_idx = self._ensure_objectless_hard_negative_frame_indices(
                 frames_idx,
                 file_id,

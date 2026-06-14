@@ -19,7 +19,6 @@ from google.auth.transport.requests import Request
 
 REPO_URL = "https://github.com/michelsedgh/pog.git"
 REPO_DIR = "/content/pog"
-POGUISE_REVISION = os.environ.get("POGUISE_REVISION", "main").strip()
 
 SCRATCH_ROOT = "/mnt/local-scratch" if os.path.isdir("/mnt/local-scratch") else "/content"
 
@@ -66,25 +65,12 @@ def run(cmd, label=None, cwd=None):
 run(["apt-get", "update"], "Updating apt")
 run(["apt-get", "install", "-y", "aria2", "ffmpeg", "fuse"], "Installing system tools")
 
-if not POGUISE_REVISION:
-    raise RuntimeError("POGUISE_REVISION must be a branch, tag, or commit SHA.")
-
 if os.path.isdir(REPO_DIR):
-    run(["git", "-C", REPO_DIR, "fetch", "--tags", "origin"], "Fetching repo")
+    run(["git", "-C", REPO_DIR, "fetch", "origin", "main"], "Fetching repo")
+    run(["git", "-C", REPO_DIR, "checkout", "main"], "Checking out main")
+    run(["git", "-C", REPO_DIR, "pull", "--ff-only", "origin", "main"], "Pulling latest main")
 else:
-    run(["git", "clone", REPO_URL, REPO_DIR], "Cloning repo")
-
-checkout_ref = "origin/main" if POGUISE_REVISION == "main" else POGUISE_REVISION
-if POGUISE_REVISION == "main":
-    print(
-        "\nWARNING: POGUISE_REVISION is 'main'. Set POGUISE_REVISION to a commit SHA "
-        "for a fully reproducible run.",
-        flush=True,
-    )
-run(
-    ["git", "-C", REPO_DIR, "checkout", "--detach", checkout_ref],
-    f"Checking out POGUISE_REVISION={POGUISE_REVISION}",
-)
+    run(["git", "clone", "--branch", "main", REPO_URL, REPO_DIR], "Cloning repo")
 
 run(["git", "-C", REPO_DIR, "log", "-1", "--oneline"], "Current repo commit")
 run(["git", "-C", REPO_DIR, "status", "--short"], "Current repo status")
@@ -412,7 +398,7 @@ def run_training_with_epoch_summaries(cmd, run_name, epoch_dir, poll_secs=20):
     return str(run_dir)
 
 TS = datetime.now().strftime("%Y%m%d_%H%M%S")
-RUN_NAME = f"actor_object_prompted_poguiseplus_clean_epoch15_{TS}"
+RUN_NAME = f"actor_object_context_prompt_causal_epoch15_{TS}"
 EPOCH_DIR = str(Path(DATA_DIR) / "checkpoints" / RUN_NAME / "epoch_checkpoints")
 
 cmd = [
@@ -447,6 +433,9 @@ cmd = [
 
     # Runtime detections are transformer prompt tokens, not action-logit experts.
     "--actor_object_prompt_tokens", "1",
+    "--object_context_adapter", "1",
+    "--object_context_scale_init", "-2.0",
+    "--object_context_gate_bias", "-1.0",
     "--actor_object_prompt_box_prior_weight", "0.05",
     "--actor_object_prompt_box_prior_expand", "1.25",
     "--num_scene_object_tokens", "32",
@@ -507,6 +496,11 @@ cmd = [
 
     "--motion_aux_loss_weight", "0.35",
     "--object_prompt_grounding_loss_weight", "0.30",
+    "--object_prompt_wrong_class_loss_weight", "0.10",
+    "--object_prompt_wrong_class_margin", "0.20",
+    "--object_prompt_sensitivity_loss_weight", "0.10",
+    "--object_prompt_sensitivity_margin", "0.20",
+    "--object_prompt_sensitivity_motion_margin_threshold", "1.0",
     "--objectless_prompt_consistency_loss_weight", "0.30",
     "--objectless_object_action_suppression_loss_weight", "0.60",
     "--object_class_dropout_prob", "0.0",
@@ -514,6 +508,7 @@ cmd = [
 
     "--toyota_pose_guided_sampling", "1",
     "--toyota_min_pose_frames", "1",
+    "--objectful_low_motion_aug_prob", "0.25",
     "--toyota_synthetic_warmup_epochs", "2",
     "--toyota_synthetic_two_actor_prob", "0.30",
     "--toyota_synthetic_three_actor_prob", "0.0",
