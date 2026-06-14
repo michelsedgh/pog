@@ -76,7 +76,7 @@ class ToyotaSMDataset(Dataset):
             raise ValueError(
                 "interaction_object_classes was removed. Actor-object heatmaps "
                 "are now one interacted-object channel per actor; object class "
-                "semantics come from scene object tokens."
+                "semantics come from runtime object prompt tokens."
             )
         self.task_type = kwargs["task_type"]
         self.action_taxonomy = normalize_toyota_action_taxonomy(
@@ -797,9 +797,12 @@ class ToyotaSMDataset(Dataset):
     def _maybe_low_motion_objectful_frame_indices(
         self,
         frames_idx,
+        idx,
         file_id,
         action_name,
         n_frames,
+        height,
+        width,
     ):
         if (
             self.set_type != "train"
@@ -820,17 +823,118 @@ class ToyotaSMDataset(Dataset):
             (expected_frames >= frame_min) & (expected_frames <= frame_max)
         ]
         if expected_frames.size > 0:
-            center = int(expected_frames[np.random.randint(0, expected_frames.size)])
+            candidate_frames = expected_frames
+            fallback_center = int(
+                expected_frames[np.random.randint(0, expected_frames.size)]
+            )
         else:
-            center = int(frames_idx[np.random.randint(0, frames_idx.size)])
+            candidate_frames = np.arange(frame_min, frame_max + 1, dtype=int)
+            fallback_center = int(frames_idx[np.random.randint(0, frames_idx.size)])
 
         original_span = max(int(frame_max - frame_min), 1)
         low_motion_radius = max(1, int(round(original_span * 0.08)))
+        center = self._low_motion_objectful_center(
+            idx,
+            candidate_frames,
+            fallback_center,
+            n_frames,
+            height,
+            width,
+            low_motion_radius,
+        )
+
         start = max(0, center - low_motion_radius)
         end = min(int(n_frames) - 1, center + low_motion_radius)
         if end < start:
             start = end = max(0, min(int(n_frames) - 1, center))
         return np.linspace(start, end, self.n_frames, dtype=int)
+
+    def _low_motion_objectful_center(
+        self,
+        idx,
+        candidate_frames,
+        fallback_center,
+        n_frames,
+        height,
+        width,
+        radius,
+    ):
+        keypoints = self._landmarks_array_for_index(idx, n_frames)
+        if keypoints is None:
+            return int(fallback_center)
+
+        candidate_frames = np.asarray(candidate_frames, dtype=int)
+        candidate_frames = np.unique(
+            np.clip(candidate_frames, 0, max(int(n_frames) - 1, 0))
+        )
+        if candidate_frames.size == 0:
+            return int(fallback_center)
+
+        scored = []
+        for center in candidate_frames:
+            score = self._landmark_motion_score(
+                keypoints,
+                int(center),
+                int(radius),
+                height,
+                width,
+            )
+            if np.isfinite(score):
+                scored.append((float(score), int(center)))
+        if not scored:
+            return int(fallback_center)
+
+        scored.sort(key=lambda item: item[0])
+        top_k = max(1, int(math.ceil(len(scored) * 0.15)))
+        return int(scored[np.random.randint(0, top_k)][1])
+
+    def _landmarks_array_for_index(self, idx, n_frames):
+        if not hasattr(self, "landmark_list"):
+            return None
+        if idx < 0 or idx >= len(self.landmark_list):
+            return None
+        landmarks = self.landmark_list[idx]
+        if len(landmarks) == 0:
+            return None
+        if isinstance(landmarks, torch.Tensor):
+            keypoints = landmarks.detach().cpu().numpy()
+        else:
+            keypoints = torch.stack(
+                [
+                    item if isinstance(item, torch.Tensor) else torch.as_tensor(item)
+                    for item in landmarks
+                ]
+            ).detach().cpu().numpy()
+        keypoints = np.asarray(keypoints, dtype=np.float32)[: int(n_frames)]
+        if keypoints.ndim != 3 or keypoints.shape[0] < 2:
+            return None
+        return keypoints
+
+    def _landmark_motion_score(self, keypoints, center, radius, height, width):
+        if keypoints is None or keypoints.shape[0] < 2:
+            return float("inf")
+        lo = max(0, int(center) - max(int(radius), 1))
+        hi = min(int(keypoints.shape[0]) - 1, int(center) + max(int(radius), 1))
+        if hi <= lo:
+            return float("inf")
+
+        window = keypoints[lo : hi + 1]
+        visible = self._visible_keypoints(window, height, width)
+        if visible.ndim != 2 or visible.shape[0] < 2:
+            return float("inf")
+
+        valid_pairs = visible[1:] & visible[:-1]
+        displacement = np.linalg.norm(
+            window[1:] - window[:-1],
+            axis=-1,
+        )
+        if not valid_pairs.any():
+            return float("inf")
+        values = displacement[valid_pairs]
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            return float("inf")
+        return float(np.median(values))
 
     def _ensure_pose_frame_indices(self, frames_idx, pose_available):
         pose_available = np.asarray(pose_available, dtype=bool)
@@ -1172,9 +1276,12 @@ class ToyotaSMDataset(Dataset):
                 )
             frames_idx = self._maybe_low_motion_objectful_frame_indices(
                 frames_idx,
+                idx,
                 file_id,
                 action_name,
                 n_frames,
+                video_height,
+                video_width,
             )
             frames_idx = self._ensure_objectless_hard_negative_frame_indices(
                 frames_idx,
