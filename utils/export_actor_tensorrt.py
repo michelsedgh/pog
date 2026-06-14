@@ -19,11 +19,6 @@ def uses_prompt_object_proposals(hparams):
             "actor_object_slot_head checkpoints are no longer supported. "
             "Train/export with actor_object_prompt_tokens instead."
         )
-    if bool(hparams.get("actor_object_factorized_head", 0)):
-        raise RuntimeError(
-            "actor_object_factorized_head checkpoints are no longer supported. "
-            "Train/export with actor_object_prompt_tokens instead."
-        )
     return bool(hparams.get("actor_object_prompt_tokens", 0))
 
 
@@ -387,6 +382,9 @@ def checkpoint_payload(checkpoint_path, hparam_overrides=None):
         "actor_object_prompt_tokens": int(
             hparams.get("actor_object_prompt_tokens", 0)
         ),
+        "actor_object_residual_head": int(
+            hparams.get("actor_object_residual_head", 0)
+        ),
         "uses_object_proposals": int(uses_prompt_object_proposals(hparams)),
         "num_scene_object_tokens": int(hparams.get("num_scene_object_tokens", 0)),
         "num_object_classes": int(hparams.get("num_object_classes", 19)),
@@ -620,6 +618,9 @@ def main():
             "trt_safe_attention": int(hparams.get("trt_safe_attention", 0)),
             "actor_object_prompt_tokens": int(
                 hparams.get("actor_object_prompt_tokens", 0)
+            ),
+            "actor_object_residual_head": int(
+                hparams.get("actor_object_residual_head", 0)
             ),
             "uses_object_proposals": int(uses_object_proposals),
         },

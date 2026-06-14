@@ -213,26 +213,20 @@ def _validate_active_actor_action_path(module):
     model = module.model
     if not getattr(model, "actor_prompt", False):
         return
-    factorized_enabled = bool(
-        getattr(model, "actor_object_factorized_head_enabled", False)
-        or model.hparams.get("actor_object_factorized_head", 0)
+    object_residual_enabled = bool(
+        getattr(model, "actor_object_residual_head_enabled", False)
+        or model.hparams.get("actor_object_residual_head", 0)
     )
-    if factorized_enabled:
-        if getattr(model, "actor_head", None) is not None:
+    if object_residual_enabled:
+        if getattr(model, "actor_head", None) is None:
             raise RuntimeError(
-                "Factorized actor-object runs must not keep the flat actor_head "
-                "active. Objectless/objectful scoring must go through "
-                "factorized_interaction_action_head."
+                "actor_object_residual_head requires actor_head base logits. "
+                "Runtime objects may only add bounded residual evidence."
             )
-        if getattr(model, "factorized_interaction_action_head", None) is None:
+        if getattr(model, "object_residual_action_head", None) is None:
             raise RuntimeError(
-                "actor_object_factorized_head is enabled but "
-                "factorized_interaction_action_head was not constructed."
-            )
-        if getattr(model, "object_context_adapter_enabled", False):
-            raise RuntimeError(
-                "object_context_adapter must be disabled in factorized actor-object "
-                "runs. Runtime object prompts belong inside the objectful branch."
+                "actor_object_residual_head is enabled but "
+                "object_residual_action_head was not constructed."
             )
         return
     actor_head = getattr(model, "actor_head", None)
@@ -334,7 +328,7 @@ def _validate_no_deprecated_object_path(checkpoint):
         raise ValueError(
             "Deprecated object specialist checkpoint detected. The active "
             "actor-object path uses object prompt tokens inside the transformer "
-            "and the factorized interaction action head. "
+            "and the bounded object-residual action head. "
             f"First deprecated keys: {preview}"
         )
 
@@ -463,46 +457,35 @@ def build_parser():
         default=10.0,
     )
     parser.add_argument("--motion_aux_loss_weight", type=float, default=0.25)
-    parser.add_argument("--factorized_presence_loss_weight", type=float, default=1.0)
     parser.add_argument(
-        "--factorized_objectful_within_loss_weight",
-        type=float,
-        default=0.5,
-    )
-    parser.add_argument(
-        "--factorized_prompt_relation_loss_weight",
+        "--object_residual_prompt_relation_loss_weight",
         type=float,
         default=0.0,
     )
     parser.add_argument(
-        "--factorized_prompt_relation_loss_final_weight",
+        "--object_residual_prompt_relation_loss_final_weight",
         type=float,
         default=None,
     )
     parser.add_argument(
-        "--factorized_visual_relation_loss_weight",
-        type=float,
-        default=0.0,
-    )
-    parser.add_argument(
-        "--factorized_visual_relation_loss_final_weight",
-        type=float,
-        default=None,
-    )
-    parser.add_argument(
-        "--factorized_relation_loss_decay_start_epoch",
+        "--object_residual_relation_loss_decay_start_epoch",
         type=int,
         default=0,
     )
     parser.add_argument(
-        "--factorized_relation_loss_decay_end_epoch",
+        "--object_residual_relation_loss_decay_end_epoch",
         type=int,
         default=0,
     )
     parser.add_argument(
-        "--factorized_relation_confuser_margin",
+        "--object_residual_relation_confuser_margin",
         type=float,
         default=1.0,
+    )
+    parser.add_argument(
+        "--object_residual_null_relation_loss_weight",
+        type=float,
+        default=0.25,
     )
     parser.add_argument("--object_prompt_grounding_loss_weight", type=float, default=0.0)
     parser.add_argument(
@@ -561,20 +544,20 @@ def main():
         )
     if hparams.actor_object_prompt_tokens and not hparams.actor_prompt:
         raise ValueError("actor_object_prompt_tokens requires actor_prompt")
-    if getattr(hparams, "actor_object_factorized_head", 0):
+    if getattr(hparams, "actor_object_residual_head", 0):
         if not hparams.actor_object_prompt_tokens:
             raise ValueError(
-                "actor_object_factorized_head requires --actor_object_prompt_tokens 1"
-            )
-        if getattr(hparams, "object_context_adapter", 0):
-            raise ValueError(
-                "actor_object_factorized_head requires --object_context_adapter 0; "
-                "runtime objects must enter only inside the factorized objectful branch."
+                "actor_object_residual_head requires --actor_object_prompt_tokens 1"
             )
         if not hparams.actor_interaction_heatmaps:
             raise ValueError(
-                "actor_object_factorized_head requires --actor_interaction_heatmaps 1"
+                "actor_object_residual_head requires --actor_interaction_heatmaps 1"
             )
+    elif hparams.actor_object_prompt_tokens:
+        raise ValueError(
+            "actor_object_prompt_tokens requires --actor_object_residual_head 1; "
+            "runtime objects may only enter as bounded residual evidence."
+        )
     if (
         hparams.actor_object_prompt_tokens
         and not hparams.object_detector_cache

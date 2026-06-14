@@ -189,17 +189,23 @@ def main():
             "actor_object_slot_head checkpoints are no longer supported. "
             "Train/export with actor_object_prompt_tokens instead."
         )
-    if bool(hparams.get("actor_object_factorized_head", 0)):
-        raise RuntimeError(
-            "actor_object_factorized_head checkpoints are no longer supported. "
-            "Train/export with actor_object_prompt_tokens instead."
-        )
     actor_object_prompt_tokens = bool(hparams.get("actor_object_prompt_tokens", 0))
+    actor_object_residual_head = bool(
+        hparams.get("actor_object_residual_head", 0)
+    )
     uses_object_proposals = actor_object_prompt_tokens
     if uses_object_proposals != bool(engine.uses_object_proposals):
         raise RuntimeError(
             "Checkpoint/engine object-proposal input mismatch: "
             f"checkpoint={uses_object_proposals}, engine={engine.uses_object_proposals}"
+        )
+    if actor_object_residual_head != bool(
+        getattr(engine, "actor_object_residual_head", False)
+    ):
+        raise RuntimeError(
+            "Checkpoint/engine object_residual-head mismatch: "
+            f"checkpoint={actor_object_residual_head}, "
+            f"engine={engine.actor_object_residual_head}"
         )
     wrapped = ActorExport(model, uses_object_proposals).eval()
 
@@ -249,6 +255,7 @@ def main():
         "onnx": str(Path(args.onnx)),
         "engine": str(Path(args.engine)),
         "actor_object_prompt_tokens": actor_object_prompt_tokens,
+        "actor_object_residual_head": actor_object_residual_head,
         "uses_object_proposals": uses_object_proposals,
         "hparam_overrides": hparam_overrides,
         "num_actor_tokens": int(engine.num_actor_tokens),

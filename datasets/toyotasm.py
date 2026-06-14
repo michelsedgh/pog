@@ -125,19 +125,23 @@ class ToyotaSMDataset(Dataset):
                 "actor_object_prompt_tokens. Set --actor_object_prompt_tokens 1 "
                 "and keep --actor_object_slot_head 0."
             )
-        self.actor_object_factorized_head = bool(
-            kwargs.get("actor_object_factorized_head", 0)
+        self.actor_object_residual_head = bool(
+            kwargs.get("actor_object_residual_head", 0)
         )
-        if self.actor_object_factorized_head and not self.actor_object_prompt_tokens:
+        if self.actor_object_residual_head and not self.actor_object_prompt_tokens:
             raise ValueError(
-                "actor_object_factorized_head requires actor_object_prompt_tokens"
+                "actor_object_residual_head requires actor_object_prompt_tokens"
             )
-        if self.actor_object_factorized_head and not self.actor_interaction_heatmaps:
+        if self.actor_object_residual_head and not self.actor_interaction_heatmaps:
             raise ValueError(
-                "actor_object_factorized_head requires actor_interaction_heatmaps"
+                "actor_object_residual_head requires actor_interaction_heatmaps"
             )
         if self.actor_object_prompt_tokens and not self.actor_prompt:
             raise ValueError("actor_object_prompt_tokens requires actor_prompt")
+        if self.actor_object_prompt_tokens and not self.actor_object_residual_head:
+            raise ValueError(
+                "actor_object_prompt_tokens requires actor_object_residual_head"
+            )
         self.requires_object_proposals = self.actor_object_prompt_tokens
         self.num_scene_object_tokens = int(kwargs.get("num_scene_object_tokens", 32))
         if self.num_scene_object_tokens <= 0:

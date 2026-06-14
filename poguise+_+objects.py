@@ -398,7 +398,7 @@ def run_training_with_epoch_summaries(cmd, run_name, epoch_dir, poll_secs=20):
     return str(run_dir)
 
 TS = datetime.now().strftime("%Y%m%d_%H%M%S")
-RUN_NAME = f"actor_object_prompt_factorized_epoch15_{TS}"
+RUN_NAME = f"actor_object_residual_epoch45_{TS}"
 EPOCH_DIR = str(Path(DATA_DIR) / "checkpoints" / RUN_NAME / "epoch_checkpoints")
 
 cmd = [
@@ -431,13 +431,12 @@ cmd = [
 
     "--actor_interaction_heatmaps", "1",
 
-    # Runtime detections are transformer prompt tokens; final action scoring is factorized.
+    # Runtime detections are transformer prompt tokens; final scoring uses a bounded residual.
     "--actor_object_prompt_tokens", "1",
-    "--actor_object_factorized_head", "1",
-    "--object_context_adapter", "0",
-    "--actor_object_factorized_relation_scale_init", "-1.0",
-    "--actor_object_factorized_relation_logit_bound", "2.0",
-    "--actor_object_factorized_max_relation_scale", "1.5",
+    "--actor_object_residual_head", "1",
+    "--actor_object_residual_relation_scale_init", "-1.0",
+    "--actor_object_residual_relation_logit_bound", "2.0",
+    "--actor_object_residual_max_relation_scale", "1.5",
     "--actor_object_prompt_box_prior_weight", "0.05",
     "--actor_object_prompt_box_prior_expand", "1.25",
     "--num_scene_object_tokens", "32",
@@ -497,23 +496,20 @@ cmd = [
     "--poguiseplus_interaction_heatmap_center_temperature", "10.0",
 
     "--motion_aux_loss_weight", "0.35",
-    "--factorized_presence_loss_weight", "1.0",
-    "--factorized_objectful_within_loss_weight", "0.85",
-    "--factorized_prompt_relation_loss_weight", "0.35",
-    "--factorized_prompt_relation_loss_final_weight", "0.25",
-    "--factorized_visual_relation_loss_weight", "0.50",
-    "--factorized_visual_relation_loss_final_weight", "0.40",
-    "--factorized_relation_loss_decay_start_epoch", "3",
-    "--factorized_relation_loss_decay_end_epoch", "6",
-    "--factorized_relation_confuser_margin", "1.0",
+    "--object_residual_prompt_relation_loss_weight", "0.35",
+    "--object_residual_prompt_relation_loss_final_weight", "0.20",
+    "--object_residual_relation_loss_decay_start_epoch", "5",
+    "--object_residual_relation_loss_decay_end_epoch", "15",
+    "--object_residual_relation_confuser_margin", "1.0",
+    "--object_residual_null_relation_loss_weight", "0.25",
     "--object_prompt_grounding_loss_weight", "0.20",
     "--object_prompt_wrong_class_loss_weight", "0.05",
     "--object_prompt_wrong_class_margin", "0.20",
     "--object_prompt_sensitivity_loss_weight", "0.025",
     "--object_prompt_sensitivity_margin", "0.20",
     "--object_prompt_sensitivity_motion_margin_threshold", "1.0",
-    "--objectless_prompt_consistency_loss_weight", "0.0",
-    "--objectless_object_action_suppression_loss_weight", "0.45",
+    "--objectless_prompt_consistency_loss_weight", "0.20",
+    "--objectless_object_action_suppression_loss_weight", "0.60",
     "--object_class_dropout_prob", "0.0",
     "--object_class_wrong_prob", "0.0",
 
@@ -529,8 +525,8 @@ cmd = [
     "--batch_size", "32",
     "--accum_grad_batches", "2",
 
-    "--max_epochs", "15",
-    "--t_max_scheduler", "15",
+    "--max_epochs", "45",
+    "--t_max_scheduler", "45",
 
     "--lr", "3e-5",
     "--lr_head", "5e-4",

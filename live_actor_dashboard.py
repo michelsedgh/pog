@@ -18,16 +18,31 @@ from utils.actor_tensorrt import TensorRTActorEngine
 from utils.rfdetr_tensorrt import TensorRTRFDETRNano
 
 TRAINING_CLIP_FRAMES = 16
-TRAINING_SPAN_FRAMES = 128
+TRAINING_TEMPORAL_END_OFFSET = 128
+TRAINING_SPAN_FRAMES = TRAINING_TEMPORAL_END_OFFSET + 1
+DEFAULT_TRAINING_SOURCE_FPS = 30.0
+LIVE_CAPTURE_BUFFER_FRAMES = 256
 MODEL_INPUT_SIZE = 224
 MODEL_SHORT_SIDE = 256
 DETECTION_EVERY_FRAME = 1
 DEFAULT_ACTION_EVERY_FRAMES = 8
-DEFAULT_ACTION_SMOOTHING_WINDOW = 5
-DEFAULT_ACTION_SWITCH_MARGIN = 0.08
-DEFAULT_ACTION_STATE_ALPHA = 0.75
-DEFAULT_ACTION_STATE_PERSISTENCE_BONUS = 0.6
+DEFAULT_ACTION_SMOOTHING_WINDOW = 1
+DEFAULT_ACTION_SWITCH_MARGIN = 0.0
+DEFAULT_ACTION_STATE_ALPHA = 0.0
+DEFAULT_ACTION_STATE_PERSISTENCE_BONUS = 0.0
 MIN_OBJECT_TRACK_SAMPLE_COUNT = 2
+DEFAULT_PERSON_CONTAINMENT_THRESHOLD = 0.80
+DEFAULT_OBJECT_ACTOR_CONTEXT_MARGIN = 0.0
+
+
+def objectful_presence_probs(presence_logits):
+    if presence_logits is None:
+        return None
+    if presence_logits.shape[-1] == 2:
+        return torch.softmax(presence_logits, dim=-1)[..., 1]
+    if presence_logits.shape[-1] == 1:
+        return torch.sigmoid(presence_logits.squeeze(-1))
+    return torch.sigmoid(presence_logits)
 
 
 ACTION_CLASSES = toyota_action_names("CS", "toyota_31")
@@ -72,23 +87,63 @@ def parse_args():
     parser.add_argument("--object-threshold", type=float, default=0.25)
     parser.add_argument("--person-class-id", type=int, default=None)
     parser.add_argument("--person-nms-iou-threshold", type=float, default=0.65)
+    parser.add_argument(
+        "--person-containment-threshold",
+        type=float,
+        default=DEFAULT_PERSON_CONTAINMENT_THRESHOLD,
+        help=(
+            "Merge person detections when one box is mostly contained in another. "
+            "This prevents partial body detections from becoming separate actors."
+        ),
+    )
+    parser.add_argument(
+        "--object-actor-context-margin",
+        type=float,
+        default=DEFAULT_OBJECT_ACTOR_CONTEXT_MARGIN,
+        help=(
+            "Object prompt slot centers must be inside a kept actor box expanded "
+            "by this fraction of actor width/height."
+        ),
+    )
     parser.add_argument("--track-iou-threshold", type=float, default=0.30)
     parser.add_argument("--track-hold-frames", type=int, default=10)
     parser.add_argument("--camera-buffer-size", type=int, default=1)
+    parser.add_argument(
+        "--training-source-fps",
+        type=float,
+        default=DEFAULT_TRAINING_SOURCE_FPS,
+        help=(
+            "Source-video FPS used to convert the Toyota start..start+128 frame "
+            "training span into a live time window."
+        ),
+    )
+    parser.add_argument(
+        "--max-live-actors",
+        type=int,
+        default=1,
+        help=(
+            "Maximum RF-DETR person tracks to feed to the actor model. The live "
+            "dashboard defaults to one target actor to match the Toyota target-actor "
+            "training setup and avoid body-part detections becoming separate actors."
+        ),
+    )
     parser.add_argument(
         "--action-every-frames",
         type=int,
         default=DEFAULT_ACTION_EVERY_FRAMES,
         help=(
-            "Run the actor model every N camera frames after the 128-frame "
-            "clip buffer is ready. This stabilizes highly overlapping live windows."
+            "Legacy compatibility argument. Live actor scheduling uses the "
+            "Toyota training sample interval derived from --training-source-fps."
         ),
     )
     parser.add_argument(
         "--action-smoothing-window",
         type=int,
         default=DEFAULT_ACTION_SMOOTHING_WINDOW,
-        help="Number of per-track actor predictions to average before display.",
+        help=(
+            "Number of per-track actor predictions to average before display. "
+            "Default 1 shows the latest independent model window."
+        ),
     )
     parser.add_argument(
         "--action-switch-margin",
@@ -96,7 +151,7 @@ def parse_args():
         default=DEFAULT_ACTION_SWITCH_MARGIN,
         help=(
             "Smoothed probability margin required before a tracked actor label "
-            "switches to a different action."
+            "switches to a different action. Default 0 disables display hysteresis."
         ),
     )
     parser.add_argument(
@@ -134,6 +189,10 @@ def parse_args():
         raise ValueError("--detector-engine is required for live inference.")
     if args.track_hold_frames < 0:
         raise ValueError("--track-hold-frames must be >= 0")
+    if args.max_live_actors <= 0:
+        raise ValueError("--max-live-actors must be positive")
+    if args.training_source_fps <= 0:
+        raise ValueError("--training-source-fps must be positive")
     if args.action_every_frames <= 0:
         raise ValueError("--action-every-frames must be positive")
     if args.action_smoothing_window <= 0:
@@ -152,6 +211,10 @@ def parse_args():
         raise ValueError("--object-threshold must be in [0, 1]")
     if not 0.0 <= args.person_nms_iou_threshold <= 1.0:
         raise ValueError("--person-nms-iou-threshold must be in [0, 1]")
+    if not 0.0 <= args.person_containment_threshold <= 1.0:
+        raise ValueError("--person-containment-threshold must be in [0, 1]")
+    if args.object_actor_context_margin < 0.0:
+        raise ValueError("--object-actor-context-margin must be >= 0")
     return args
 
 
@@ -179,23 +242,17 @@ def softmax_numpy(logits):
     return exp / denom
 
 
-def object_class_ids_near_actor_box(actor_box_norm, packed_objects):
+def object_class_ids_near_actor_box(
+    actor_box_norm,
+    packed_objects,
+    margin=DEFAULT_OBJECT_ACTOR_CONTEXT_MARGIN,
+):
     actor_box = np.asarray(actor_box_norm, dtype=np.float32)
     if actor_box.shape != (4,):
         return set()
-    x1, y1, x2, y2 = [float(value) for value in actor_box]
-    width = max(x2 - x1, 1.0e-6)
-    height = max(y2 - y1, 1.0e-6)
-    pad_x = max(0.08, width * 0.35)
-    pad_y = max(0.08, height * 0.35)
-    expanded = np.asarray(
-        [
-            max(0.0, x1 - pad_x),
-            max(0.0, y1 - pad_y),
-            min(1.0, x2 + pad_x),
-            min(1.0, y2 + pad_y),
-        ],
-        dtype=np.float32,
+    expanded = expand_actor_box_norm(
+        actor_box,
+        margin,
     )
     object_ids = set()
     for item in packed_objects:
@@ -205,31 +262,124 @@ def object_class_ids_near_actor_box(actor_box_norm, packed_objects):
         object_box = np.asarray(object_box, dtype=np.float32)
         if object_box.shape != (4,):
             continue
-        center_x = float((object_box[0] + object_box[2]) * 0.5)
-        center_y = float((object_box[1] + object_box[3]) * 0.5)
-        center_inside = (
-            float(expanded[0]) <= center_x <= float(expanded[2])
-            and float(expanded[1]) <= center_y <= float(expanded[3])
-        )
-        overlaps = bbox_iou_xyxy(expanded, object_box) > 0.0
-        if center_inside or overlaps:
+        if object_box_near_expanded_actor(object_box, expanded):
             object_ids.add(int(item.get("object_class_id", -1)))
     object_ids.discard(-1)
     return object_ids
 
 
-def required_clip_buffer():
-    return TRAINING_SPAN_FRAMES
+def expand_actor_box_norm(actor_box, margin):
+    x1, y1, x2, y2 = [float(value) for value in actor_box]
+    width = max(x2 - x1, 1.0e-6)
+    height = max(y2 - y1, 1.0e-6)
+    pad_x = width * float(margin)
+    pad_y = height * float(margin)
+    return np.asarray(
+        [
+            max(0.0, x1 - pad_x),
+            max(0.0, y1 - pad_y),
+            min(1.0, x2 + pad_x),
+            min(1.0, y2 + pad_y),
+        ],
+        dtype=np.float32,
+    )
 
 
-def sample_buffer_items(buffer):
-    span = required_clip_buffer()
-    if len(buffer) < span:
-        raise ValueError(f"Need {span} buffered items, got {len(buffer)}")
-    start = len(buffer) - span
-    end = len(buffer) - 1
-    indices = np.linspace(start, end, TRAINING_CLIP_FRAMES, dtype=int)
-    return [buffer[int(index)] for index in indices]
+def object_box_near_expanded_actor(object_box, expanded_actor_box):
+    center_x = float((object_box[0] + object_box[2]) * 0.5)
+    center_y = float((object_box[1] + object_box[3]) * 0.5)
+    return bool(
+        float(expanded_actor_box[0]) <= center_x <= float(expanded_actor_box[2])
+        and float(expanded_actor_box[1]) <= center_y <= float(expanded_actor_box[3])
+    )
+
+
+def filter_object_inputs_to_actor_context(
+    object_inputs,
+    packed_objects,
+    actor_boxes_norm,
+    actor_keep,
+    margin,
+):
+    kept_actor_boxes = np.asarray(actor_boxes_norm, dtype=np.float32)[actor_keep]
+    if len(kept_actor_boxes) == 0 or not packed_objects:
+        for key in ("object_valid", "object_confs"):
+            if key in object_inputs:
+                object_inputs[key].zero_()
+        return object_inputs, []
+
+    expanded_actor_boxes = [
+        expand_actor_box_norm(actor_box, margin)
+        for actor_box in kept_actor_boxes
+        if np.asarray(actor_box).shape == (4,)
+    ]
+    keep_slots = set()
+    filtered = []
+    for item in packed_objects:
+        object_box = item.get("box_norm")
+        if object_box is None:
+            continue
+        object_box = np.asarray(object_box, dtype=np.float32)
+        if object_box.shape != (4,):
+            continue
+        if any(
+            object_box_near_expanded_actor(object_box, actor_box)
+            for actor_box in expanded_actor_boxes
+        ):
+            slot = int(item.get("slot", -1))
+            if slot >= 0:
+                keep_slots.add(slot)
+                filtered.append(item)
+
+    keep_mask = torch.zeros_like(object_inputs["object_valid"], dtype=torch.bool)
+    for slot in keep_slots:
+        if slot < keep_mask.shape[1]:
+            keep_mask[0, slot] = True
+    object_inputs["object_valid"] = object_inputs["object_valid"] & keep_mask
+    object_inputs["object_confs"] = object_inputs["object_confs"] * object_inputs[
+        "object_valid"
+    ].to(dtype=object_inputs["object_confs"].dtype)
+    return object_inputs, filtered
+
+
+def training_clip_span_seconds(training_source_fps):
+    return TRAINING_TEMPORAL_END_OFFSET / float(training_source_fps)
+
+
+def training_sample_interval_seconds(training_source_fps):
+    return training_clip_span_seconds(training_source_fps) / float(
+        max(TRAINING_CLIP_FRAMES - 1, 1)
+    )
+
+
+def clip_history_ready(buffer, training_source_fps):
+    if len(buffer) < TRAINING_CLIP_FRAMES:
+        return False
+    if len(buffer) < 2:
+        return False
+    return (
+        float(buffer[-1]["time"] - buffer[0]["time"])
+        >= training_clip_span_seconds(training_source_fps)
+    )
+
+
+def sample_buffer_items(buffer, training_source_fps):
+    if not clip_history_ready(buffer, training_source_fps):
+        raise ValueError(
+            "Need buffered history covering "
+            f"{training_clip_span_seconds(training_source_fps):.3f}s, "
+            f"got {len(buffer)} frames over "
+            f"{float(buffer[-1]['time'] - buffer[0]['time']) if len(buffer) >= 2 else 0.0:.3f}s"
+        )
+    end_time = float(buffer[-1]["time"])
+    start_time = end_time - training_clip_span_seconds(training_source_fps)
+    target_times = np.linspace(start_time, end_time, TRAINING_CLIP_FRAMES)
+    times = np.asarray([float(item["time"]) for item in buffer], dtype=np.float64)
+    sampled = []
+    for target_time in target_times:
+        index = int(np.argmin(np.abs(times - float(target_time))))
+        sampled.append(buffer[index])
+    return sampled
 
 
 def camera_source(value):
@@ -421,6 +571,80 @@ def nms_xyxy(boxes_xyxy, scores, iou_threshold):
     return np.asarray(keep, dtype=np.int64)
 
 
+def bbox_intersection_over_min_area(box_a, box_b):
+    ax1, ay1, ax2, ay2 = [float(value) for value in box_a]
+    bx1, by1, bx2, by2 = [float(value) for value in box_b]
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    inter_area = inter_w * inter_h
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    denom = min(area_a, area_b)
+    if denom <= 0.0:
+        return 0.0
+    return inter_area / denom
+
+
+def merge_related_person_boxes(boxes_xyxy, scores, containment_threshold):
+    boxes = np.asarray(boxes_xyxy, dtype=np.float32)
+    scores = np.asarray(scores, dtype=np.float32)
+    if len(boxes) <= 1:
+        return boxes, scores
+
+    parent = list(range(len(boxes)))
+
+    def find(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(a, b):
+        root_a = find(a)
+        root_b = find(b)
+        if root_a != root_b:
+            parent[root_b] = root_a
+
+    threshold = float(containment_threshold)
+    for i in range(len(boxes)):
+        for j in range(i + 1, len(boxes)):
+            if (
+                bbox_iou_xyxy(boxes[i], boxes[j]) > 0.0
+                or bbox_intersection_over_min_area(boxes[i], boxes[j]) >= threshold
+            ):
+                union(i, j)
+
+    groups = {}
+    for index in range(len(boxes)):
+        groups.setdefault(find(index), []).append(index)
+
+    merged_boxes = []
+    merged_scores = []
+    for indices in groups.values():
+        group_boxes = boxes[indices]
+        merged_boxes.append(
+            np.asarray(
+                [
+                    float(group_boxes[:, 0].min()),
+                    float(group_boxes[:, 1].min()),
+                    float(group_boxes[:, 2].max()),
+                    float(group_boxes[:, 3].max()),
+                ],
+                dtype=np.float32,
+            )
+        )
+        merged_scores.append(float(scores[indices].max()))
+
+    return (
+        np.stack(merged_boxes, axis=0).astype(np.float32),
+        np.asarray(merged_scores, dtype=np.float32),
+    )
+
+
 def detections_to_people_and_objects(
     detector,
     person_ids,
@@ -430,6 +654,7 @@ def detections_to_people_and_objects(
     max_actors,
     max_objects,
     person_nms_iou_threshold=0.65,
+    person_containment_threshold=DEFAULT_PERSON_CONTAINMENT_THRESHOLD,
 ):
     threshold = min(float(person_threshold), float(object_threshold))
     detections = detector.predict(Image.fromarray(frame_rgb), threshold=threshold)
@@ -451,6 +676,11 @@ def detections_to_people_and_objects(
     people_xyxy = xyxy[person_keep]
     people_conf = confidence[person_keep]
     if len(people_xyxy) > 0:
+        people_xyxy, people_conf = merge_related_person_boxes(
+            people_xyxy,
+            people_conf,
+            person_containment_threshold,
+        )
         nms_keep = nms_xyxy(
             people_xyxy,
             people_conf,
@@ -701,7 +931,8 @@ class ActionTrack:
     def update_action(self, probs, presence, extra_payload=None, object_class_ids=None):
         probs = np.asarray(probs, dtype=np.float32).copy()
         self.action_probs.append(probs)
-        self.presence_probs.append(float(presence))
+        if presence is not None:
+            self.presence_probs.append(float(presence))
         if extra_payload is not None:
             self.latest_extra_payload = dict(extra_payload)
         self._update_action_state(probs, object_class_ids or set())
@@ -794,19 +1025,22 @@ class TorchActorBackend:
                 "scene_object_tokens checkpoints use the removed object-selection "
                 "path. Use an actor_object_prompt_tokens checkpoint instead."
             )
-        if bool(self.hparams.get("actor_object_factorized_head", 0)):
-            raise RuntimeError(
-                "actor_object_factorized_head checkpoints are no longer supported. "
-                "Use actor_object_prompt_tokens."
-            )
         if bool(self.hparams.get("actor_object_slot_head", 0)):
             raise RuntimeError(
                 "actor_object_slot_head checkpoints are no longer supported. "
                 "Use actor_object_prompt_tokens."
             )
+        self.actor_object_residual_head = bool(
+            self.hparams.get("actor_object_residual_head", 0)
+        )
         self.actor_object_prompt_tokens = bool(
             self.hparams.get("actor_object_prompt_tokens", 0)
         )
+        if self.actor_object_prompt_tokens and not self.actor_object_residual_head:
+            raise RuntimeError(
+                "actor_object_prompt_tokens checkpoints require "
+                "actor_object_residual_head."
+            )
         self.uses_object_proposals = self.actor_object_prompt_tokens
         self.num_scene_object_tokens = (
             int(self.hparams.get("num_scene_object_tokens", 0))
@@ -969,6 +1203,12 @@ def run_actor_smoke(args, actor):
             f"logits={logits.shape[-1]}, labels={len(ACTION_CLASSES)}."
         )
     probs = torch.softmax(logits[0, 0], dim=-1)
+    presence_probs = objectful_presence_probs(presence)
+    presence_value = (
+        float(presence_probs[0, 0].item())
+        if presence_probs is not None
+        else None
+    )
     print(
         "smoke ok:",
         {
@@ -990,7 +1230,7 @@ def run_actor_smoke(args, actor):
             "valid_slots": int(valid.sum().item()),
             "top_action": ACTION_CLASSES[int(probs.argmax().item())],
             "top_prob": float(probs.max().item()),
-            "presence": float(torch.sigmoid(presence[0, 0]).item()),
+            "presence": presence_value,
         },
         flush=True,
     )
@@ -1178,6 +1418,7 @@ class LiveRunner:
                 f"fixed live input size {MODEL_INPUT_SIZE}."
             )
         self.max_actors = int(self.actor.num_actor_tokens)
+        self.max_live_actors = min(self.max_actors, int(self.args.max_live_actors))
         self.max_objects = int(self.actor.num_scene_object_tokens)
         self.detector, self.person_ids, self.detector_backend_name = load_detector_backend(args)
         self.state.update(
@@ -1191,13 +1432,16 @@ class LiveRunner:
                 getattr(self.actor, "uses_object_proposals", False)
             ),
             num_scene_object_tokens=int(self.actor.num_scene_object_tokens),
+            max_live_actors=int(self.max_live_actors),
             detector_backend=self.detector_backend_name,
             crop_mode=self.args.crop_mode,
             live_object_tokens=bool(self.args.live_object_tokens),
             person_nms_iou_threshold=float(self.args.person_nms_iou_threshold),
+            person_containment_threshold=float(self.args.person_containment_threshold),
+            object_actor_context_margin=float(self.args.object_actor_context_margin),
         )
-        self.detection_buffer = deque(maxlen=TRAINING_SPAN_FRAMES)
-        self.people_buffer = deque(maxlen=TRAINING_SPAN_FRAMES)
+        self.detection_buffer = deque(maxlen=LIVE_CAPTURE_BUFFER_FRAMES)
+        self.people_buffer = deque(maxlen=LIVE_CAPTURE_BUFFER_FRAMES)
         self.frame_count = 0
         self.last_boxes_xyxy = np.zeros((0, 4), dtype=np.float32)
         self.last_det_conf = np.zeros((0,), dtype=np.float32)
@@ -1209,23 +1453,34 @@ class LiveRunner:
         self.last_detector_ms = None
         self.last_actor_ms = None
         self.last_action_frame = None
+        self.last_action_time = None
+        self.last_packed_object_payload = []
         self.next_track_id = 1
         self.tracks = {}
         self.current_track_ids = []
         self.state.update(
             action_smoothing_window=int(self.args.action_smoothing_window),
-            action_every=int(self.args.action_every_frames),
+            action_every_seconds=float(
+                training_sample_interval_seconds(self.args.training_source_fps)
+            ),
             action_switch_margin=float(self.args.action_switch_margin),
+            training_source_fps=float(self.args.training_source_fps),
+            training_clip_span_sec=float(
+                training_clip_span_seconds(self.args.training_source_fps)
+            ),
             action_state_alpha=float(self.args.action_state_alpha),
             action_state_persistence_bonus=float(
                 self.args.action_state_persistence_bonus
             ),
+            max_live_actors=int(self.max_live_actors),
             detect_every=DETECTION_EVERY_FRAME,
             clip_frames=TRAINING_CLIP_FRAMES,
             clip_sampling="linspace",
             clip_span_frames=TRAINING_SPAN_FRAMES,
             crop_mode=self.args.crop_mode,
             live_object_tokens=bool(self.args.live_object_tokens),
+            person_containment_threshold=float(self.args.person_containment_threshold),
+            object_actor_context_margin=float(self.args.object_actor_context_margin),
         )
 
     def smoke(self):
@@ -1288,7 +1543,7 @@ class LiveRunner:
         camera = CameraFrameBuffer(
             self.args.camera,
             self.args.camera_buffer_size,
-            required_clip_buffer(),
+            LIVE_CAPTURE_BUFFER_FRAMES,
         )
         camera.start()
 
@@ -1337,37 +1592,53 @@ class LiveRunner:
                     frame_rgb,
                     self.args.det_threshold,
                     self.args.object_threshold,
-                    self.max_actors,
+                    self.max_live_actors,
                     self.max_objects,
                     self.args.person_nms_iou_threshold,
+                    self.args.person_containment_threshold,
                 )
                 self.last_detector_ms = (time.perf_counter() - started) * 1000.0
                 self.last_detection_frame = self.frame_count
                 self._update_tracks(self.last_boxes_xyxy)
                 detection_record = {
+                    "index": int(self.frame_count),
+                    "time": float(camera_frames[-1]["time"]),
                     "boxes_xyxy": self.last_object_boxes_xyxy.copy(),
                     "class_ids": self.last_object_class_ids.copy(),
                     "confs": self.last_object_conf.copy(),
                     "labels": list(self.last_object_labels),
                 }
                 people_record = {
+                    "index": int(self.frame_count),
+                    "time": float(camera_frames[-1]["time"]),
                     "boxes_xyxy": self.last_boxes_xyxy.copy(),
                     "confs": self.last_det_conf.copy(),
                 }
                 self.detection_buffer.append(detection_record)
                 self.people_buffer.append(people_record)
-                clip_ready = len(camera_frames) >= required_clip_buffer()
-                frames_since_action = (
+                clip_ready = clip_history_ready(
+                    camera_frames,
+                    self.args.training_source_fps,
+                )
+                latest_camera_time = float(camera_frames[-1]["time"])
+                seconds_since_action = (
                     None
-                    if self.last_action_frame is None
-                    else self.frame_count - self.last_action_frame
+                    if self.last_action_time is None
+                    else latest_camera_time - self.last_action_time
                 )
                 action_due = clip_ready and (
-                    self.last_action_frame is None
-                    or frames_since_action >= int(self.args.action_every_frames)
+                    self.last_action_time is None
+                    or seconds_since_action
+                    >= training_sample_interval_seconds(self.args.training_source_fps)
                 )
-                people_history_ready = len(self.people_buffer) >= required_clip_buffer()
-                object_history_ready = len(self.detection_buffer) >= required_clip_buffer()
+                people_history_ready = clip_history_ready(
+                    self.people_buffer,
+                    self.args.training_source_fps,
+                )
+                object_history_ready = clip_history_ready(
+                    self.detection_buffer,
+                    self.args.training_source_fps,
+                )
 
                 det_age = (
                     None
@@ -1375,9 +1646,10 @@ class LiveRunner:
                     else self.frame_count - self.last_detection_frame
                 )
                 message = (
-                    f"camera_buffer {len(camera_frames)}/{TRAINING_SPAN_FRAMES} "
-                    f"sampling=linspace span={TRAINING_SPAN_FRAMES} "
+                    f"camera_buffer {len(camera_frames)}/{LIVE_CAPTURE_BUFFER_FRAMES} "
+                    f"sampling=linspace source_span={TRAINING_SPAN_FRAMES} "
                     f"frames={TRAINING_CLIP_FRAMES} "
+                    f"target_span={training_clip_span_seconds(self.args.training_source_fps):.2f}s "
                     f"real_span={capture_info['capture_span_sec']:.1f}s "
                     f"cam_fps={capture_info['capture_fps']:.1f}"
                 )
@@ -1416,18 +1688,27 @@ class LiveRunner:
 
                 should_run_action = action_due and len(self.last_boxes_xyxy) > 0
                 if should_run_action:
-                    clip_frame_records = sample_buffer_items(camera_frames)
+                    clip_frame_records = sample_buffer_items(
+                        camera_frames,
+                        self.args.training_source_fps,
+                    )
                     clip_frames = [item["rgb"] for item in clip_frame_records]
                     clip_span_sec = float(
                         clip_frame_records[-1]["time"] - clip_frame_records[0]["time"]
                     )
                     clip_detection_records = (
-                        sample_buffer_items(self.detection_buffer)
+                        sample_buffer_items(
+                            self.detection_buffer,
+                            self.args.training_source_fps,
+                        )
                         if object_history_ready
                         else []
                     )
                     clip_people_records = (
-                        sample_buffer_items(self.people_buffer)
+                        sample_buffer_items(
+                            self.people_buffer,
+                            self.args.training_source_fps,
+                        )
                         if people_history_ready
                         else []
                     )
@@ -1477,6 +1758,13 @@ class LiveRunner:
                             self.device,
                             track_iou_threshold=0.2,
                         )
+                    object_inputs, packed_objects = filter_object_inputs_to_actor_context(
+                        object_inputs,
+                        packed_objects,
+                        boxes_norm,
+                        keep,
+                        self.args.object_actor_context_margin,
+                    )
                     if valid.any():
                         started = time.perf_counter()
                         logits, presence_logits = self.actor(
@@ -1487,6 +1775,7 @@ class LiveRunner:
                         )
                         self.last_actor_ms = (time.perf_counter() - started) * 1000.0
                         self.last_action_frame = self.frame_count
+                        self.last_action_time = latest_camera_time
                         if logits.shape[-1] != len(ACTION_CLASSES):
                             raise RuntimeError(
                                 "Actor output class count does not match dashboard "
@@ -1494,14 +1783,12 @@ class LiveRunner:
                                 f"labels={len(ACTION_CLASSES)}."
                             )
                         action_probs = torch.softmax(logits[0], dim=-1).detach().cpu().numpy()
+                        presence_tensor = objectful_presence_probs(presence_logits)
                         presence_probs = (
-                            torch.sigmoid(presence_logits[0]).detach().cpu().numpy()
+                            presence_tensor[0].detach().cpu().numpy()
+                            if presence_tensor is not None
+                            else None
                         )
-                        packed_object_class_ids = {
-                            int(item["object_class_id"])
-                            for item in packed_objects
-                            if "object_class_id" in item
-                        }
                         kept_actor_idx = np.flatnonzero(keep)[: self.max_actors]
                         for slot, actor_idx in enumerate(kept_actor_idx):
                             if actor_idx >= len(self.current_track_ids):
@@ -1526,19 +1813,19 @@ class LiveRunner:
                             local_object_class_ids = object_class_ids_near_actor_box(
                                 boxes_norm[int(actor_idx)],
                                 packed_objects,
+                                self.args.object_actor_context_margin,
                             )
-                            if (
-                                not local_object_class_ids
-                                and len(kept_actor_idx) == 1
-                            ):
-                                local_object_class_ids = packed_object_class_ids
                             raw_payload["state_object_class_ids"] = sorted(
                                 int(object_id)
                                 for object_id in local_object_class_ids
                             )
                             track.update_action(
                                 action_probs[slot],
-                                presence_probs[slot],
+                                (
+                                    presence_probs[slot]
+                                    if presence_probs is not None
+                                    else None
+                                ),
                                 raw_payload,
                                 local_object_class_ids,
                             )
@@ -1560,18 +1847,23 @@ class LiveRunner:
                             f"actor={self.last_actor_ms:.0f}ms "
                             f"det_age={det_age} "
                             f"sampling=linspace "
-                            f"span={TRAINING_SPAN_FRAMES} "
+                            f"source_span={TRAINING_SPAN_FRAMES} "
                             f"frames={TRAINING_CLIP_FRAMES} "
+                            f"source_fps={float(self.args.training_source_fps):.1f} "
                             f"real_span={clip_span_sec:.1f}s "
                             f"cam_fps={capture_info['capture_fps']:.1f} "
                             f"crop={self.args.crop_mode} "
-                            f"action_every={int(self.args.action_every_frames)} "
+                            "action_every="
+                            f"{training_sample_interval_seconds(self.args.training_source_fps):.2f}s "
                             f"smooth={int(self.args.action_smoothing_window)} "
                             f"switch_margin={float(self.args.action_switch_margin):.2f} "
                             f"state_alpha={float(self.args.action_state_alpha):.2f} "
                             "state_bonus="
                             f"{float(self.args.action_state_persistence_bonus):.2f} "
                             f"person_nms={float(self.args.person_nms_iou_threshold):.2f} "
+                            f"person_contain={float(self.args.person_containment_threshold):.2f} "
+                            f"obj_margin={float(self.args.object_actor_context_margin):.2f} "
+                            f"max_live_actors={int(self.max_live_actors)} "
                             f"min_obj_samples={MIN_OBJECT_TRACK_SAMPLE_COUNT} "
                             f"live_objects={int(self.args.live_object_tokens)} "
                             f"obj_hist={int(object_history_ready)} "
@@ -1589,14 +1881,15 @@ class LiveRunner:
                             }
                             for index, item in enumerate(packed_objects)
                         ]
+                        self.last_packed_object_payload = packed_object_payload
                     else:
                         message = "detections outside model crop"
-                        packed_object_payload = []
+                        packed_object_payload = self.last_packed_object_payload
                 elif len(self.last_boxes_xyxy) == 0:
                     message = "no RF-DETR person detections"
-                    packed_object_payload = []
+                    packed_object_payload = self.last_packed_object_payload
                 else:
-                    packed_object_payload = []
+                    packed_object_payload = self.last_packed_object_payload
 
                 overlay = draw_overlay(frame_bgr, actors, objects, message)
                 ok, encoded = cv2.imencode(

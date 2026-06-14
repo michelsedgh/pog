@@ -79,17 +79,12 @@ class TensorRTActorEngine:
         output_set = set(self.output_names)
         self.uses_object_proposals = object_inputs.issubset(input_set)
         export_hparams = self.metadata.get("export_hparams", {})
-        if bool(
+        self.actor_object_residual_head = bool(
             export_hparams.get(
-                "actor_object_factorized_head",
-                self.metadata.get("actor_object_factorized_head", False),
+                "actor_object_residual_head",
+                self.metadata.get("actor_object_residual_head", False),
             )
-        ):
-            raise RuntimeError(
-                "This TensorRT actor engine was exported from the removed "
-                "actor_object_factorized_head path. Re-export with "
-                "actor_object_prompt_tokens."
-            )
+        )
         if bool(
             export_hparams.get(
                 "actor_object_slot_head",

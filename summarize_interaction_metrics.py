@@ -38,31 +38,28 @@ CORE_COLUMNS = [
     "val_loss_interaction_heatmap_center",
     "val_loss_main_deploy",
     "val_loss_grounding_aux",
-    "val_loss_factorized_presence",
-    "val_factorized_presence_acc",
-    "val_factorized_presence_objectless_null_rate",
-    "val_factorized_presence_objectful_interaction_rate",
-    "val_loss_factorized_objectful_within",
-    "val_objectless_branch_acc",
-    "val_objectful_branch_acc",
-    "val_factorized_relation_scale",
-    "val_factorized_coverage_true_exact",
-    "val_factorized_detected_mix_true_exact",
-    "val_factorized_visual_mix_true_exact",
-    "val_factorized_detected_mix_true_missing",
-    "val_factorized_visual_mix_true_missing",
-    "val_factorized_prompt_delta_true_minus_confuser_exact",
-    "val_factorized_visual_delta_true_minus_confuser_missing",
-    "val_factorized_prompt_relation_effective_weight",
-    "val_factorized_visual_relation_effective_weight",
-    "val_loss_factorized_prompt_relation",
-    "val_factorized_prompt_relation_margin_exact",
-    "val_factorized_prompt_relation_margin_sat_exact",
-    "val_loss_factorized_visual_relation",
-    "val_factorized_visual_relation_margin_missing",
-    "val_factorized_visual_relation_margin_sat_missing",
-    "val_factorized_objectful_true_minus_confuser_exact",
-    "val_factorized_objectful_true_minus_confuser_missing",
+    "val_object_residual_relation_scale",
+    "val_object_residual_coverage_true_exact",
+    "val_object_residual_true_exact",
+    "val_object_residual_true_missing",
+    "val_object_residual_useful_mass_true_exact",
+    "val_object_residual_null_prob_true_exact",
+    "val_object_residual_useful_mass_true_missing",
+    "val_object_residual_null_prob_true_missing",
+    "val_object_residual_prompt_delta_true_minus_confuser_exact",
+    "val_object_residual_prompt_delta_true_minus_confuser_missing",
+    "val_object_residual_base_true_minus_confuser_exact",
+    "val_object_residual_base_true_minus_confuser_missing",
+    "val_object_residual_final_true_minus_confuser_exact",
+    "val_object_residual_final_true_minus_confuser_missing",
+    "val_object_residual_prompt_relation_effective_weight",
+    "val_object_residual_null_relation_weight",
+    "val_loss_object_residual_prompt_relation",
+    "val_object_residual_prompt_relation_margin_exact",
+    "val_object_residual_prompt_relation_margin_sat_exact",
+    "val_loss_object_residual_null_relation",
+    "val_object_residual_useful_mass_loss_exact_mean",
+    "val_object_residual_useful_mass_loss_missing_mean",
     "val_loss_objectless_object_action_suppression",
     "val_loss_object_prompt_grounding",
     "val_object_prompt_grounding_acc",
@@ -77,11 +74,6 @@ CORE_COLUMNS = [
     "val_object_prompt_attention_objectless_visible_mean",
     "val_object_prompt_attention_objectless_visible_max",
     "val_object_prompt_attention_objectless_visible_entropy",
-    "val_object_context_gate_exact_compatible_mean",
-    "val_object_context_gate_objectless_visible_mean",
-    "val_object_context_delta_norm_exact_compatible_mean",
-    "val_object_context_delta_norm_objectless_visible_mean",
-    "val_object_context_scale",
     "val_loss_object_prompt_wrong_class",
     "val_object_prompt_correct_minus_wrong_true_logit",
     "val_object_prompt_wrong_class_margin_sat_rate",
@@ -330,31 +322,27 @@ def print_compact_epoch_summary(epoch_df):
         "val_group_phone_tv_acc",
         "val_group_drink_cup_bottle_glass_acc",
         "val_group_drink_acc",
-        "val_factorized_presence_acc",
-        "val_factorized_presence_objectless_null_rate",
-        "val_factorized_presence_objectful_interaction_rate",
-        "val_objectless_branch_acc",
-        "val_objectful_branch_acc",
-        "val_factorized_detected_mix_true_exact",
-        "val_factorized_visual_mix_true_exact",
-        "val_factorized_detected_mix_true_missing",
-        "val_factorized_visual_mix_true_missing",
-        "val_factorized_prompt_relation_effective_weight",
-        "val_factorized_visual_relation_effective_weight",
-        "val_factorized_prompt_relation_margin_exact",
-        "val_factorized_visual_relation_margin_missing",
-        "val_factorized_prompt_relation_margin_sat_exact",
-        "val_factorized_visual_relation_margin_sat_missing",
-        "val_factorized_objectful_true_minus_confuser_exact",
-        "val_factorized_objectful_true_minus_confuser_missing",
+        "val_object_residual_true_exact",
+        "val_object_residual_true_missing",
+        "val_object_residual_useful_mass_true_exact",
+        "val_object_residual_null_prob_true_exact",
+        "val_object_residual_useful_mass_true_missing",
+        "val_object_residual_null_prob_true_missing",
+        "val_object_residual_prompt_relation_effective_weight",
+        "val_object_residual_null_relation_weight",
+        "val_object_residual_prompt_relation_margin_exact",
+        "val_object_residual_prompt_delta_true_minus_confuser_missing",
+        "val_object_residual_prompt_relation_margin_sat_exact",
+        "val_object_residual_base_true_minus_confuser_exact",
+        "val_object_residual_base_true_minus_confuser_missing",
+        "val_object_residual_final_true_minus_confuser_exact",
+        "val_object_residual_final_true_minus_confuser_missing",
         "val_object_counterfactual_teacher_logit_drop",
         "val_object_prompt_grounding_acc",
         "val_object_prompt_grounding_true_prob",
         "val_object_prompt_exact_correct_object_rate",
         "val_object_prompt_exact_correct_object_prob",
         "val_object_prompt_attention_exact_teacher_mean",
-        "val_object_context_gate_exact_compatible_mean",
-        "val_object_context_scale",
         "val_object_prompt_correct_minus_wrong_true_logit",
         "val_object_prompt_correct_minus_dropped_true_logit_ambiguous",
         "val_object_prompt_attention_objectless_visible_max",
@@ -406,38 +394,34 @@ def print_compact_best(epoch_df):
         "val_group_objectless_acc",
         "val_group_laptop_book_tv_acc",
         "val_group_phone_tv_acc",
-        "val_factorized_presence_acc",
-        "val_factorized_presence_objectless_null_rate",
-        "val_factorized_presence_objectful_interaction_rate",
-        "val_objectless_branch_acc",
-        "val_objectful_branch_acc",
-        "val_factorized_relation_scale",
-        "val_factorized_coverage_true_exact",
-        "val_factorized_detected_mix_true_exact",
-        "val_factorized_visual_mix_true_exact",
-        "val_factorized_detected_mix_true_missing",
-        "val_factorized_visual_mix_true_missing",
-        "val_factorized_prompt_delta_true_minus_confuser_exact",
-        "val_factorized_visual_delta_true_minus_confuser_missing",
-        "val_factorized_prompt_relation_effective_weight",
-        "val_factorized_visual_relation_effective_weight",
-        "val_loss_factorized_prompt_relation",
-        "val_factorized_prompt_relation_margin_exact",
-        "val_factorized_prompt_relation_margin_sat_exact",
-        "val_loss_factorized_visual_relation",
-        "val_factorized_visual_relation_margin_missing",
-        "val_factorized_visual_relation_margin_sat_missing",
-        "val_factorized_objectful_true_minus_confuser_exact",
-        "val_factorized_objectful_true_minus_confuser_missing",
+        "val_object_residual_relation_scale",
+        "val_object_residual_coverage_true_exact",
+        "val_object_residual_true_exact",
+        "val_object_residual_true_missing",
+        "val_object_residual_useful_mass_true_exact",
+        "val_object_residual_null_prob_true_exact",
+        "val_object_residual_useful_mass_true_missing",
+        "val_object_residual_null_prob_true_missing",
+        "val_object_residual_prompt_delta_true_minus_confuser_exact",
+        "val_object_residual_prompt_delta_true_minus_confuser_missing",
+        "val_object_residual_base_true_minus_confuser_exact",
+        "val_object_residual_base_true_minus_confuser_missing",
+        "val_object_residual_final_true_minus_confuser_exact",
+        "val_object_residual_final_true_minus_confuser_missing",
+        "val_object_residual_prompt_relation_effective_weight",
+        "val_object_residual_null_relation_weight",
+        "val_loss_object_residual_prompt_relation",
+        "val_object_residual_prompt_relation_margin_exact",
+        "val_object_residual_prompt_relation_margin_sat_exact",
+        "val_loss_object_residual_null_relation",
+        "val_object_residual_useful_mass_loss_exact_mean",
+        "val_object_residual_useful_mass_loss_missing_mean",
         "val_object_counterfactual_teacher_logit_drop",
         "val_object_prompt_grounding_acc",
         "val_object_prompt_grounding_true_prob",
         "val_object_prompt_exact_correct_object_rate",
         "val_object_prompt_exact_correct_object_prob",
         "val_object_prompt_attention_exact_teacher_mean",
-        "val_object_context_gate_exact_compatible_mean",
-        "val_object_context_delta_norm_exact_compatible_mean",
-        "val_object_context_scale",
         "val_object_prompt_correct_minus_wrong_true_logit",
         "val_object_prompt_correct_minus_dropped_true_logit_ambiguous",
         "val_object_prompt_wrong_Uselaptop_minus_Readbook_margin",
@@ -756,87 +740,91 @@ def print_decision(epoch_df):
     deploy_key_min = metric(latest, "val_deploy_key_action_min")
     object_mapped_acc = metric(latest, "val_group_object_mapped_acc")
     objectless_acc = metric(latest, "val_group_objectless_acc")
-    factorized_presence_acc = metric(latest, "val_factorized_presence_acc")
-    factorized_objectless_null = metric(
+    object_residual_relation_scale = metric(latest, "val_object_residual_relation_scale")
+    object_residual_coverage_exact = metric(
         latest,
-        "val_factorized_presence_objectless_null_rate",
+        "val_object_residual_coverage_true_exact",
     )
-    factorized_objectful_interaction = metric(
+    object_residual_exact = metric(
         latest,
-        "val_factorized_presence_objectful_interaction_rate",
+        "val_object_residual_true_exact",
     )
-    objectless_branch_acc = metric(latest, "val_objectless_branch_acc")
-    objectful_branch_acc = metric(latest, "val_objectful_branch_acc")
-    factorized_relation_scale = metric(latest, "val_factorized_relation_scale")
-    factorized_coverage_exact = metric(
+    object_residual_missing = metric(
         latest,
-        "val_factorized_coverage_true_exact",
+        "val_object_residual_true_missing",
     )
-    factorized_detected_mix_exact = metric(
+    object_residual_useful_mass_exact = metric(
         latest,
-        "val_factorized_detected_mix_true_exact",
+        "val_object_residual_useful_mass_true_exact",
     )
-    factorized_visual_mix_exact = metric(
+    object_residual_null_prob_exact = metric(
         latest,
-        "val_factorized_visual_mix_true_exact",
+        "val_object_residual_null_prob_true_exact",
     )
-    factorized_detected_mix_missing = metric(
+    object_residual_useful_mass_missing = metric(
         latest,
-        "val_factorized_detected_mix_true_missing",
+        "val_object_residual_useful_mass_true_missing",
     )
-    factorized_visual_mix_missing = metric(
+    object_residual_null_prob_missing = metric(
         latest,
-        "val_factorized_visual_mix_true_missing",
+        "val_object_residual_null_prob_true_missing",
     )
-    factorized_prompt_margin_exact = metric(
+    object_residual_prompt_margin_exact = metric(
         latest,
-        "val_factorized_prompt_delta_true_minus_confuser_exact",
+        "val_object_residual_prompt_delta_true_minus_confuser_exact",
     )
-    factorized_visual_margin_missing = metric(
+    object_residual_prompt_margin_missing = metric(
         latest,
-        "val_factorized_visual_delta_true_minus_confuser_missing",
+        "val_object_residual_prompt_delta_true_minus_confuser_missing",
     )
-    factorized_prompt_relation_weight = metric(
+    object_residual_base_margin_exact = metric(
         latest,
-        "val_factorized_prompt_relation_effective_weight",
+        "val_object_residual_base_true_minus_confuser_exact",
     )
-    factorized_visual_relation_weight = metric(
+    object_residual_base_margin_missing = metric(
         latest,
-        "val_factorized_visual_relation_effective_weight",
+        "val_object_residual_base_true_minus_confuser_missing",
     )
-    factorized_prompt_relation_loss = metric(
+    object_residual_final_margin_exact = metric(
         latest,
-        "val_loss_factorized_prompt_relation",
+        "val_object_residual_final_true_minus_confuser_exact",
     )
-    factorized_prompt_relation_margin = metric(
+    object_residual_final_margin_missing = metric(
         latest,
-        "val_factorized_prompt_relation_margin_exact",
+        "val_object_residual_final_true_minus_confuser_missing",
     )
-    factorized_prompt_relation_sat = metric(
+    object_residual_prompt_relation_weight = metric(
         latest,
-        "val_factorized_prompt_relation_margin_sat_exact",
+        "val_object_residual_prompt_relation_effective_weight",
     )
-    factorized_visual_relation_loss = metric(
+    object_residual_null_relation_weight = metric(
         latest,
-        "val_loss_factorized_visual_relation",
+        "val_object_residual_null_relation_weight",
     )
-    factorized_visual_relation_margin = metric(
+    object_residual_prompt_relation_loss = metric(
         latest,
-        "val_factorized_visual_relation_margin_missing",
+        "val_loss_object_residual_prompt_relation",
     )
-    factorized_visual_relation_sat = metric(
+    object_residual_prompt_relation_margin = metric(
         latest,
-        "val_factorized_visual_relation_margin_sat_missing",
+        "val_object_residual_prompt_relation_margin_exact",
     )
-    factorized_objectful_margin_exact = metric(
+    object_residual_prompt_relation_sat = metric(
         latest,
-        "val_factorized_objectful_true_minus_confuser_exact",
+        "val_object_residual_prompt_relation_margin_sat_exact",
     )
-    factorized_objectful_margin_missing = metric(
+    object_residual_null_relation_loss = metric(
         latest,
-        "val_factorized_objectful_true_minus_confuser_missing",
+        "val_loss_object_residual_null_relation",
     )
-
+    object_residual_useful_mass_loss_exact = metric(
+        latest,
+        "val_object_residual_useful_mass_loss_exact_mean",
+    )
+    object_residual_useful_mass_loss_missing = metric(
+        latest,
+        "val_object_residual_useful_mass_loss_missing_mean",
+    )
     pos = metric(latest, "val_interaction_heatmap_positive_mean")
     pred_max = metric(latest, "val_interaction_heatmap_pred_max")
     soft_iou = metric(latest, "val_interaction_heatmap_soft_iou")
@@ -883,23 +871,6 @@ def print_decision(epoch_df):
         latest,
         "val_object_prompt_attention_objectless_visible_entropy",
     )
-    context_gate_exact = metric(
-        latest,
-        "val_object_context_gate_exact_compatible_mean",
-    )
-    context_gate_objectless = metric(
-        latest,
-        "val_object_context_gate_objectless_visible_mean",
-    )
-    context_delta_exact = metric(
-        latest,
-        "val_object_context_delta_norm_exact_compatible_mean",
-    )
-    context_delta_objectless = metric(
-        latest,
-        "val_object_context_delta_norm_objectless_visible_mean",
-    )
-    context_scale = metric(latest, "val_object_context_scale")
     wrong_prompt_drop = metric(
         latest,
         "val_object_prompt_correct_minus_wrong_true_logit",
@@ -1036,46 +1007,41 @@ def print_decision(epoch_df):
             f"object_mapped {fmt(object_mapped_acc)}, "
             f"objectless {fmt(objectless_acc)}"
         )
-    if pd.notna(factorized_presence_acc):
-        print(
-            "factorized mode: "
-            f"presence_acc {fmt(factorized_presence_acc)}, "
-            f"objectless_null {fmt(factorized_objectless_null)}, "
-            f"objectful_interaction {fmt(factorized_objectful_interaction)}, "
-            f"objectless_branch {fmt(objectless_branch_acc)}, "
-            f"objectful_branch {fmt(objectful_branch_acc)}"
-        )
     if (
-        pd.notna(factorized_detected_mix_exact)
-        or pd.notna(factorized_visual_mix_missing)
+        pd.notna(object_residual_exact)
+        or pd.notna(object_residual_missing)
     ):
         print(
-            "factorized evidence: "
-            f"scale {fmt(factorized_relation_scale)}, "
-            f"coverage_exact {fmt(factorized_coverage_exact)}, "
-            f"detected_exact {fmt(factorized_detected_mix_exact)}, "
-            f"visual_exact {fmt(factorized_visual_mix_exact)}, "
-            f"detected_missing {fmt(factorized_detected_mix_missing)}, "
-            f"visual_missing {fmt(factorized_visual_mix_missing)}, "
-            f"prompt_margin_exact {fmt(factorized_prompt_margin_exact)}, "
-            f"visual_margin_missing {fmt(factorized_visual_margin_missing)}, "
-            f"objectful_margin_exact {fmt(factorized_objectful_margin_exact)}, "
-            f"objectful_margin_missing {fmt(factorized_objectful_margin_missing)}"
+            "object residual evidence: "
+            f"scale {fmt(object_residual_relation_scale)}, "
+            f"coverage_exact {fmt(object_residual_coverage_exact)}, "
+            f"residual_exact {fmt(object_residual_exact)}, "
+            f"residual_missing {fmt(object_residual_missing)}, "
+            f"useful_exact {fmt(object_residual_useful_mass_exact)}, "
+            f"null_exact {fmt(object_residual_null_prob_exact)}, "
+            f"useful_missing {fmt(object_residual_useful_mass_missing)}, "
+            f"null_missing {fmt(object_residual_null_prob_missing)}, "
+            f"residual_margin_exact {fmt(object_residual_prompt_margin_exact)}, "
+            f"residual_margin_missing {fmt(object_residual_prompt_margin_missing)}, "
+            f"base_margin_exact {fmt(object_residual_base_margin_exact)}, "
+            f"base_margin_missing {fmt(object_residual_base_margin_missing)}, "
+            f"final_margin_exact {fmt(object_residual_final_margin_exact)}, "
+            f"final_margin_missing {fmt(object_residual_final_margin_missing)}"
         )
     if (
-        pd.notna(factorized_prompt_relation_loss)
-        or pd.notna(factorized_visual_relation_loss)
+        pd.notna(object_residual_prompt_relation_loss)
+        or pd.notna(object_residual_null_relation_loss)
     ):
         print(
-            "factorized relation objectives: "
-            f"prompt_weight {fmt(factorized_prompt_relation_weight)}, "
-            f"prompt_loss {fmt(factorized_prompt_relation_loss)}, "
-            f"prompt_margin {fmt(factorized_prompt_relation_margin)}, "
-            f"prompt_sat {fmt(factorized_prompt_relation_sat)}, "
-            f"visual_weight {fmt(factorized_visual_relation_weight)}, "
-            f"visual_loss {fmt(factorized_visual_relation_loss)}, "
-            f"visual_margin {fmt(factorized_visual_relation_margin)}, "
-            f"visual_sat {fmt(factorized_visual_relation_sat)}"
+            "object residual objectives: "
+            f"prompt_weight {fmt(object_residual_prompt_relation_weight)}, "
+            f"prompt_loss {fmt(object_residual_prompt_relation_loss)}, "
+            f"prompt_margin {fmt(object_residual_prompt_relation_margin)}, "
+            f"prompt_sat {fmt(object_residual_prompt_relation_sat)}, "
+            f"null_weight {fmt(object_residual_null_relation_weight)}, "
+            f"null_loss {fmt(object_residual_null_relation_loss)}, "
+            f"useful_exact_mean {fmt(object_residual_useful_mass_loss_exact)}, "
+            f"useful_missing_mean {fmt(object_residual_useful_mass_loss_missing)}"
         )
     if pd.notna(prompt_acc) or pd.notna(prompt_loss):
         print(
@@ -1099,15 +1065,6 @@ def print_decision(epoch_df):
             f"objectless_mean {fmt(prompt_objectless_attention_mean)}, "
             f"objectless_max {fmt(prompt_objectless_attention_max)}, "
             f"objectless_entropy {fmt(prompt_objectless_attention_entropy)}"
-        )
-    if pd.notna(context_gate_exact) or pd.notna(context_scale):
-        print(
-            "object context adapter: "
-            f"gate_exact {fmt(context_gate_exact)}, "
-            f"gate_objectless {fmt(context_gate_objectless)}, "
-            f"delta_exact {fmt(context_delta_exact)}, "
-            f"delta_objectless {fmt(context_delta_objectless)}, "
-            f"scale {fmt(context_scale)}"
         )
     if pd.notna(wrong_prompt_drop) or pd.notna(sensitivity_drop):
         print(
@@ -1236,15 +1193,6 @@ def print_row(title, row):
             f"objectless_mean {metric(row, 'val_object_prompt_attention_objectless_visible_mean'):.4f}, "
             f"objectless_max {metric(row, 'val_object_prompt_attention_objectless_visible_max'):.4f}, "
             f"objectless_entropy {metric(row, 'val_object_prompt_attention_objectless_visible_entropy'):.4f}"
-        )
-    if pd.notna(metric(row, "val_object_context_gate_exact_compatible_mean")):
-        print(
-            "object context adapter: "
-            f"gate_exact {metric(row, 'val_object_context_gate_exact_compatible_mean'):.4f}, "
-            f"gate_objectless {metric(row, 'val_object_context_gate_objectless_visible_mean'):.4f}, "
-            f"delta_exact {metric(row, 'val_object_context_delta_norm_exact_compatible_mean'):.4f}, "
-            f"delta_objectless {metric(row, 'val_object_context_delta_norm_objectless_visible_mean'):.4f}, "
-            f"scale {metric(row, 'val_object_context_scale'):.4f}"
         )
     if pd.notna(metric(row, "val_object_prompt_correct_minus_wrong_true_logit")):
         print(
@@ -1415,14 +1363,13 @@ def main():
     print_decision(epoch_df)
 
     print("\nREAD THIS:")
-    print("- Main proof: val_f1/per-action accuracy stay healthy while object prompts, heatmaps, and factorized branch metrics improve.")
-    print("- Runtime detections should affect only the factorized objectful branch, not mutate objectless actor-token decisions.")
-    print("- Exact compatible detections should raise prompt grounding and detected-mix weight for the true action.")
-    print("- Missing compatible detections should raise visual-mix weight and true-vs-confuser margins inside the objectful branch.")
-    print("- Presence NULL/objectful rates tell you whether failures are mode arbitration or within-branch classification.")
-    print("- Objectless hard-negative accuracy and object-action pred rate remain the main objectless protection checks.")
+    print("- Main proof: val_f1/per-action accuracy stay healthy while object prompts, heatmaps, and bounded residual metrics improve.")
+    print("- PO-GUISE+ actor/video logits make the decision; runtime objects add only bounded residual evidence.")
+    print("- Exact compatible detections should raise useful mass and residual/final true-vs-confuser margins.")
+    print("- Missing compatible detections should push useful mass down so base PO-GUISE+ logits carry the action.")
+    print("- Objectless classes receive zero direct object residual; hard-negative object-action pred rate remains the protection check.")
     print("- Heatmap/object-channel metrics are secondary; use --verbose when debugging teacher quality.")
-    print("- actor_object_prompt_tokens + actor_object_factorized_head is the clean runtime object path.")
+    print("- actor_object_prompt_tokens + actor_object_residual_head is now the bounded object-residual runtime path.")
 
 
 if __name__ == "__main__":

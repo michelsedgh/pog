@@ -460,15 +460,11 @@ def main():
         raise RuntimeError(
             "actor_object_slot_head checkpoints use the removed flat slot head."
         )
-    if bool(hparams.get("actor_object_factorized_head", 0)):
-        raise RuntimeError(
-            "actor_object_factorized_head checkpoints are no longer supported. "
-            "Train with actor_object_prompt_tokens instead."
-        )
     if bool(hparams.get("actor_object_prompt_tokens", 0)):
         raise RuntimeError(
             "utils/bisect_actor_tensorrt.py does not support actor_object_prompt_tokens. "
-            "Use utils/export_actor_tensorrt.py for the full object-prompt actor path."
+            "Use utils/export_actor_tensorrt.py and utils/check_actor_tensorrt.py "
+            "for the full bounded object-residual actor path."
         )
     uses_object_proposals = False
     clip_frames = int(args.clip_frames or hparams.get("n_frames", 16))
