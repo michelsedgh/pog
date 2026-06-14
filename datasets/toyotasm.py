@@ -125,10 +125,16 @@ class ToyotaSMDataset(Dataset):
                 "actor_object_prompt_tokens. Set --actor_object_prompt_tokens 1 "
                 "and keep --actor_object_slot_head 0."
             )
-        if bool(kwargs.get("actor_object_factorized_head", 0)):
+        self.actor_object_factorized_head = bool(
+            kwargs.get("actor_object_factorized_head", 0)
+        )
+        if self.actor_object_factorized_head and not self.actor_object_prompt_tokens:
             raise ValueError(
-                "actor_object_factorized_head was removed from the active runtime "
-                "path. Use actor_object_prompt_tokens=1 with the plain actor_head."
+                "actor_object_factorized_head requires actor_object_prompt_tokens"
+            )
+        if self.actor_object_factorized_head and not self.actor_interaction_heatmaps:
+            raise ValueError(
+                "actor_object_factorized_head requires actor_interaction_heatmaps"
             )
         if self.actor_object_prompt_tokens and not self.actor_prompt:
             raise ValueError("actor_object_prompt_tokens requires actor_prompt")
