@@ -213,6 +213,28 @@ def _validate_active_actor_action_path(module):
     model = module.model
     if not getattr(model, "actor_prompt", False):
         return
+    factorized_enabled = bool(
+        getattr(model, "actor_object_factorized_head_enabled", False)
+        or model.hparams.get("actor_object_factorized_head", 0)
+    )
+    if factorized_enabled:
+        if getattr(model, "actor_head", None) is not None:
+            raise RuntimeError(
+                "Factorized actor-object runs must not keep the flat actor_head "
+                "active. Objectless/objectful scoring must go through "
+                "factorized_interaction_action_head."
+            )
+        if getattr(model, "factorized_interaction_action_head", None) is None:
+            raise RuntimeError(
+                "actor_object_factorized_head is enabled but "
+                "factorized_interaction_action_head was not constructed."
+            )
+        if getattr(model, "object_context_adapter_enabled", False):
+            raise RuntimeError(
+                "object_context_adapter must be disabled in factorized actor-object "
+                "runs. Runtime object prompts belong inside the objectful branch."
+            )
+        return
     actor_head = getattr(model, "actor_head", None)
     if not isinstance(actor_head, torch.nn.Linear):
         raise RuntimeError(
