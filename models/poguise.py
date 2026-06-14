@@ -361,6 +361,7 @@ class POGUISE(pl.LightningModule):
                     )
                     nn.init.zeros_(self.object_context_adapter[-1].weight)
                     nn.init.zeros_(self.object_context_adapter[-1].bias)
+                    nn.init.zeros_(self.object_context_gate[-1].weight)
                     nn.init.constant_(
                         self.object_context_gate[-1].bias,
                         float(self.hparams.get("object_context_gate_bias", -1.0)),
