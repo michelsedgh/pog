@@ -48,6 +48,15 @@ CORE_COLUMNS = [
     "val_object_residual_null_prob_true_exact",
     "val_object_residual_useful_mass_true_missing",
     "val_object_residual_null_prob_true_missing",
+    "val_object_fusion_scale",
+    "val_object_fusion_delta_norm",
+    "val_object_fusion_gate_mean",
+    "val_object_fusion_useful_mass_exact",
+    "val_object_fusion_null_prob_exact",
+    "val_object_fusion_useful_mass_objectless",
+    "val_object_fusion_null_prob_objectless",
+    "val_object_fusion_raw_to_fused_true_logit_delta_exact",
+    "val_object_fusion_raw_base_true_minus_confuser_exact",
     "val_object_residual_prompt_delta_true_minus_confuser_exact",
     "val_object_residual_prompt_delta_true_minus_confuser_missing",
     "val_object_residual_base_true_minus_confuser_exact",
@@ -334,6 +343,15 @@ def print_compact_epoch_summary(epoch_df):
         "val_object_residual_null_prob_true_exact",
         "val_object_residual_useful_mass_true_missing",
         "val_object_residual_null_prob_true_missing",
+        "val_object_fusion_scale",
+        "val_object_fusion_delta_norm",
+        "val_object_fusion_gate_mean",
+        "val_object_fusion_useful_mass_exact",
+        "val_object_fusion_null_prob_exact",
+        "val_object_fusion_useful_mass_objectless",
+        "val_object_fusion_null_prob_objectless",
+        "val_object_fusion_raw_to_fused_true_logit_delta_exact",
+        "val_object_fusion_raw_base_true_minus_confuser_exact",
         "val_object_residual_prompt_relation_effective_weight",
         "val_object_residual_null_relation_weight",
         "val_object_residual_prompt_relation_margin_exact",
@@ -410,6 +428,15 @@ def print_compact_best(epoch_df):
         "val_object_residual_null_prob_true_exact",
         "val_object_residual_useful_mass_true_missing",
         "val_object_residual_null_prob_true_missing",
+        "val_object_fusion_scale",
+        "val_object_fusion_delta_norm",
+        "val_object_fusion_gate_mean",
+        "val_object_fusion_useful_mass_exact",
+        "val_object_fusion_null_prob_exact",
+        "val_object_fusion_useful_mass_objectless",
+        "val_object_fusion_null_prob_objectless",
+        "val_object_fusion_raw_to_fused_true_logit_delta_exact",
+        "val_object_fusion_raw_base_true_minus_confuser_exact",
         "val_object_residual_prompt_delta_true_minus_confuser_exact",
         "val_object_residual_prompt_delta_true_minus_confuser_missing",
         "val_object_residual_base_true_minus_confuser_exact",
@@ -781,6 +808,33 @@ def print_decision(epoch_df):
         latest,
         "val_object_residual_null_prob_true_missing",
     )
+    object_fusion_scale = metric(latest, "val_object_fusion_scale")
+    object_fusion_delta_norm = metric(latest, "val_object_fusion_delta_norm")
+    object_fusion_gate_mean = metric(latest, "val_object_fusion_gate_mean")
+    object_fusion_useful_exact = metric(
+        latest,
+        "val_object_fusion_useful_mass_exact",
+    )
+    object_fusion_null_exact = metric(
+        latest,
+        "val_object_fusion_null_prob_exact",
+    )
+    object_fusion_useful_objectless = metric(
+        latest,
+        "val_object_fusion_useful_mass_objectless",
+    )
+    object_fusion_null_objectless = metric(
+        latest,
+        "val_object_fusion_null_prob_objectless",
+    )
+    object_fusion_true_delta_exact = metric(
+        latest,
+        "val_object_fusion_raw_to_fused_true_logit_delta_exact",
+    )
+    object_fusion_raw_margin_exact = metric(
+        latest,
+        "val_object_fusion_raw_base_true_minus_confuser_exact",
+    )
     object_residual_prompt_margin_exact = metric(
         latest,
         "val_object_residual_prompt_delta_true_minus_confuser_exact",
@@ -1051,6 +1105,22 @@ def print_decision(epoch_df):
             f"final_margin_missing {fmt(object_residual_final_margin_missing)}, "
             f"objectless_base_margin {fmt(object_residual_base_objectless_margin)}, "
             f"objectless_final_margin {fmt(object_residual_final_objectless_margin)}"
+        )
+    if (
+        pd.notna(object_fusion_delta_norm)
+        or pd.notna(object_fusion_true_delta_exact)
+    ):
+        print(
+            "object base fusion: "
+            f"scale {fmt(object_fusion_scale)}, "
+            f"delta_norm {fmt(object_fusion_delta_norm)}, "
+            f"gate {fmt(object_fusion_gate_mean)}, "
+            f"useful_exact {fmt(object_fusion_useful_exact)}, "
+            f"null_exact {fmt(object_fusion_null_exact)}, "
+            f"useful_objectless {fmt(object_fusion_useful_objectless)}, "
+            f"null_objectless {fmt(object_fusion_null_objectless)}, "
+            f"raw_to_fused_true_delta_exact {fmt(object_fusion_true_delta_exact)}, "
+            f"raw_base_margin_exact {fmt(object_fusion_raw_margin_exact)}"
         )
     if (
         pd.notna(object_residual_prompt_relation_loss)
@@ -1387,13 +1457,13 @@ def main():
     print_decision(epoch_df)
 
     print("\nREAD THIS:")
-    print("- Main proof: val_f1/per-action accuracy stay healthy while object prompts, heatmaps, and bounded residual metrics improve.")
-    print("- PO-GUISE+ actor/video logits make the decision; runtime objects add only bounded residual evidence.")
-    print("- Exact compatible detections should raise useful mass and residual/final true-vs-confuser margins.")
-    print("- Missing compatible detections should push useful mass down so base PO-GUISE+ logits carry the action.")
+    print("- Main proof: val_f1/per-action accuracy stay healthy while object prompts, object-aware base fusion, heatmaps, and bounded residual metrics improve.")
+    print("- PO-GUISE+ actor/video logits make the decision; runtime objects can enter the actor token before actor_head and still add bounded residual evidence.")
+    print("- Exact compatible detections should raise fusion usefulness, move raw-to-fused base logits, and improve residual/final true-vs-confuser margins.")
+    print("- Missing compatible detections should push useful mass down so unfused/base PO-GUISE+ evidence carries the action.")
     print("- Objectless classes receive zero direct object residual; hard-negative object-action pred rate remains the protection check.")
     print("- Heatmap/object-channel metrics are secondary; use --verbose when debugging teacher quality.")
-    print("- actor_object_prompt_tokens + actor_object_residual_head is now the bounded object-residual runtime path.")
+    print("- actor_object_base_fusion + actor_object_residual_head is now the runtime object path.")
 
 
 if __name__ == "__main__":

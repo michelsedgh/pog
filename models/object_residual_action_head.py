@@ -248,6 +248,8 @@ class ActorObjectContextFusion(nn.Module):
         self.actor_query = nn.Linear(dim, relation_dim, bias=False)
         self.object_key = nn.Linear(dim, relation_dim, bias=False)
         self.object_value = nn.Linear(dim, dim, bias=False)
+        self.null_key = nn.Parameter(torch.zeros(relation_dim))
+        self.null_logit = nn.Parameter(torch.tensor(0.0))
         self.context_proj = nn.Sequential(
             nn.LayerNorm(dim),
             nn.Linear(dim, hidden_dim),
@@ -265,6 +267,10 @@ class ActorObjectContextFusion(nn.Module):
         self.max_fusion_scale = float(max_fusion_scale)
         if self.max_fusion_scale < 0:
             raise ValueError("max_fusion_scale must be >= 0")
+        nn.init.zeros_(self.context_proj[-1].weight)
+        nn.init.zeros_(self.context_proj[-1].bias)
+        nn.init.zeros_(self.gate[-2].weight)
+        nn.init.constant_(self.gate[-2].bias, -1.0)
 
     def forward(
         self,
@@ -272,6 +278,7 @@ class ActorObjectContextFusion(nn.Module):
         object_prompt_tokens: Tensor,
         object_confs: Tensor,
         object_valid: Tensor,
+        object_attention_bias: Optional[Tensor] = None,
     ) -> Dict[str, Tensor]:
         object_prompt_tokens = object_prompt_tokens.to(
             device=actor_tokens.device,
@@ -286,37 +293,56 @@ class ActorObjectContextFusion(nn.Module):
 
         q = self.actor_query(self.actor_norm(actor_tokens))
         k = self.object_key(self.object_norm(object_prompt_tokens))
-        scores = torch.matmul(q, k.transpose(1, 2)) / (q.shape[-1] ** 0.5)
+        scores_obj = torch.matmul(q, k.transpose(1, 2)) / (q.shape[-1] ** 0.5)
         conf_bias = torch.log(object_confs.clamp_min(1.0e-4))[:, None, :]
-        scores = scores + conf_bias
-        scores = scores.masked_fill(~object_valid[:, None, :], -1.0e4)
+        scores_obj = scores_obj + conf_bias
+        if object_attention_bias is not None:
+            object_attention_bias = object_attention_bias.to(
+                device=actor_tokens.device,
+                dtype=actor_tokens.dtype,
+            )
+            if tuple(object_attention_bias.shape) != tuple(scores_obj.shape):
+                raise ValueError(
+                    "object_attention_bias must have shape "
+                    f"{tuple(scores_obj.shape)}, got {tuple(object_attention_bias.shape)}"
+                )
+            scores_obj = scores_obj + object_attention_bias
+        scores_obj = scores_obj.masked_fill(~object_valid[:, None, :], -1.0e4)
 
-        attention = F.softmax(scores.float(), dim=-1).to(dtype=actor_tokens.dtype)
-        attention = attention * object_valid[:, None, :].to(dtype=attention.dtype)
-        attention_sum = attention.sum(dim=-1, keepdim=True)
-        attention = torch.where(
-            attention_sum > 0,
-            attention / attention_sum.clamp_min(1.0e-6),
-            torch.zeros_like(attention),
+        null_key = self.null_key.to(device=actor_tokens.device, dtype=actor_tokens.dtype)
+        null_score = torch.sum(q * null_key.view(1, 1, -1), dim=-1, keepdim=True)
+        null_score = null_score / (q.shape[-1] ** 0.5)
+        null_score = null_score + self.null_logit.to(
+            device=actor_tokens.device,
+            dtype=actor_tokens.dtype,
         )
+        scores = torch.cat([null_score, scores_obj], dim=-1)
+
+        attention_full = F.softmax(scores.float(), dim=-1).to(dtype=actor_tokens.dtype)
+        null_prob = attention_full[..., 0]
+        attention = attention_full[..., 1:] * object_valid[:, None, :].to(
+            dtype=actor_tokens.dtype
+        )
+        useful_mass = attention.sum(dim=-1).clamp(0.0, 1.0)
 
         values = self.object_value(object_prompt_tokens)
         context = torch.matmul(attention, values)
-        has_context = object_valid.any(dim=-1)[:, None, None].to(
-            dtype=actor_tokens.dtype
-        )
-        context = context * has_context
 
         gate = self.gate(
             torch.cat([actor_tokens, context, actor_tokens * context], dim=-1)
         )
-        delta = self.context_proj(context) * gate * has_context
+        delta = self.context_proj(context) * gate * useful_mass[..., None]
         scale = self.max_fusion_scale * torch.sigmoid(self.fusion_scale_logit)
+        scaled_delta = scale * delta
         fused = actor_tokens + scale * delta
         return {
             "actor_tokens": fused,
             "object_context": context,
             "object_attention": attention,
+            "object_null_prob": null_prob.detach(),
+            "object_useful_mass": useful_mass.detach(),
+            "fusion_delta": scaled_delta.detach(),
+            "fusion_gate": gate.detach(),
             "fusion_scale": scale.detach(),
         }
 

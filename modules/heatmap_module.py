@@ -2264,12 +2264,37 @@ class HeatmapModule(pl.LightningModule):
             return
         coverage = getattr(self.model, "last_object_residual_coverage", None)
         object_residual = getattr(self.model, "last_object_residual", None)
+        raw_base_logits = getattr(
+            self.model,
+            "last_object_residual_raw_base_logits",
+            None,
+        )
         base_logits = getattr(self.model, "last_object_residual_base_logits", None)
         final_logits = getattr(self.model, "last_object_residual_final_logits", None)
         null_prob = getattr(self.model, "last_object_residual_prompt_null_prob", None)
         useful_mass = getattr(
             self.model,
             "last_object_residual_prompt_useful_mass",
+            None,
+        )
+        fusion_delta = getattr(
+            self.model,
+            "last_actor_object_base_fusion_delta",
+            None,
+        )
+        fusion_gate = getattr(
+            self.model,
+            "last_actor_object_base_fusion_gate",
+            None,
+        )
+        fusion_null_prob = getattr(
+            self.model,
+            "last_actor_object_base_fusion_null_prob",
+            None,
+        )
+        fusion_useful_mass = getattr(
+            self.model,
+            "last_actor_object_base_fusion_useful_mass",
             None,
         )
         if (
@@ -2300,6 +2325,8 @@ class HeatmapModule(pl.LightningModule):
 
         coverage = coverage.float()
         object_residual = object_residual.float()
+        if raw_base_logits is not None:
+            raw_base_logits = raw_base_logits.float()
         base_logits = base_logits.float()
         final_logits = final_logits.float()
         valid_count = int(valid.sum().item())
@@ -2315,10 +2342,46 @@ class HeatmapModule(pl.LightningModule):
                 residual_abs.max(),
                 valid_count,
             )
+            if fusion_delta is not None:
+                fusion_delta_norm = fusion_delta.float().norm(dim=-1)
+                self._log_scalar(
+                    f"{stage}_object_fusion_delta_norm",
+                    fusion_delta_norm[valid].mean(),
+                    valid_count,
+                )
+            if fusion_gate is not None:
+                fusion_gate_mean = fusion_gate.float().mean(dim=-1)
+                self._log_scalar(
+                    f"{stage}_object_fusion_gate_mean",
+                    fusion_gate_mean[valid].mean(),
+                    valid_count,
+                )
+
+        fusion_scale = getattr(self.model, "last_actor_object_base_fusion_scale", None)
+        if fusion_scale is not None and known_objectful.any():
+            self._log_scalar(
+                f"{stage}_object_fusion_scale",
+                fusion_scale.to(device=device).float(),
+                int(known_objectful.sum().item()),
+            )
 
         object_action_indices = self.group_indices.get("object_mapped")
         objectless = self._labels_in_indices(actions, self.objectless_action_indices)
         objectless = objectless & valid
+        if objectless.any():
+            count = int(objectless.sum().item())
+            if fusion_useful_mass is not None:
+                self._log_scalar(
+                    f"{stage}_object_fusion_useful_mass_objectless",
+                    fusion_useful_mass.float()[objectless].mean(),
+                    count,
+                )
+            if fusion_null_prob is not None:
+                self._log_scalar(
+                    f"{stage}_object_fusion_null_prob_objectless",
+                    fusion_null_prob.float()[objectless].mean(),
+                    count,
+                )
         if (
             objectless.any()
             and object_action_indices is not None
@@ -2346,6 +2409,10 @@ class HeatmapModule(pl.LightningModule):
                 count,
             )
 
+        raw_true = None
+        fused_true = self._gather_true_action_value(base_logits, actions)
+        if raw_base_logits is not None:
+            raw_true = self._gather_true_action_value(raw_base_logits, actions)
         coverage_true = self._gather_true_action_value(coverage, actions)
         residual_true = self._gather_true_action_value(object_residual, actions)
         null_true = None
@@ -2379,6 +2446,35 @@ class HeatmapModule(pl.LightningModule):
                     null_true[exact_compatible].mean(),
                     count,
                 )
+            if fusion_useful_mass is not None:
+                self._log_scalar(
+                    f"{stage}_object_fusion_useful_mass_exact",
+                    fusion_useful_mass.float()[exact_compatible].mean(),
+                    count,
+                )
+            if fusion_null_prob is not None:
+                self._log_scalar(
+                    f"{stage}_object_fusion_null_prob_exact",
+                    fusion_null_prob.float()[exact_compatible].mean(),
+                    count,
+                )
+            if raw_true is not None:
+                self._log_scalar(
+                    f"{stage}_object_fusion_raw_to_fused_true_logit_delta_exact",
+                    (fused_true - raw_true)[exact_compatible].mean(),
+                    count,
+                )
+                raw_base_margin = self._true_minus_confuser_margin(
+                    raw_base_logits,
+                    actions,
+                    exact_compatible,
+                )
+                if raw_base_margin is not None:
+                    self._log_scalar(
+                        f"{stage}_object_fusion_raw_base_true_minus_confuser_exact",
+                        raw_base_margin.mean(),
+                        int(raw_base_margin.numel()),
+                    )
             residual_margin = self._true_minus_confuser_margin(
                 object_residual,
                 actions,

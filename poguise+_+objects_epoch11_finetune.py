@@ -443,7 +443,8 @@ cmd = [
 
     "--actor_interaction_heatmaps", "1",
 
-    # Runtime detections are transformer prompt tokens; final scoring uses a bounded residual.
+    # Runtime detections are transformer prompt tokens. They can fuse into the actor
+    # token before actor_head, then add bounded residual evidence after actor_head.
     # Epoch-11 fine-tune keeps object evidence useful but prevents late residual growth
     # from overpowering the balanced action classifier.
     "--actor_object_prompt_tokens", "1",

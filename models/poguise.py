@@ -633,6 +633,64 @@ class POGUISE(pl.LightningModule):
                 for param in m.parameters():
                     param.requires_grad = False
 
+    def _actor_object_geometry_attention_bias(
+        self,
+        actor_boxes,
+        object_boxes,
+        actor_valid,
+        object_valid,
+        device,
+        dtype,
+    ):
+        if (
+            actor_boxes is None
+            or object_boxes is None
+            or actor_valid is None
+            or object_valid is None
+        ):
+            return None
+        actor_boxes = actor_boxes.to(device=device, dtype=dtype).clamp(0.0, 1.0)
+        object_boxes = object_boxes.to(device=device, dtype=dtype).clamp(0.0, 1.0)
+        actor_valid = actor_valid.to(device=device, dtype=torch.bool)
+        object_valid = object_valid.to(device=device, dtype=torch.bool)
+
+        actor_center = (actor_boxes[..., :2] + actor_boxes[..., 2:]) * 0.5
+        object_center = (object_boxes[..., :2] + object_boxes[..., 2:]) * 0.5
+        actor_size = (actor_boxes[..., 2:] - actor_boxes[..., :2]).clamp_min(1.0e-4)
+        object_size = (object_boxes[..., 2:] - object_boxes[..., :2]).clamp_min(1.0e-4)
+
+        center_dist = torch.linalg.vector_norm(
+            actor_center[:, :, None, :] - object_center[:, None, :, :],
+            dim=-1,
+        )
+        actor_diag = torch.linalg.vector_norm(actor_size, dim=-1)
+        object_diag = torch.linalg.vector_norm(object_size, dim=-1)
+        distance_scale = (
+            0.5 * actor_diag[:, :, None] + 0.5 * object_diag[:, None, :]
+        ).clamp_min(0.05)
+        norm_dist = center_dist / distance_scale
+        proximity = torch.exp(-0.5 * norm_dist.square()).clamp(0.0, 1.0)
+
+        inter_min = torch.maximum(
+            actor_boxes[:, :, None, :2],
+            object_boxes[:, None, :, :2],
+        )
+        inter_max = torch.minimum(
+            actor_boxes[:, :, None, 2:],
+            object_boxes[:, None, :, 2:],
+        )
+        inter_size = (inter_max - inter_min).clamp_min(0.0)
+        inter_area = inter_size[..., 0] * inter_size[..., 1]
+        actor_area = actor_size[..., 0] * actor_size[..., 1]
+        object_area = object_size[..., 0] * object_size[..., 1]
+        union = actor_area[:, :, None] + object_area[:, None, :] - inter_area
+        iou = inter_area / union.clamp_min(1.0e-6)
+
+        pair_valid = actor_valid[:, :, None] & object_valid[:, None, :]
+        bias = 4.0 * proximity + 2.0 * iou - 3.0
+        bias = bias.clamp(-4.0, 3.0)
+        return bias.masked_fill(~pair_valid, -1.0e4)
+
     def forward(
         self,
         x,
@@ -698,9 +756,15 @@ class POGUISE(pl.LightningModule):
             self.last_actor_object_prompt_attention = None
             self.last_actor_object_prompt_valid = None
             self.last_actor_object_base_fusion_attention = None
+            self.last_actor_object_base_fusion_null_prob = None
+            self.last_actor_object_base_fusion_useful_mass = None
+            self.last_actor_object_base_fusion_delta = None
+            self.last_actor_object_base_fusion_gate = None
             self.last_actor_object_base_fusion_scale = None
+            self.last_actor_object_base_fusion_attention_bias = None
             self.last_actor_action_tokens = None
             self.last_object_residual_head_output = None
+            self.last_object_residual_raw_base_logits = None
             self.last_object_residual_base_logits = None
             self.last_object_residual_final_logits = None
             self.last_object_residual = None
@@ -716,6 +780,7 @@ class POGUISE(pl.LightningModule):
             action_scores = None
             prompt_valid = None
             prompt_classes = None
+            raw_base_logits = None
             if (
                 self.actor_object_prompt_tokens_enabled
                 and x_object_prompt is not None
@@ -742,27 +807,57 @@ class POGUISE(pl.LightningModule):
 
             x_actor_action = x_actor
             if self.actor_object_base_fusion is not None:
+                raw_base_logits = self.actor_head(x_actor)
                 if x_object_prompt is None or prompt_valid is None:
                     raise RuntimeError(
                         "actor_object_base_fusion requires runtime object prompt tokens"
                     )
                 if object_confs is None:
                     raise ValueError("actor_object_base_fusion requires object_confs")
+                object_attention_bias = self._actor_object_geometry_attention_bias(
+                    boxes,
+                    object_boxes,
+                    valid,
+                    prompt_valid,
+                    x_actor.device,
+                    x_actor.dtype,
+                )
                 fusion_output = self.actor_object_base_fusion(
                     x_actor,
                     x_object_prompt,
                     object_confs,
                     prompt_valid,
+                    object_attention_bias=object_attention_bias,
+                )
+                self.last_actor_object_base_fusion_attention_bias = (
+                    None
+                    if object_attention_bias is None
+                    else object_attention_bias.detach()
                 )
                 x_actor_action = fusion_output["actor_tokens"]
                 self.last_actor_object_base_fusion_attention = fusion_output[
                     "object_attention"
+                ]
+                self.last_actor_object_base_fusion_null_prob = fusion_output[
+                    "object_null_prob"
+                ]
+                self.last_actor_object_base_fusion_useful_mass = fusion_output[
+                    "object_useful_mass"
+                ]
+                self.last_actor_object_base_fusion_delta = fusion_output[
+                    "fusion_delta"
+                ]
+                self.last_actor_object_base_fusion_gate = fusion_output[
+                    "fusion_gate"
                 ]
                 self.last_actor_object_base_fusion_scale = fusion_output[
                     "fusion_scale"
                 ]
             self.last_actor_action_tokens = x_actor_action
             base_logits = self.actor_head(x_actor_action)
+            if raw_base_logits is None:
+                raw_base_logits = base_logits
+            self.last_object_residual_raw_base_logits = raw_base_logits
 
             if self.object_residual_action_head is not None:
                 if boxes is None or valid is None:
@@ -777,7 +872,7 @@ class POGUISE(pl.LightningModule):
                         "object_confs, and object_valid"
                     )
                 head_output = self.object_residual_action_head(
-                    actor_tokens=x_actor_action,
+                    actor_tokens=x_actor,
                     actor_valid=valid,
                     base_logits=base_logits,
                     object_prompt_tokens=x_object_prompt,
@@ -811,8 +906,11 @@ class POGUISE(pl.LightningModule):
                     "raw_actor_tokens": x_actor,
                     "actor_tokens": x_actor_action,
                     "actor_valid": valid,
+                    "raw_base_logits": raw_base_logits,
                     "base_logits": base_logits,
                     "object_prompt_tokens": x_object_prompt,
+                    "actor_boxes": boxes,
+                    "object_boxes": object_boxes,
                     "object_classes": object_classes,
                     "object_confs": object_confs,
                     "object_valid": object_valid,
@@ -885,20 +983,29 @@ class POGUISE(pl.LightningModule):
             if object_valid is None
             else object_valid.to(device=prompt_tokens.device, dtype=torch.bool)
         )
-        actor_tokens = cache["actor_tokens"]
+        raw_actor_tokens = cache.get("raw_actor_tokens", cache["actor_tokens"])
+        residual_actor_tokens = raw_actor_tokens
         base_logits = cache["base_logits"]
         if self.actor_object_base_fusion is not None:
-            raw_actor_tokens = cache.get("raw_actor_tokens", actor_tokens)
+            object_attention_bias = self._actor_object_geometry_attention_bias(
+                cache.get("actor_boxes"),
+                cache.get("object_boxes"),
+                cache["actor_valid"],
+                prompt_valid,
+                raw_actor_tokens.device,
+                raw_actor_tokens.dtype,
+            )
             fusion_output = self.actor_object_base_fusion(
                 raw_actor_tokens,
                 prompt_tokens,
                 cache["object_confs"],
                 prompt_valid,
+                object_attention_bias=object_attention_bias,
             )
-            actor_tokens = fusion_output["actor_tokens"]
-            base_logits = self.actor_head(actor_tokens)
+            base_actor_tokens = fusion_output["actor_tokens"]
+            base_logits = self.actor_head(base_actor_tokens)
         out = self.object_residual_action_head(
-            actor_tokens=actor_tokens,
+            actor_tokens=residual_actor_tokens,
             actor_valid=cache["actor_valid"],
             base_logits=base_logits,
             object_prompt_tokens=prompt_tokens,

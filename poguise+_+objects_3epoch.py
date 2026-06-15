@@ -430,7 +430,8 @@ cmd = [
 
     "--actor_interaction_heatmaps", "1",
 
-    # Runtime detections are transformer prompt tokens; final scoring uses a bounded residual.
+    # Runtime detections are transformer prompt tokens. They can fuse into the actor
+    # token before actor_head, then add bounded residual evidence after actor_head.
     "--actor_object_prompt_tokens", "1",
     "--actor_object_base_fusion", "1",
     "--actor_object_base_fusion_scale_init", "-2.0",
