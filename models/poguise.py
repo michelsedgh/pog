@@ -649,6 +649,11 @@ class POGUISE(pl.LightningModule):
             or object_valid is None
         ):
             return None
+        weight = float(
+            self.hparams.get("actor_object_base_fusion_geometry_bias_weight", 1.0)
+        )
+        if weight <= 0:
+            return None
         actor_boxes = actor_boxes.to(device=device, dtype=dtype).clamp(0.0, 1.0)
         object_boxes = object_boxes.to(device=device, dtype=dtype).clamp(0.0, 1.0)
         actor_valid = actor_valid.to(device=device, dtype=torch.bool)
@@ -688,8 +693,126 @@ class POGUISE(pl.LightningModule):
 
         pair_valid = actor_valid[:, :, None] & object_valid[:, None, :]
         bias = 4.0 * proximity + 2.0 * iou - 3.0
-        bias = bias.clamp(-4.0, 3.0)
+        bias = (bias.clamp(-4.0, 3.0) * weight).clamp(-8.0, 6.0)
         return bias.masked_fill(~pair_valid, -1.0e4)
+
+    def _actor_object_heatmap_attention_bias(
+        self,
+        heatmap,
+        object_boxes,
+        actor_valid,
+        object_valid,
+        device,
+        dtype,
+    ):
+        if (
+            not torch.is_tensor(heatmap)
+            or not self.actor_interaction_heatmaps
+            or object_boxes is None
+            or actor_valid is None
+            or object_valid is None
+        ):
+            return None
+        weight = float(
+            self.hparams.get("actor_object_base_fusion_heatmap_bias_weight", 2.0)
+        )
+        if weight <= 0:
+            return None
+
+        n_pose = int(self.hparams.get("n_landmarks", 0))
+        n_actor = int(self.hparams.get("num_actor_tokens", 8))
+        end = n_pose + n_actor
+        if heatmap.ndim != 4 or heatmap.shape[1] < end:
+            raise RuntimeError(
+                "actor_object_base_fusion heatmap bias requires heatmap shape "
+                f"[B, >= {end}, H, W], got {tuple(heatmap.shape)}"
+            )
+
+        interaction = heatmap[:, n_pose:end].detach()
+        interaction = interaction.to(device=device, dtype=dtype).clamp(0.0, 1.0)
+        B, A, H, W = interaction.shape
+        if A != n_actor:
+            raise RuntimeError(
+                "interaction heatmap actor channels do not match num_actor_tokens: "
+                f"{A} vs {n_actor}"
+            )
+
+        object_boxes = object_boxes.to(device=device, dtype=dtype).clamp(0.0, 1.0)
+        actor_valid = actor_valid.to(device=device, dtype=torch.bool)
+        object_valid = object_valid.to(device=device, dtype=torch.bool)
+        K = int(object_boxes.shape[1])
+        pair_valid = actor_valid[:, :, None] & object_valid[:, None, :]
+
+        flat_heatmap = interaction.reshape(B, A, H * W)
+        y_centers = (torch.arange(H, device=device, dtype=dtype) + 0.5) / H
+        x_centers = (torch.arange(W, device=device, dtype=dtype) + 0.5) / W
+        grid_y, grid_x = torch.meshgrid(y_centers, x_centers, indexing="ij")
+        grid_x = grid_x.reshape(1, 1, H * W)
+        grid_y = grid_y.reshape(1, 1, H * W)
+
+        mins = object_boxes[..., :2]
+        maxs = object_boxes[..., 2:]
+        inside = (
+            (grid_x >= mins[..., 0:1])
+            & (grid_x <= maxs[..., 0:1])
+            & (grid_y >= mins[..., 1:2])
+            & (grid_y <= maxs[..., 1:2])
+            & object_valid[:, :, None]
+        )
+
+        heat_for_objects = flat_heatmap[:, :, None, :].expand(B, A, K, H * W)
+        masked_heat = heat_for_objects.masked_fill(~inside[:, None, :, :], -1.0)
+        max_score = masked_heat.amax(dim=-1).clamp_min(0.0)
+
+        object_center = (mins + maxs) * 0.5
+        center_x = torch.floor(object_center[..., 0] * W).long().clamp(0, W - 1)
+        center_y = torch.floor(object_center[..., 1] * H).long().clamp(0, H - 1)
+        center_index = center_y * W + center_x
+        center_score = heat_for_objects.gather(
+            dim=-1,
+            index=center_index[:, None, :, None].expand(B, A, K, 1),
+        ).squeeze(-1)
+
+        has_box_pixels = inside.any(dim=-1)[:, None, :]
+        score = torch.where(has_box_pixels, max_score, center_score)
+        score = score * pair_valid.to(dtype=score.dtype)
+        bias = (score * weight).clamp(0.0, max(weight, 1.0))
+        return bias.masked_fill(~pair_valid, -1.0e4)
+
+    def _actor_object_attention_bias(
+        self,
+        actor_boxes,
+        object_boxes,
+        actor_valid,
+        object_valid,
+        heatmap,
+        device,
+        dtype,
+    ):
+        biases = []
+        geometry_bias = self._actor_object_geometry_attention_bias(
+            actor_boxes,
+            object_boxes,
+            actor_valid,
+            object_valid,
+            device,
+            dtype,
+        )
+        if geometry_bias is not None:
+            biases.append(geometry_bias)
+        heatmap_bias = self._actor_object_heatmap_attention_bias(
+            heatmap,
+            object_boxes,
+            actor_valid,
+            object_valid,
+            device,
+            dtype,
+        )
+        if heatmap_bias is not None:
+            biases.append(heatmap_bias)
+        if not biases:
+            return None
+        return torch.stack(biases, dim=0).sum(dim=0).clamp(-1.0e4, 1.0e4)
 
     def forward(
         self,
@@ -814,11 +937,12 @@ class POGUISE(pl.LightningModule):
                     )
                 if object_confs is None:
                     raise ValueError("actor_object_base_fusion requires object_confs")
-                object_attention_bias = self._actor_object_geometry_attention_bias(
+                object_attention_bias = self._actor_object_attention_bias(
                     boxes,
                     object_boxes,
                     valid,
                     prompt_valid,
+                    x_heatmap,
                     x_actor.device,
                     x_actor.dtype,
                 )
@@ -911,6 +1035,7 @@ class POGUISE(pl.LightningModule):
                     "object_prompt_tokens": x_object_prompt,
                     "actor_boxes": boxes,
                     "object_boxes": object_boxes,
+                    "heatmap": x_heatmap.detach() if torch.is_tensor(x_heatmap) else None,
                     "object_classes": object_classes,
                     "object_confs": object_confs,
                     "object_valid": object_valid,
@@ -987,11 +1112,12 @@ class POGUISE(pl.LightningModule):
         residual_actor_tokens = raw_actor_tokens
         base_logits = cache["base_logits"]
         if self.actor_object_base_fusion is not None:
-            object_attention_bias = self._actor_object_geometry_attention_bias(
+            object_attention_bias = self._actor_object_attention_bias(
                 cache.get("actor_boxes"),
                 cache.get("object_boxes"),
                 cache["actor_valid"],
                 prompt_valid,
+                cache.get("heatmap"),
                 raw_actor_tokens.device,
                 raw_actor_tokens.dtype,
             )
@@ -1071,6 +1197,16 @@ class POGUISE(pl.LightningModule):
             "--actor_object_base_fusion_max_scale",
             type=float,
             default=1.0,
+        )
+        parser.add_argument(
+            "--actor_object_base_fusion_geometry_bias_weight",
+            type=float,
+            default=1.0,
+        )
+        parser.add_argument(
+            "--actor_object_base_fusion_heatmap_bias_weight",
+            type=float,
+            default=2.0,
         )
         parser.add_argument("--actor_object_residual_head", type=int, default=0)
         parser.add_argument("--actor_object_residual_hidden_dim", type=int, default=512)

@@ -53,6 +53,8 @@ CORE_COLUMNS = [
     "val_object_fusion_gate_mean",
     "val_object_fusion_useful_mass_exact",
     "val_object_fusion_null_prob_exact",
+    "val_object_fusion_attention_teacher_exact",
+    "val_object_fusion_attention_bias_teacher_exact",
     "val_object_fusion_useful_mass_objectless",
     "val_object_fusion_null_prob_objectless",
     "val_object_fusion_raw_to_fused_true_logit_delta_exact",
@@ -348,6 +350,8 @@ def print_compact_epoch_summary(epoch_df):
         "val_object_fusion_gate_mean",
         "val_object_fusion_useful_mass_exact",
         "val_object_fusion_null_prob_exact",
+        "val_object_fusion_attention_teacher_exact",
+        "val_object_fusion_attention_bias_teacher_exact",
         "val_object_fusion_useful_mass_objectless",
         "val_object_fusion_null_prob_objectless",
         "val_object_fusion_raw_to_fused_true_logit_delta_exact",
@@ -433,6 +437,8 @@ def print_compact_best(epoch_df):
         "val_object_fusion_gate_mean",
         "val_object_fusion_useful_mass_exact",
         "val_object_fusion_null_prob_exact",
+        "val_object_fusion_attention_teacher_exact",
+        "val_object_fusion_attention_bias_teacher_exact",
         "val_object_fusion_useful_mass_objectless",
         "val_object_fusion_null_prob_objectless",
         "val_object_fusion_raw_to_fused_true_logit_delta_exact",
@@ -819,6 +825,14 @@ def print_decision(epoch_df):
         latest,
         "val_object_fusion_null_prob_exact",
     )
+    object_fusion_attention_teacher = metric(
+        latest,
+        "val_object_fusion_attention_teacher_exact",
+    )
+    object_fusion_attention_bias_teacher = metric(
+        latest,
+        "val_object_fusion_attention_bias_teacher_exact",
+    )
     object_fusion_useful_objectless = metric(
         latest,
         "val_object_fusion_useful_mass_objectless",
@@ -1117,6 +1131,8 @@ def print_decision(epoch_df):
             f"gate {fmt(object_fusion_gate_mean)}, "
             f"useful_exact {fmt(object_fusion_useful_exact)}, "
             f"null_exact {fmt(object_fusion_null_exact)}, "
+            f"teacher_attention {fmt(object_fusion_attention_teacher)}, "
+            f"teacher_bias {fmt(object_fusion_attention_bias_teacher)}, "
             f"useful_objectless {fmt(object_fusion_useful_objectless)}, "
             f"null_objectless {fmt(object_fusion_null_objectless)}, "
             f"raw_to_fused_true_delta_exact {fmt(object_fusion_true_delta_exact)}, "

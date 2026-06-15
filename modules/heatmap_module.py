@@ -2297,6 +2297,16 @@ class HeatmapModule(pl.LightningModule):
             "last_actor_object_base_fusion_useful_mass",
             None,
         )
+        fusion_attention = getattr(
+            self.model,
+            "last_actor_object_base_fusion_attention",
+            None,
+        )
+        fusion_attention_bias = getattr(
+            self.model,
+            "last_actor_object_base_fusion_attention_bias",
+            None,
+        )
         if (
             coverage is None
             or object_residual is None
@@ -2456,6 +2466,27 @@ class HeatmapModule(pl.LightningModule):
                 self._log_scalar(
                     f"{stage}_object_fusion_null_prob_exact",
                     fusion_null_prob.float()[exact_compatible].mean(),
+                    count,
+                )
+            teacher_slot = info["idx_1based"].to(device=device, dtype=torch.long)
+            if fusion_attention is not None:
+                fusion_teacher_attention = fusion_attention.float().gather(
+                    -1,
+                    teacher_slot.unsqueeze(-1),
+                ).squeeze(-1)
+                self._log_scalar(
+                    f"{stage}_object_fusion_attention_teacher_exact",
+                    fusion_teacher_attention[exact_compatible].mean(),
+                    count,
+                )
+            if fusion_attention_bias is not None:
+                fusion_teacher_bias = fusion_attention_bias.float().gather(
+                    -1,
+                    teacher_slot.unsqueeze(-1),
+                ).squeeze(-1)
+                self._log_scalar(
+                    f"{stage}_object_fusion_attention_bias_teacher_exact",
+                    fusion_teacher_bias[exact_compatible].mean(),
                     count,
                 )
             if raw_true is not None:

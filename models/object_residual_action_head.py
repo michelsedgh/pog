@@ -249,6 +249,7 @@ class ActorObjectContextFusion(nn.Module):
         self.object_key = nn.Linear(dim, relation_dim, bias=False)
         self.object_value = nn.Linear(dim, dim, bias=False)
         self.null_key = nn.Parameter(torch.zeros(relation_dim))
+        self.null_value = nn.Parameter(torch.zeros(dim))
         self.null_logit = nn.Parameter(torch.tensor(0.0))
         self.context_proj = nn.Sequential(
             nn.LayerNorm(dim),
@@ -326,7 +327,10 @@ class ActorObjectContextFusion(nn.Module):
         useful_mass = attention.sum(dim=-1).clamp(0.0, 1.0)
 
         values = self.object_value(object_prompt_tokens)
-        context = torch.matmul(attention, values)
+        object_context = torch.matmul(attention, values)
+        null_value = self.null_value.to(device=actor_tokens.device, dtype=actor_tokens.dtype)
+        null_context = null_prob[..., None] * null_value.view(1, 1, -1)
+        context = object_context + null_context
 
         gate = self.gate(
             torch.cat([actor_tokens, context, actor_tokens * context], dim=-1)

@@ -451,6 +451,8 @@ cmd = [
     "--actor_object_base_fusion", "1",
     "--actor_object_base_fusion_scale_init", "-2.0",
     "--actor_object_base_fusion_max_scale", "1.0",
+    "--actor_object_base_fusion_geometry_bias_weight", "1.0",
+    "--actor_object_base_fusion_heatmap_bias_weight", "2.0",
     "--actor_object_residual_head", "1",
     "--actor_object_residual_relation_scale_init", "-1.0",
     "--actor_object_residual_relation_logit_bound", "2.0",

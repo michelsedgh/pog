@@ -399,7 +399,7 @@ def run_training_with_epoch_summaries(cmd, run_name, epoch_dir, poll_secs=20):
     return str(run_dir)
 
 TS = datetime.now().strftime("%Y%m%d_%H%M%S")
-RUN_NAME = f"actor_object_residual_validated45_{TS}"
+RUN_NAME = f"actor_object_basefusion_validated51_{TS}"
 EPOCH_DIR = str(Path(DATA_DIR) / "checkpoints" / RUN_NAME / "epoch_checkpoints")
 
 cmd = [
@@ -440,6 +440,8 @@ cmd = [
     "--actor_object_base_fusion", "1",
     "--actor_object_base_fusion_scale_init", "-2.0",
     "--actor_object_base_fusion_max_scale", "1.0",
+    "--actor_object_base_fusion_geometry_bias_weight", "1.0",
+    "--actor_object_base_fusion_heatmap_bias_weight", "2.0",
     "--actor_object_residual_head", "1",
     "--actor_object_residual_relation_scale_init", "-1.0",
     "--actor_object_residual_relation_logit_bound", "2.0",
@@ -505,18 +507,18 @@ cmd = [
 
     "--motion_aux_loss_weight", "0.35",
     "--object_residual_prompt_relation_loss_weight", "0.35",
-    "--object_residual_prompt_relation_loss_final_weight", "0.20",
+    "--object_residual_prompt_relation_loss_final_weight", "0.12",
     "--object_residual_relation_loss_decay_start_epoch", "5",
-    "--object_residual_relation_loss_decay_end_epoch", "15",
+    "--object_residual_relation_loss_decay_end_epoch", "12",
     "--object_residual_relation_confuser_margin", "1.0",
     "--object_residual_null_relation_loss_weight", "0.25",
     "--object_prompt_grounding_loss_weight", "0.20",
-    "--object_prompt_wrong_class_loss_weight", "0.05",
+    "--object_prompt_wrong_class_loss_weight", "0.10",
     "--object_prompt_wrong_class_margin", "0.20",
-    "--object_prompt_sensitivity_loss_weight", "0.025",
+    "--object_prompt_sensitivity_loss_weight", "0.10",
     "--object_prompt_sensitivity_margin", "0.20",
     "--object_prompt_sensitivity_motion_margin_threshold", "1.0",
-    "--objectless_prompt_consistency_loss_weight", "0.20",
+    "--objectless_prompt_consistency_loss_weight", "0.25",
     "--objectless_object_action_suppression_loss_weight", "0.60",
     "--object_class_dropout_prob", "0.0",
     "--object_class_wrong_prob", "0.0",
@@ -533,8 +535,8 @@ cmd = [
     "--batch_size", "32",
     "--accum_grad_batches", "2",
 
-    "--max_epochs", "45",
-    "--t_max_scheduler", "45",
+    "--max_epochs", "51",
+    "--t_max_scheduler", "51",
 
     "--lr", "3e-5",
     "--lr_head", "5e-4",
