@@ -38,43 +38,17 @@ CORE_COLUMNS = [
     "val_loss_interaction_heatmap_center",
     "val_loss_main_deploy",
     "val_loss_grounding_aux",
-    "val_object_residual_relation_scale",
-    "val_object_residual_abs_mean",
-    "val_object_residual_abs_max",
-    "val_object_residual_coverage_true_exact",
-    "val_object_residual_true_exact",
-    "val_object_residual_true_missing",
-    "val_object_residual_useful_mass_true_exact",
-    "val_object_residual_null_prob_true_exact",
-    "val_object_residual_useful_mass_true_missing",
-    "val_object_residual_null_prob_true_missing",
-    "val_object_fusion_scale",
-    "val_object_fusion_delta_norm",
-    "val_object_fusion_gate_mean",
-    "val_object_fusion_useful_mass_exact",
-    "val_object_fusion_null_prob_exact",
-    "val_object_fusion_attention_teacher_exact",
-    "val_object_fusion_attention_bias_teacher_exact",
-    "val_object_fusion_useful_mass_objectless",
-    "val_object_fusion_null_prob_objectless",
-    "val_object_fusion_raw_to_fused_true_logit_delta_exact",
-    "val_object_fusion_raw_base_true_minus_confuser_exact",
-    "val_object_residual_prompt_delta_true_minus_confuser_exact",
-    "val_object_residual_prompt_delta_true_minus_confuser_missing",
-    "val_object_residual_base_true_minus_confuser_exact",
-    "val_object_residual_base_true_minus_confuser_missing",
-    "val_object_residual_final_true_minus_confuser_exact",
-    "val_object_residual_final_true_minus_confuser_missing",
-    "val_object_residual_base_objectless_true_minus_objectful_max",
-    "val_object_residual_final_objectless_true_minus_objectful_max",
-    "val_object_residual_prompt_relation_effective_weight",
-    "val_object_residual_null_relation_weight",
-    "val_loss_object_residual_prompt_relation",
-    "val_object_residual_prompt_relation_margin_exact",
-    "val_object_residual_prompt_relation_margin_sat_exact",
-    "val_loss_object_residual_null_relation",
-    "val_object_residual_useful_mass_loss_exact_mean",
-    "val_object_residual_useful_mass_loss_missing_mean",
+    "val_loss_actor_object_relation",
+    "val_relation_exact_teacher_acc",
+    "val_relation_exact_teacher_prob",
+    "val_relation_null_rate_objectless",
+    "val_relation_null_rate_missing_objectful",
+    "val_relation_useful_mass_exact",
+    "val_relation_useful_mass_objectless",
+    "val_relation_useful_mass_missing_objectful",
+    "val_relation_null_prob_exact",
+    "val_relation_null_prob_objectless",
+    "val_relation_null_prob_missing_objectful",
     "val_loss_objectless_object_action_suppression",
     "val_loss_object_prompt_grounding",
     "val_object_prompt_grounding_acc",
@@ -89,15 +63,6 @@ CORE_COLUMNS = [
     "val_object_prompt_attention_objectless_visible_mean",
     "val_object_prompt_attention_objectless_visible_max",
     "val_object_prompt_attention_objectless_visible_entropy",
-    "val_loss_object_prompt_wrong_class",
-    "val_object_prompt_correct_minus_wrong_true_logit",
-    "val_object_prompt_wrong_class_margin_sat_rate",
-    "val_loss_object_prompt_sensitivity",
-    "val_object_prompt_sensitivity_ambiguous_rate",
-    "val_object_prompt_correct_minus_dropped_true_logit_ambiguous",
-    "val_object_prompt_sensitivity_margin_sat_rate",
-    "val_object_prompt_wrong_Uselaptop_minus_Readbook_margin",
-    "val_object_prompt_dropped_Uselaptop_minus_WatchTV_margin",
     "val_object_prompt_drop_objectless_pred_match",
     "val_object_prompt_drop_objectless_true_prob_delta",
     "val_object_prompt_drop_objectless_kl",
@@ -337,42 +302,23 @@ def print_compact_epoch_summary(epoch_df):
         "val_group_phone_tv_acc",
         "val_group_drink_cup_bottle_glass_acc",
         "val_group_drink_acc",
-        "val_object_residual_abs_mean",
-        "val_object_residual_abs_max",
-        "val_object_residual_true_exact",
-        "val_object_residual_true_missing",
-        "val_object_residual_useful_mass_true_exact",
-        "val_object_residual_null_prob_true_exact",
-        "val_object_residual_useful_mass_true_missing",
-        "val_object_residual_null_prob_true_missing",
-        "val_object_fusion_scale",
-        "val_object_fusion_delta_norm",
-        "val_object_fusion_gate_mean",
-        "val_object_fusion_useful_mass_exact",
-        "val_object_fusion_null_prob_exact",
-        "val_object_fusion_attention_teacher_exact",
-        "val_object_fusion_attention_bias_teacher_exact",
-        "val_object_fusion_useful_mass_objectless",
-        "val_object_fusion_null_prob_objectless",
-        "val_object_fusion_raw_to_fused_true_logit_delta_exact",
-        "val_object_fusion_raw_base_true_minus_confuser_exact",
-        "val_object_residual_prompt_relation_effective_weight",
-        "val_object_residual_null_relation_weight",
-        "val_object_residual_prompt_relation_margin_exact",
-        "val_object_residual_prompt_delta_true_minus_confuser_missing",
-        "val_object_residual_prompt_relation_margin_sat_exact",
-        "val_object_residual_base_true_minus_confuser_exact",
-        "val_object_residual_base_true_minus_confuser_missing",
-        "val_object_residual_final_true_minus_confuser_exact",
-        "val_object_residual_final_true_minus_confuser_missing",
+        "val_loss_actor_object_relation",
+        "val_relation_exact_teacher_acc",
+        "val_relation_exact_teacher_prob",
+        "val_relation_useful_mass_exact",
+        "val_relation_null_prob_exact",
+        "val_relation_null_rate_objectless",
+        "val_relation_null_prob_objectless",
+        "val_relation_useful_mass_objectless",
+        "val_relation_null_rate_missing_objectful",
+        "val_relation_null_prob_missing_objectful",
+        "val_relation_useful_mass_missing_objectful",
         "val_object_counterfactual_teacher_logit_drop",
         "val_object_prompt_grounding_acc",
         "val_object_prompt_grounding_true_prob",
         "val_object_prompt_exact_correct_object_rate",
         "val_object_prompt_exact_correct_object_prob",
         "val_object_prompt_attention_exact_teacher_mean",
-        "val_object_prompt_correct_minus_wrong_true_logit",
-        "val_object_prompt_correct_minus_dropped_true_logit_ambiguous",
         "val_object_prompt_attention_objectless_visible_max",
         "val_object_prompt_drop_objectless_pred_match",
         "val_object_prompt_drop_objectless_kl",
@@ -422,53 +368,23 @@ def print_compact_best(epoch_df):
         "val_group_objectless_acc",
         "val_group_laptop_book_tv_acc",
         "val_group_phone_tv_acc",
-        "val_object_residual_relation_scale",
-        "val_object_residual_abs_mean",
-        "val_object_residual_abs_max",
-        "val_object_residual_coverage_true_exact",
-        "val_object_residual_true_exact",
-        "val_object_residual_true_missing",
-        "val_object_residual_useful_mass_true_exact",
-        "val_object_residual_null_prob_true_exact",
-        "val_object_residual_useful_mass_true_missing",
-        "val_object_residual_null_prob_true_missing",
-        "val_object_fusion_scale",
-        "val_object_fusion_delta_norm",
-        "val_object_fusion_gate_mean",
-        "val_object_fusion_useful_mass_exact",
-        "val_object_fusion_null_prob_exact",
-        "val_object_fusion_attention_teacher_exact",
-        "val_object_fusion_attention_bias_teacher_exact",
-        "val_object_fusion_useful_mass_objectless",
-        "val_object_fusion_null_prob_objectless",
-        "val_object_fusion_raw_to_fused_true_logit_delta_exact",
-        "val_object_fusion_raw_base_true_minus_confuser_exact",
-        "val_object_residual_prompt_delta_true_minus_confuser_exact",
-        "val_object_residual_prompt_delta_true_minus_confuser_missing",
-        "val_object_residual_base_true_minus_confuser_exact",
-        "val_object_residual_base_true_minus_confuser_missing",
-        "val_object_residual_final_true_minus_confuser_exact",
-        "val_object_residual_final_true_minus_confuser_missing",
-        "val_object_residual_base_objectless_true_minus_objectful_max",
-        "val_object_residual_final_objectless_true_minus_objectful_max",
-        "val_object_residual_prompt_relation_effective_weight",
-        "val_object_residual_null_relation_weight",
-        "val_loss_object_residual_prompt_relation",
-        "val_object_residual_prompt_relation_margin_exact",
-        "val_object_residual_prompt_relation_margin_sat_exact",
-        "val_loss_object_residual_null_relation",
-        "val_object_residual_useful_mass_loss_exact_mean",
-        "val_object_residual_useful_mass_loss_missing_mean",
+        "val_loss_actor_object_relation",
+        "val_relation_exact_teacher_acc",
+        "val_relation_exact_teacher_prob",
+        "val_relation_useful_mass_exact",
+        "val_relation_null_prob_exact",
+        "val_relation_null_rate_objectless",
+        "val_relation_null_prob_objectless",
+        "val_relation_useful_mass_objectless",
+        "val_relation_null_rate_missing_objectful",
+        "val_relation_null_prob_missing_objectful",
+        "val_relation_useful_mass_missing_objectful",
         "val_object_counterfactual_teacher_logit_drop",
         "val_object_prompt_grounding_acc",
         "val_object_prompt_grounding_true_prob",
         "val_object_prompt_exact_correct_object_rate",
         "val_object_prompt_exact_correct_object_prob",
         "val_object_prompt_attention_exact_teacher_mean",
-        "val_object_prompt_correct_minus_wrong_true_logit",
-        "val_object_prompt_correct_minus_dropped_true_logit_ambiguous",
-        "val_object_prompt_wrong_Uselaptop_minus_Readbook_margin",
-        "val_object_prompt_dropped_Uselaptop_minus_WatchTV_margin",
         "val_object_prompt_attention_objectless_visible_max",
         "val_object_prompt_drop_objectless_pred_match",
         "val_object_prompt_drop_objectless_kl",
@@ -783,135 +699,22 @@ def print_decision(epoch_df):
     deploy_key_min = metric(latest, "val_deploy_key_action_min")
     object_mapped_acc = metric(latest, "val_group_object_mapped_acc")
     objectless_acc = metric(latest, "val_group_objectless_acc")
-    object_residual_relation_scale = metric(latest, "val_object_residual_relation_scale")
-    object_residual_abs_mean = metric(latest, "val_object_residual_abs_mean")
-    object_residual_abs_max = metric(latest, "val_object_residual_abs_max")
-    object_residual_coverage_exact = metric(
+    relation_loss = metric(latest, "val_loss_actor_object_relation")
+    relation_exact_acc = metric(latest, "val_relation_exact_teacher_acc")
+    relation_exact_prob = metric(latest, "val_relation_exact_teacher_prob")
+    relation_useful_exact = metric(latest, "val_relation_useful_mass_exact")
+    relation_null_exact = metric(latest, "val_relation_null_prob_exact")
+    relation_null_objectless = metric(latest, "val_relation_null_rate_objectless")
+    relation_null_prob_objectless = metric(latest, "val_relation_null_prob_objectless")
+    relation_useful_objectless = metric(latest, "val_relation_useful_mass_objectless")
+    relation_null_missing = metric(latest, "val_relation_null_rate_missing_objectful")
+    relation_null_prob_missing = metric(
         latest,
-        "val_object_residual_coverage_true_exact",
+        "val_relation_null_prob_missing_objectful",
     )
-    object_residual_exact = metric(
+    relation_useful_missing = metric(
         latest,
-        "val_object_residual_true_exact",
-    )
-    object_residual_missing = metric(
-        latest,
-        "val_object_residual_true_missing",
-    )
-    object_residual_useful_mass_exact = metric(
-        latest,
-        "val_object_residual_useful_mass_true_exact",
-    )
-    object_residual_null_prob_exact = metric(
-        latest,
-        "val_object_residual_null_prob_true_exact",
-    )
-    object_residual_useful_mass_missing = metric(
-        latest,
-        "val_object_residual_useful_mass_true_missing",
-    )
-    object_residual_null_prob_missing = metric(
-        latest,
-        "val_object_residual_null_prob_true_missing",
-    )
-    object_fusion_scale = metric(latest, "val_object_fusion_scale")
-    object_fusion_delta_norm = metric(latest, "val_object_fusion_delta_norm")
-    object_fusion_gate_mean = metric(latest, "val_object_fusion_gate_mean")
-    object_fusion_useful_exact = metric(
-        latest,
-        "val_object_fusion_useful_mass_exact",
-    )
-    object_fusion_null_exact = metric(
-        latest,
-        "val_object_fusion_null_prob_exact",
-    )
-    object_fusion_attention_teacher = metric(
-        latest,
-        "val_object_fusion_attention_teacher_exact",
-    )
-    object_fusion_attention_bias_teacher = metric(
-        latest,
-        "val_object_fusion_attention_bias_teacher_exact",
-    )
-    object_fusion_useful_objectless = metric(
-        latest,
-        "val_object_fusion_useful_mass_objectless",
-    )
-    object_fusion_null_objectless = metric(
-        latest,
-        "val_object_fusion_null_prob_objectless",
-    )
-    object_fusion_true_delta_exact = metric(
-        latest,
-        "val_object_fusion_raw_to_fused_true_logit_delta_exact",
-    )
-    object_fusion_raw_margin_exact = metric(
-        latest,
-        "val_object_fusion_raw_base_true_minus_confuser_exact",
-    )
-    object_residual_prompt_margin_exact = metric(
-        latest,
-        "val_object_residual_prompt_delta_true_minus_confuser_exact",
-    )
-    object_residual_prompt_margin_missing = metric(
-        latest,
-        "val_object_residual_prompt_delta_true_minus_confuser_missing",
-    )
-    object_residual_base_margin_exact = metric(
-        latest,
-        "val_object_residual_base_true_minus_confuser_exact",
-    )
-    object_residual_base_margin_missing = metric(
-        latest,
-        "val_object_residual_base_true_minus_confuser_missing",
-    )
-    object_residual_final_margin_exact = metric(
-        latest,
-        "val_object_residual_final_true_minus_confuser_exact",
-    )
-    object_residual_final_margin_missing = metric(
-        latest,
-        "val_object_residual_final_true_minus_confuser_missing",
-    )
-    object_residual_base_objectless_margin = metric(
-        latest,
-        "val_object_residual_base_objectless_true_minus_objectful_max",
-    )
-    object_residual_final_objectless_margin = metric(
-        latest,
-        "val_object_residual_final_objectless_true_minus_objectful_max",
-    )
-    object_residual_prompt_relation_weight = metric(
-        latest,
-        "val_object_residual_prompt_relation_effective_weight",
-    )
-    object_residual_null_relation_weight = metric(
-        latest,
-        "val_object_residual_null_relation_weight",
-    )
-    object_residual_prompt_relation_loss = metric(
-        latest,
-        "val_loss_object_residual_prompt_relation",
-    )
-    object_residual_prompt_relation_margin = metric(
-        latest,
-        "val_object_residual_prompt_relation_margin_exact",
-    )
-    object_residual_prompt_relation_sat = metric(
-        latest,
-        "val_object_residual_prompt_relation_margin_sat_exact",
-    )
-    object_residual_null_relation_loss = metric(
-        latest,
-        "val_loss_object_residual_null_relation",
-    )
-    object_residual_useful_mass_loss_exact = metric(
-        latest,
-        "val_object_residual_useful_mass_loss_exact_mean",
-    )
-    object_residual_useful_mass_loss_missing = metric(
-        latest,
-        "val_object_residual_useful_mass_loss_missing_mean",
+        "val_relation_useful_mass_missing_objectful",
     )
     pos = metric(latest, "val_interaction_heatmap_positive_mean")
     pred_max = metric(latest, "val_interaction_heatmap_pred_max")
@@ -958,34 +761,6 @@ def print_decision(epoch_df):
     prompt_objectless_attention_entropy = metric(
         latest,
         "val_object_prompt_attention_objectless_visible_entropy",
-    )
-    wrong_prompt_drop = metric(
-        latest,
-        "val_object_prompt_correct_minus_wrong_true_logit",
-    )
-    wrong_prompt_sat = metric(
-        latest,
-        "val_object_prompt_wrong_class_margin_sat_rate",
-    )
-    sensitivity_ambiguous_rate = metric(
-        latest,
-        "val_object_prompt_sensitivity_ambiguous_rate",
-    )
-    sensitivity_drop = metric(
-        latest,
-        "val_object_prompt_correct_minus_dropped_true_logit_ambiguous",
-    )
-    sensitivity_sat = metric(
-        latest,
-        "val_object_prompt_sensitivity_margin_sat_rate",
-    )
-    wrong_laptop_readbook = metric(
-        latest,
-        "val_object_prompt_wrong_Uselaptop_minus_Readbook_margin",
-    )
-    dropped_laptop_watchtv = metric(
-        latest,
-        "val_object_prompt_dropped_Uselaptop_minus_WatchTV_margin",
     )
     prompt_drop_objectless_match = metric(
         latest,
@@ -1095,63 +870,20 @@ def print_decision(epoch_df):
             f"object_mapped {fmt(object_mapped_acc)}, "
             f"objectless {fmt(objectless_acc)}"
         )
-    if (
-        pd.notna(object_residual_exact)
-        or pd.notna(object_residual_missing)
-    ):
+    if pd.notna(relation_exact_acc) or pd.notna(relation_null_objectless):
         print(
-            "object residual evidence: "
-            f"scale {fmt(object_residual_relation_scale)}, "
-            f"abs_mean {fmt(object_residual_abs_mean)}, "
-            f"abs_max {fmt(object_residual_abs_max)}, "
-            f"coverage_exact {fmt(object_residual_coverage_exact)}, "
-            f"residual_exact {fmt(object_residual_exact)}, "
-            f"residual_missing {fmt(object_residual_missing)}, "
-            f"useful_exact {fmt(object_residual_useful_mass_exact)}, "
-            f"null_exact {fmt(object_residual_null_prob_exact)}, "
-            f"useful_missing {fmt(object_residual_useful_mass_missing)}, "
-            f"null_missing {fmt(object_residual_null_prob_missing)}, "
-            f"residual_margin_exact {fmt(object_residual_prompt_margin_exact)}, "
-            f"residual_margin_missing {fmt(object_residual_prompt_margin_missing)}, "
-            f"base_margin_exact {fmt(object_residual_base_margin_exact)}, "
-            f"base_margin_missing {fmt(object_residual_base_margin_missing)}, "
-            f"final_margin_exact {fmt(object_residual_final_margin_exact)}, "
-            f"final_margin_missing {fmt(object_residual_final_margin_missing)}, "
-            f"objectless_base_margin {fmt(object_residual_base_objectless_margin)}, "
-            f"objectless_final_margin {fmt(object_residual_final_objectless_margin)}"
-        )
-    if (
-        pd.notna(object_fusion_delta_norm)
-        or pd.notna(object_fusion_true_delta_exact)
-    ):
-        print(
-            "object base fusion: "
-            f"scale {fmt(object_fusion_scale)}, "
-            f"delta_norm {fmt(object_fusion_delta_norm)}, "
-            f"gate {fmt(object_fusion_gate_mean)}, "
-            f"useful_exact {fmt(object_fusion_useful_exact)}, "
-            f"null_exact {fmt(object_fusion_null_exact)}, "
-            f"teacher_attention {fmt(object_fusion_attention_teacher)}, "
-            f"teacher_bias {fmt(object_fusion_attention_bias_teacher)}, "
-            f"useful_objectless {fmt(object_fusion_useful_objectless)}, "
-            f"null_objectless {fmt(object_fusion_null_objectless)}, "
-            f"raw_to_fused_true_delta_exact {fmt(object_fusion_true_delta_exact)}, "
-            f"raw_base_margin_exact {fmt(object_fusion_raw_margin_exact)}"
-        )
-    if (
-        pd.notna(object_residual_prompt_relation_loss)
-        or pd.notna(object_residual_null_relation_loss)
-    ):
-        print(
-            "object residual objectives: "
-            f"prompt_weight {fmt(object_residual_prompt_relation_weight)}, "
-            f"prompt_loss {fmt(object_residual_prompt_relation_loss)}, "
-            f"prompt_margin {fmt(object_residual_prompt_relation_margin)}, "
-            f"prompt_sat {fmt(object_residual_prompt_relation_sat)}, "
-            f"null_weight {fmt(object_residual_null_relation_weight)}, "
-            f"null_loss {fmt(object_residual_null_relation_loss)}, "
-            f"useful_exact_mean {fmt(object_residual_useful_mass_loss_exact)}, "
-            f"useful_missing_mean {fmt(object_residual_useful_mass_loss_missing)}"
+            "actor-object relation: "
+            f"loss {fmt(relation_loss)}, "
+            f"teacher_acc {fmt(relation_exact_acc)}, "
+            f"teacher_prob {fmt(relation_exact_prob)}, "
+            f"useful_exact {fmt(relation_useful_exact)}, "
+            f"null_exact {fmt(relation_null_exact)}, "
+            f"null_objectless {fmt(relation_null_objectless)}, "
+            f"null_prob_objectless {fmt(relation_null_prob_objectless)}, "
+            f"useful_objectless {fmt(relation_useful_objectless)}, "
+            f"null_missing {fmt(relation_null_missing)}, "
+            f"null_prob_missing {fmt(relation_null_prob_missing)}, "
+            f"useful_missing {fmt(relation_useful_missing)}"
         )
     if pd.notna(prompt_acc) or pd.notna(prompt_loss):
         print(
@@ -1175,17 +907,6 @@ def print_decision(epoch_df):
             f"objectless_mean {fmt(prompt_objectless_attention_mean)}, "
             f"objectless_max {fmt(prompt_objectless_attention_max)}, "
             f"objectless_entropy {fmt(prompt_objectless_attention_entropy)}"
-        )
-    if pd.notna(wrong_prompt_drop) or pd.notna(sensitivity_drop):
-        print(
-            "prompt counterfactual training: "
-            f"correct_minus_wrong {fmt(wrong_prompt_drop)}, "
-            f"wrong_sat {fmt(wrong_prompt_sat)}, "
-            f"ambiguous_rate {fmt(sensitivity_ambiguous_rate)}, "
-            f"correct_minus_dropped_amb {fmt(sensitivity_drop)}, "
-            f"sensitivity_sat {fmt(sensitivity_sat)}, "
-            f"u_wrong_minus_read {fmt(wrong_laptop_readbook)}, "
-            f"u_dropped_minus_watch {fmt(dropped_laptop_watchtv)}"
         )
     if (
         pd.notna(prompt_drop_objectless_match)
@@ -1303,20 +1024,6 @@ def print_row(title, row):
             f"objectless_mean {metric(row, 'val_object_prompt_attention_objectless_visible_mean'):.4f}, "
             f"objectless_max {metric(row, 'val_object_prompt_attention_objectless_visible_max'):.4f}, "
             f"objectless_entropy {metric(row, 'val_object_prompt_attention_objectless_visible_entropy'):.4f}"
-        )
-    if pd.notna(metric(row, "val_object_prompt_correct_minus_wrong_true_logit")):
-        print(
-            "prompt counterfactual training: "
-            f"correct_minus_wrong {metric(row, 'val_object_prompt_correct_minus_wrong_true_logit'):.4f}, "
-            f"wrong_sat {metric(row, 'val_object_prompt_wrong_class_margin_sat_rate'):.4f}, "
-            f"ambiguous_rate {metric(row, 'val_object_prompt_sensitivity_ambiguous_rate'):.4f}, "
-            "correct_minus_dropped_amb "
-            f"{metric(row, 'val_object_prompt_correct_minus_dropped_true_logit_ambiguous'):.4f}, "
-            f"sensitivity_sat {metric(row, 'val_object_prompt_sensitivity_margin_sat_rate'):.4f}, "
-            "u_wrong_minus_read "
-            f"{metric(row, 'val_object_prompt_wrong_Uselaptop_minus_Readbook_margin'):.4f}, "
-            "u_dropped_minus_watch "
-            f"{metric(row, 'val_object_prompt_dropped_Uselaptop_minus_WatchTV_margin'):.4f}"
         )
     if pd.notna(metric(row, "val_object_prompt_drop_objectless_pred_match")):
         print(
@@ -1473,13 +1180,13 @@ def main():
     print_decision(epoch_df)
 
     print("\nREAD THIS:")
-    print("- Main proof: val_f1/per-action accuracy stay healthy while object prompts, object-aware base fusion, heatmaps, and bounded residual metrics improve.")
-    print("- PO-GUISE+ actor/video logits make the decision; runtime objects can enter the actor token before actor_head and still add bounded residual evidence.")
-    print("- Exact compatible detections should raise fusion usefulness, move raw-to-fused base logits, and improve residual/final true-vs-confuser margins.")
-    print("- Missing compatible detections should push useful mass down so unfused/base PO-GUISE+ evidence carries the action.")
-    print("- Objectless classes receive zero direct object residual; hard-negative object-action pred rate remains the protection check.")
+    print("- Main proof: val_f1/per-action accuracy stay healthy while prompt grounding, relation NULL/useful-mass, and interaction heatmaps improve.")
+    print("- PO-GUISE+ actor/video tokens make the decision; runtime objects update actor tokens inside the transformer before actor_head.")
+    print("- Exact compatible detections should attend to the teacher object and raise relation useful mass.")
+    print("- Missing compatible detections and objectless actions should push relation attention to NULL.")
+    print("- Objectless classes should route relation attention to NULL; hard-negative object-action pred rate remains the protection check.")
     print("- Heatmap/object-channel metrics are secondary; use --verbose when debugging teacher quality.")
-    print("- actor_object_base_fusion + actor_object_residual_head is now the runtime object path.")
+    print("- Runtime objects should affect token selection and actor tokens inside the transformer, not add late action logits.")
 
 
 if __name__ == "__main__":

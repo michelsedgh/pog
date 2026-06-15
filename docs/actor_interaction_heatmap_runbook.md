@@ -33,10 +33,11 @@ video clip
 The intended model path is:
 
 ```text
-video tokens + actor tokens + heatmap tokens + object tokens
--> transformer
+video tokens + actor tokens + object tokens + heatmap tokens
+-> PO-GUISE+ transformer with semantic token selection
+-> optional in-transformer actor-object relation updates
 -> actor-token action head
--> prompt-token grounding diagnostics / auxiliary loss
+-> prompt-token grounding / relation diagnostics and auxiliary losses
 -> final logits = actor logits
 ```
 
@@ -55,8 +56,12 @@ head used for object-involving actions.
 - Actor prompt slots.
 - One generic interacted-object heatmap per actor slot.
 - RF-DETR object prompt tokens inside the transformer.
+- Object-guided token selection with category-normalized semantic weights.
+- In-transformer actor-object relation attention with a strong NULL prior.
 - Plain actor-token action head.
 - Prompt-token grounding loss for exact compatible teacher objects.
+- Relation loss to the teacher object for exact objectful samples and to NULL
+  for objectless or missing-compatible detected-object cases.
 - Teacher-object removal as a validation-only supporting signal.
 - PO-GUISE+ style `action CE + log(heatmap MSE)`.
 
@@ -113,6 +118,14 @@ trusted object teacher, such as `Drink.Fromcan`, `Usetablet`, and coffee/tea
 preparation variants, are left unlabeled for prompt grounding instead of being
 treated as objectless.
 
+Relation supervision is stricter because it has an explicit NULL slot:
+
+```text
+exact objectful + trusted matching object token -> teacher object token
+objectful + no compatible detected object -> NULL
+objectless action -> NULL
+```
+
 The heatmap teacher stays stricter: it is present only for a trusted matching
 object track. Detector misses never create fake zero object heatmaps.
 
@@ -123,6 +136,7 @@ The intended training objective is:
 ```text
 action CE
 + object prompt grounding CE
++ actor-object relation CE over NULL plus object prompts
 + log(pose/object heatmap MSE)
 ```
 
@@ -131,8 +145,9 @@ pose/interacted-object heatmap objective is the second task. Runtime detections
 enter the transformer as object prompt tokens. The action head remains one plain
 linear head over actor tokens; there is no object-selection action head and no
 detected-object residual over action logits. Object prompt grounding teaches
-actor tokens to attend to compatible teacher objects when they exist, while the
-interacted-object heatmap teaches detector-free visual grounding.
+actor tokens to attend to compatible teacher objects when they exist, while
+relation CE teaches the actor token when to use a detected object and when to
+use NULL. The interacted-object heatmap teaches detector-free visual grounding.
 There is intentionally no supervised object-action margin loss: object presence
 alone must not force an action class. Interacted-object heatmaps use the
 PO-GUISE+ normalized heatmap objective, optionally with positive-balanced and
@@ -202,13 +217,13 @@ macro F1 over all Toyota classes, not only the object-confusable subset.
 ## Summary Command
 
 ```bash
-python3 summarize_interaction_metrics.py --pattern 'actor_object_fused_*'
+python3 summarize_interaction_metrics.py --pattern 'actor_object_relation_*'
 ```
 
 For full heatmap/object diagnostics:
 
 ```bash
-python3 summarize_interaction_metrics.py --pattern 'actor_object_fused_*' --verbose
+python3 summarize_interaction_metrics.py --pattern 'actor_object_relation_*' --verbose
 ```
 
 ## Live Probe Command

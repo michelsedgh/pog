@@ -382,14 +382,14 @@ def checkpoint_payload(checkpoint_path, hparam_overrides=None):
         "actor_object_prompt_tokens": int(
             hparams.get("actor_object_prompt_tokens", 0)
         ),
-        "actor_object_residual_head": int(
-            hparams.get("actor_object_residual_head", 0)
+        "actor_object_relation_in_transformer": int(
+            hparams.get("actor_object_relation_in_transformer", 0)
         ),
-        "actor_object_residual_compat_prior_scale": float(
-            hparams.get("actor_object_residual_compat_prior_scale", 1.0)
+        "actor_object_relation_blocks": str(
+            hparams.get("actor_object_relation_blocks", "6,9")
         ),
-        "actor_object_residual_max_relation_scale": float(
-            hparams.get("actor_object_residual_max_relation_scale", 1.5)
+        "actor_object_relation_max_scale": float(
+            hparams.get("actor_object_relation_max_scale", 1.0)
         ),
         "uses_object_proposals": int(uses_prompt_object_proposals(hparams)),
         "num_scene_object_tokens": int(hparams.get("num_scene_object_tokens", 0)),
@@ -625,14 +625,14 @@ def main():
             "actor_object_prompt_tokens": int(
                 hparams.get("actor_object_prompt_tokens", 0)
             ),
-            "actor_object_residual_head": int(
-                hparams.get("actor_object_residual_head", 0)
+            "actor_object_relation_in_transformer": int(
+                hparams.get("actor_object_relation_in_transformer", 0)
             ),
-            "actor_object_residual_compat_prior_scale": float(
-                hparams.get("actor_object_residual_compat_prior_scale", 1.0)
+            "actor_object_relation_blocks": str(
+                hparams.get("actor_object_relation_blocks", "6,9")
             ),
-            "actor_object_residual_max_relation_scale": float(
-                hparams.get("actor_object_residual_max_relation_scale", 1.5)
+            "actor_object_relation_max_scale": float(
+                hparams.get("actor_object_relation_max_scale", 1.0)
             ),
             "uses_object_proposals": int(uses_object_proposals),
         },

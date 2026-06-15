@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""3-epoch diagnostic launcher for the PO-GUISE+ runtime-object residual path.
+"""3-epoch diagnostic launcher for the detector-guided PO-GUISE+ object path.
 
 This mirrors poguise+_+objects.py but caps training at 3 epochs for a fast
 sanity check before the full 45-epoch run.
@@ -286,7 +286,6 @@ run_checked([
     "datasets/object_vocab.py",
     "datasets/toyota_action_taxonomy.py",
     "datasets/toyotasm.py",
-    "models/object_residual_action_head.py",
     "models/poguise.py",
     "modules/heatmap_module.py",
     "losses/poguiseplus_losses.py",
@@ -397,7 +396,7 @@ def run_training_with_epoch_summaries(cmd, run_name, epoch_dir, poll_secs=20):
     return str(run_dir)
 
 TS = datetime.now().strftime("%Y%m%d_%H%M%S")
-RUN_NAME = f"actor_object_residual_diag3_{TS}"
+RUN_NAME = f"actor_object_relation_diag3_{TS}"
 EPOCH_DIR = str(Path(DATA_DIR) / "checkpoints" / RUN_NAME / "epoch_checkpoints")
 
 cmd = [
@@ -430,19 +429,18 @@ cmd = [
 
     "--actor_interaction_heatmaps", "1",
 
-    # Runtime detections are transformer prompt tokens. They can fuse into the actor
-    # token before actor_head, then add bounded residual evidence after actor_head.
+    # Runtime detections are protected semantic prompt tokens. They guide pruning
+    # and update actor tokens inside the transformer; actor_head stays the action path.
     "--actor_object_prompt_tokens", "1",
-    "--actor_object_base_fusion", "1",
-    "--actor_object_base_fusion_scale_init", "-2.0",
-    "--actor_object_base_fusion_max_scale", "1.0",
-    "--actor_object_base_fusion_geometry_bias_weight", "1.0",
-    "--actor_object_base_fusion_heatmap_bias_weight", "2.0",
-    "--actor_object_residual_head", "1",
-    "--actor_object_residual_relation_scale_init", "-1.0",
-    "--actor_object_residual_relation_logit_bound", "2.0",
-    "--actor_object_residual_max_relation_scale", "1.0",
-    "--actor_object_residual_compat_prior_scale", "0.75",
+    "--actor_object_relation_in_transformer", "1",
+    "--actor_object_relation_blocks", "6,9",
+    "--actor_object_relation_null_logit_init", "4.0",
+    "--actor_object_relation_geometry_bias_weight", "0.5",
+    "--actor_object_relation_heatmap_bias_weight", "1.0",
+    "--token_selection_cls_weight", "0.25",
+    "--token_selection_actor_weight", "0.25",
+    "--token_selection_object_weight", "0.10",
+    "--token_selection_heatmap_weight", "0.35",
     "--actor_object_prompt_box_prior_weight", "0.05",
     "--actor_object_prompt_box_prior_expand", "1.25",
     "--num_scene_object_tokens", "32",
@@ -502,18 +500,9 @@ cmd = [
     "--poguiseplus_interaction_heatmap_center_temperature", "10.0",
 
     "--motion_aux_loss_weight", "0.35",
-    "--object_residual_prompt_relation_loss_weight", "0.35",
-    "--object_residual_prompt_relation_loss_final_weight", "0.20",
-    "--object_residual_relation_loss_decay_start_epoch", "5",
-    "--object_residual_relation_loss_decay_end_epoch", "15",
-    "--object_residual_relation_confuser_margin", "1.0",
-    "--object_residual_null_relation_loss_weight", "0.25",
-    "--object_prompt_grounding_loss_weight", "0.20",
-    "--object_prompt_wrong_class_loss_weight", "0.05",
-    "--object_prompt_wrong_class_margin", "0.20",
-    "--object_prompt_sensitivity_loss_weight", "0.025",
-    "--object_prompt_sensitivity_margin", "0.20",
-    "--object_prompt_sensitivity_motion_margin_threshold", "1.0",
+    "--actor_object_relation_loss_weight", "0.50",
+    "--actor_object_relation_null_loss_weight", "0.50",
+    "--object_prompt_grounding_loss_weight", "0.30",
     "--objectless_prompt_consistency_loss_weight", "0.20",
     "--objectless_object_action_suppression_loss_weight", "0.60",
     "--object_class_dropout_prob", "0.0",

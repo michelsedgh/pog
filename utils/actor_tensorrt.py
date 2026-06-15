@@ -79,10 +79,10 @@ class TensorRTActorEngine:
         output_set = set(self.output_names)
         self.uses_object_proposals = object_inputs.issubset(input_set)
         export_hparams = self.metadata.get("export_hparams", {})
-        self.actor_object_residual_head = bool(
+        self.actor_object_relation_in_transformer = bool(
             export_hparams.get(
-                "actor_object_residual_head",
-                self.metadata.get("actor_object_residual_head", False),
+                "actor_object_relation_in_transformer",
+                self.metadata.get("actor_object_relation_in_transformer", False),
             )
         )
         if bool(

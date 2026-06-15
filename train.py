@@ -213,22 +213,6 @@ def _validate_active_actor_action_path(module):
     model = module.model
     if not getattr(model, "actor_prompt", False):
         return
-    object_residual_enabled = bool(
-        getattr(model, "actor_object_residual_head_enabled", False)
-        or model.hparams.get("actor_object_residual_head", 0)
-    )
-    if object_residual_enabled:
-        if getattr(model, "actor_head", None) is None:
-            raise RuntimeError(
-                "actor_object_residual_head requires actor_head base logits. "
-                "Runtime objects must use the bounded actor-object action path."
-            )
-        if getattr(model, "object_residual_action_head", None) is None:
-            raise RuntimeError(
-                "actor_object_residual_head is enabled but "
-                "object_residual_action_head was not constructed."
-            )
-        return
     actor_head = getattr(model, "actor_head", None)
     if not isinstance(actor_head, torch.nn.Linear):
         raise RuntimeError(
@@ -328,7 +312,7 @@ def _validate_no_deprecated_object_path(checkpoint):
         raise ValueError(
             "Deprecated object specialist checkpoint detected. The active "
             "actor-object path uses object prompt tokens inside the transformer "
-            "and the bounded object-residual action head. "
+            "plus optional in-transformer actor-object relation updates. "
             f"First deprecated keys: {preview}"
         )
 
@@ -457,35 +441,11 @@ def build_parser():
         default=10.0,
     )
     parser.add_argument("--motion_aux_loss_weight", type=float, default=0.25)
+    parser.add_argument("--actor_object_relation_loss_weight", type=float, default=0.0)
     parser.add_argument(
-        "--object_residual_prompt_relation_loss_weight",
+        "--actor_object_relation_null_loss_weight",
         type=float,
-        default=0.0,
-    )
-    parser.add_argument(
-        "--object_residual_prompt_relation_loss_final_weight",
-        type=float,
-        default=None,
-    )
-    parser.add_argument(
-        "--object_residual_relation_loss_decay_start_epoch",
-        type=int,
-        default=0,
-    )
-    parser.add_argument(
-        "--object_residual_relation_loss_decay_end_epoch",
-        type=int,
-        default=0,
-    )
-    parser.add_argument(
-        "--object_residual_relation_confuser_margin",
-        type=float,
-        default=1.0,
-    )
-    parser.add_argument(
-        "--object_residual_null_relation_loss_weight",
-        type=float,
-        default=0.25,
+        default=0.5,
     )
     parser.add_argument("--object_prompt_grounding_loss_weight", type=float, default=0.0)
     parser.add_argument(
@@ -497,15 +457,6 @@ def build_parser():
         "--objectless_object_action_suppression_loss_weight",
         type=float,
         default=0.3,
-    )
-    parser.add_argument("--object_prompt_wrong_class_loss_weight", type=float, default=0.0)
-    parser.add_argument("--object_prompt_wrong_class_margin", type=float, default=0.20)
-    parser.add_argument("--object_prompt_sensitivity_loss_weight", type=float, default=0.0)
-    parser.add_argument("--object_prompt_sensitivity_margin", type=float, default=0.20)
-    parser.add_argument(
-        "--object_prompt_sensitivity_motion_margin_threshold",
-        type=float,
-        default=1.0,
     )
     parser.add_argument("--object_class_dropout_prob", type=float, default=0.0)
     parser.add_argument("--object_class_wrong_prob", type=float, default=0.0)
@@ -544,25 +495,32 @@ def main():
         )
     if hparams.actor_object_prompt_tokens and not hparams.actor_prompt:
         raise ValueError("actor_object_prompt_tokens requires actor_prompt")
+    if hparams.actor_object_prompt_tokens and not hparams.actor_interaction_heatmaps:
+        raise ValueError(
+            "actor_object_prompt_tokens requires --actor_interaction_heatmaps 1"
+        )
     if getattr(hparams, "actor_object_base_fusion", 0):
-        if not hparams.actor_object_prompt_tokens:
-            raise ValueError(
-                "actor_object_base_fusion requires --actor_object_prompt_tokens 1"
-            )
+        raise ValueError(
+            "actor_object_base_fusion was removed. Use "
+            "--actor_object_relation_in_transformer 1 for object-aware actor tokens."
+        )
     if getattr(hparams, "actor_object_residual_head", 0):
+        raise ValueError(
+            "actor_object_residual_head was removed. Use "
+            "--actor_object_relation_in_transformer 1 for the clean PO-GUISE+ "
+            "runtime-object architecture."
+        )
+    if getattr(hparams, "actor_object_relation_in_transformer", 0):
         if not hparams.actor_object_prompt_tokens:
             raise ValueError(
-                "actor_object_residual_head requires --actor_object_prompt_tokens 1"
+                "actor_object_relation_in_transformer requires "
+                "--actor_object_prompt_tokens 1"
             )
         if not hparams.actor_interaction_heatmaps:
             raise ValueError(
-                "actor_object_residual_head requires --actor_interaction_heatmaps 1"
+                "actor_object_relation_in_transformer requires "
+                "--actor_interaction_heatmaps 1"
             )
-    elif hparams.actor_object_prompt_tokens:
-        raise ValueError(
-            "actor_object_prompt_tokens requires --actor_object_residual_head 1; "
-            "runtime objects must use the bounded actor-object action path."
-        )
     if (
         hparams.actor_object_prompt_tokens
         and not hparams.object_detector_cache

@@ -1036,10 +1036,20 @@ class TorchActorBackend:
         self.actor_object_prompt_tokens = bool(
             self.hparams.get("actor_object_prompt_tokens", 0)
         )
-        if self.actor_object_prompt_tokens and not self.actor_object_residual_head:
+        self.actor_interaction_heatmaps = bool(
+            self.hparams.get("actor_interaction_heatmaps", 0)
+        )
+        if self.actor_object_residual_head:
+            raise RuntimeError(
+                "actor_object_residual_head checkpoints use the removed late "
+                "object-action path. Re-export a checkpoint with "
+                "actor_object_prompt_tokens and optional "
+                "actor_object_relation_in_transformer."
+            )
+        if self.actor_object_prompt_tokens and not self.actor_interaction_heatmaps:
             raise RuntimeError(
                 "actor_object_prompt_tokens checkpoints require "
-                "actor_object_residual_head."
+                "actor_interaction_heatmaps in the clean PO-GUISE+ object path."
             )
         self.uses_object_proposals = self.actor_object_prompt_tokens
         self.num_scene_object_tokens = (

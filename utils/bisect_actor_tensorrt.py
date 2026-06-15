@@ -464,7 +464,7 @@ def main():
         raise RuntimeError(
             "utils/bisect_actor_tensorrt.py does not support actor_object_prompt_tokens. "
             "Use utils/export_actor_tensorrt.py and utils/check_actor_tensorrt.py "
-            "for the full bounded object-residual actor path."
+            "for the detector-guided actor-object transformer path."
         )
     uses_object_proposals = False
     clip_frames = int(args.clip_frames or hparams.get("n_frames", 16))

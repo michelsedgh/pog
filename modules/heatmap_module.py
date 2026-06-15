@@ -79,6 +79,9 @@ class HeatmapModule(pl.LightningModule):
         self.actor_object_prompt_tokens = bool(
             hparams.get("actor_object_prompt_tokens", 0)
         )
+        self.actor_object_relation_in_transformer = bool(
+            hparams.get("actor_object_relation_in_transformer", 0)
+        )
         actor_object_slot_head = bool(hparams.get("actor_object_slot_head", 0))
         if actor_object_slot_head:
             raise ValueError(
@@ -86,13 +89,26 @@ class HeatmapModule(pl.LightningModule):
                 "actor_object_prompt_tokens. Set --actor_object_prompt_tokens 1 "
                 "and keep --actor_object_slot_head 0."
             )
-        if self.actor_object_residual_head and not self.actor_object_prompt_tokens:
+        if self.actor_object_residual_head:
             raise ValueError(
-                "actor_object_residual_head requires actor_object_prompt_tokens"
+                "actor_object_residual_head was removed. Use "
+                "actor_object_relation_in_transformer for object-aware actor tokens."
             )
         self.uses_object_proposals = self.actor_object_prompt_tokens
         if self.actor_object_prompt_tokens and not self.actor_prompt:
             raise ValueError("actor_object_prompt_tokens requires actor_prompt")
+        if self.actor_object_prompt_tokens and not self.actor_interaction_heatmaps:
+            raise ValueError(
+                "actor_object_prompt_tokens requires actor_interaction_heatmaps"
+            )
+        if self.actor_object_relation_in_transformer and not self.actor_object_prompt_tokens:
+            raise ValueError(
+                "actor_object_relation_in_transformer requires actor_object_prompt_tokens"
+            )
+        if self.actor_object_relation_in_transformer and not self.actor_interaction_heatmaps:
+            raise ValueError(
+                "actor_object_relation_in_transformer requires actor_interaction_heatmaps"
+            )
         self.actor_poguiseplus_loss = self.actor_prompt and self.actor_interaction_heatmaps
         self.poguiseplus_heatmap_loss_weight = float(
             hparams.get("poguiseplus_heatmap_loss_weight", 1.0)
@@ -145,55 +161,16 @@ class HeatmapModule(pl.LightningModule):
         )
         if self.motion_aux_loss_weight < 0:
             raise ValueError("motion_aux_loss_weight must be >= 0")
-        self.object_residual_prompt_relation_loss_weight = float(
-            hparams.get("object_residual_prompt_relation_loss_weight", 0.0)
+        self.actor_object_relation_loss_weight = float(
+            hparams.get("actor_object_relation_loss_weight", 0.0)
         )
-        if self.object_residual_prompt_relation_loss_weight < 0:
-            raise ValueError("object_residual_prompt_relation_loss_weight must be >= 0")
-        prompt_relation_final = hparams.get(
-            "object_residual_prompt_relation_loss_final_weight",
-            None,
+        if self.actor_object_relation_loss_weight < 0:
+            raise ValueError("actor_object_relation_loss_weight must be >= 0")
+        self.actor_object_relation_null_loss_weight = float(
+            hparams.get("actor_object_relation_null_loss_weight", 0.5)
         )
-        self.object_residual_prompt_relation_loss_final_weight = (
-            self.object_residual_prompt_relation_loss_weight
-            if prompt_relation_final is None
-            else float(prompt_relation_final)
-        )
-        if self.object_residual_prompt_relation_loss_final_weight < 0:
-            raise ValueError(
-                "object_residual_prompt_relation_loss_final_weight must be >= 0"
-            )
-        self.object_residual_relation_loss_decay_start_epoch = int(
-            hparams.get("object_residual_relation_loss_decay_start_epoch", 0)
-        )
-        self.object_residual_relation_loss_decay_end_epoch = int(
-            hparams.get("object_residual_relation_loss_decay_end_epoch", 0)
-        )
-        if self.object_residual_relation_loss_decay_start_epoch < 0:
-            raise ValueError("object_residual_relation_loss_decay_start_epoch must be >= 0")
-        if self.object_residual_relation_loss_decay_end_epoch < 0:
-            raise ValueError("object_residual_relation_loss_decay_end_epoch must be >= 0")
-        if (
-            self.object_residual_relation_loss_decay_end_epoch
-            < self.object_residual_relation_loss_decay_start_epoch
-        ):
-            raise ValueError(
-                "object_residual_relation_loss_decay_end_epoch must be >= "
-                "object_residual_relation_loss_decay_start_epoch"
-            )
-        self.object_residual_relation_confuser_margin = float(
-            hparams.get("object_residual_relation_confuser_margin", 1.0)
-        )
-        if self.object_residual_relation_confuser_margin < 0:
-            raise ValueError("object_residual_relation_confuser_margin must be >= 0")
-        self.object_residual_null_relation_loss_weight = float(
-            hparams.get(
-                "object_residual_null_relation_loss_weight",
-                0.25 if self.actor_object_residual_head else 0.0,
-            )
-        )
-        if self.object_residual_null_relation_loss_weight < 0:
-            raise ValueError("object_residual_null_relation_loss_weight must be >= 0")
+        if self.actor_object_relation_null_loss_weight < 0:
+            raise ValueError("actor_object_relation_null_loss_weight must be >= 0")
         self.objectless_object_action_suppression_loss_weight = float(
             hparams.get("objectless_object_action_suppression_loss_weight", 0.3)
         )
@@ -211,29 +188,14 @@ class HeatmapModule(pl.LightningModule):
         )
         if self.objectless_prompt_consistency_loss_weight < 0:
             raise ValueError("objectless_prompt_consistency_loss_weight must be >= 0")
-        self.object_prompt_wrong_class_loss_weight = float(
-            hparams.get("object_prompt_wrong_class_loss_weight", 0.0)
-        )
-        if self.object_prompt_wrong_class_loss_weight < 0:
-            raise ValueError("object_prompt_wrong_class_loss_weight must be >= 0")
-        self.object_prompt_wrong_class_margin = float(
-            hparams.get("object_prompt_wrong_class_margin", 0.20)
-        )
-        if self.object_prompt_wrong_class_margin < 0:
-            raise ValueError("object_prompt_wrong_class_margin must be >= 0")
-        self.object_prompt_sensitivity_loss_weight = float(
-            hparams.get("object_prompt_sensitivity_loss_weight", 0.0)
-        )
-        if self.object_prompt_sensitivity_loss_weight < 0:
-            raise ValueError("object_prompt_sensitivity_loss_weight must be >= 0")
-        self.object_prompt_sensitivity_margin = float(
-            hparams.get("object_prompt_sensitivity_margin", 0.20)
-        )
-        if self.object_prompt_sensitivity_margin < 0:
-            raise ValueError("object_prompt_sensitivity_margin must be >= 0")
-        self.object_prompt_sensitivity_motion_margin_threshold = float(
-            hparams.get("object_prompt_sensitivity_motion_margin_threshold", 1.0)
-        )
+        if (
+            float(hparams.get("object_prompt_wrong_class_loss_weight", 0.0)) > 0
+            or float(hparams.get("object_prompt_sensitivity_loss_weight", 0.0)) > 0
+        ):
+            raise ValueError(
+                "object_prompt_wrong_class and object_prompt_sensitivity losses "
+                "belong to the removed late object-action correction experiments."
+            )
         self.object_class_dropout_prob = float(
             hparams.get("object_class_dropout_prob", 0.0)
         )
@@ -388,11 +350,13 @@ class HeatmapModule(pl.LightningModule):
                 "model.net.object_box_mlp",
                 "model.net.object_conf_mlp",
                 "model.net.object_valid_embed",
+                "model.net.object_grounding_probe",
+                "model.net.actor_object_relation_updates",
+                "model.net.relation_heatmap_norm",
+                "model.net.relation_heatmap_proj",
                 "model.actor_head",
                 "model.actor_motion_head",
                 "model.presence_head",
-                "model.actor_object_base_fusion",
-                "model.object_residual_action_head",
             ]
             if self.model.hparams.get("use_register_tokens", 0):
                 allowed_missing.append("model.net.register_tokens")
@@ -457,6 +421,10 @@ class HeatmapModule(pl.LightningModule):
                 "object_box_mlp",
                 "object_conf_mlp",
                 "object_valid_embed",
+                "object_grounding_probe",
+                "actor_object_relation_updates",
+                "relation_heatmap_norm",
+                "relation_heatmap_proj",
             )
         )
 
@@ -509,20 +477,6 @@ class HeatmapModule(pl.LightningModule):
                 params += list(self.model.actor_motion_head.parameters())
             if self.model.presence_head is not None:
                 params += list(self.model.presence_head.parameters())
-            actor_object_base_fusion = getattr(
-                self.model,
-                "actor_object_base_fusion",
-                None,
-            )
-            if actor_object_base_fusion is not None:
-                params += list(actor_object_base_fusion.parameters())
-            object_residual_head = getattr(
-                self.model,
-                "object_residual_action_head",
-                None,
-            )
-            if object_residual_head is not None:
-                params += list(object_residual_head.parameters())
             for name, param in self.model.net.named_parameters():
                 if self._actor_prompt_param_name(name):
                     params.append(param)
@@ -1377,8 +1331,16 @@ class HeatmapModule(pl.LightningModule):
             object_inputs
         )
         with torch.no_grad():
-            no_object_preds = self._cached_object_prompt_logits(empty_inputs).detach()
-            distractor_preds = self._cached_object_prompt_logits(
+            no_object_preds = self._object_prompt_counterfactual_logits(
+                imgs,
+                boxes,
+                valid,
+                empty_inputs,
+            ).detach()
+            distractor_preds = self._object_prompt_counterfactual_logits(
+                imgs,
+                boxes,
+                valid,
                 distractor_inputs
             ).detach()
 
@@ -1438,16 +1400,22 @@ class HeatmapModule(pl.LightningModule):
             )
         return loss
 
-    def _cached_object_prompt_logits(self, object_inputs=None):
-        if not hasattr(self.model, "cached_object_prompt_action_logits"):
-            raise RuntimeError(
-                "Object prompt counterfactuals require cached_object_prompt_action_logits"
+    def _object_prompt_counterfactual_logits(self, imgs, boxes, valid, object_inputs):
+        if not self.uses_object_proposals:
+            raise RuntimeError("Object prompt counterfactuals require object proposals")
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            data = self.model(
+                imgs,
+                boxes=boxes,
+                valid=valid,
+                **object_inputs,
             )
-        object_inputs = object_inputs or {}
-        return self.model.cached_object_prompt_action_logits(
-            object_classes=object_inputs.get("object_classes"),
-            object_valid=object_inputs.get("object_valid"),
-        )
+        finally:
+            self.model.train(was_training)
+        preds, _hm_preds, _presence_logits = self._unpack_model_data(data)
+        return preds
 
     def _teacher_object_removed_inputs(
         self,
@@ -1486,44 +1454,6 @@ class HeatmapModule(pl.LightningModule):
             if int(slots.numel()) == 0:
                 continue
             output[batch_idx, int(slots[0, 0].item())] = True
-        return output
-
-    def _wrong_object_ids_for_actions(self, actions):
-        values = []
-        for action in actions.detach().cpu().tolist():
-            object_ids = self.action_wrong_object_ids_by_index.get(int(action))
-            if object_ids is None or int(object_ids.numel()) == 0:
-                values.append(int(NUM_OBJECT_CLASSES))
-            else:
-                values.append(int(object_ids[0].item()))
-        return torch.tensor(values, device=actions.device, dtype=torch.long)
-
-    def _teacher_object_wrong_class_inputs(
-        self,
-        object_inputs,
-        object_slots,
-        selected_valid,
-        actions,
-    ):
-        output = {name: value.clone() for name, value in object_inputs.items()}
-        if not selected_valid.any():
-            return output
-        rows = torch.nonzero(selected_valid, as_tuple=False)
-        batch_idx = rows[:, 0]
-        actor_actions = actions[selected_valid].to(dtype=torch.long)
-        wrong_ids = self._wrong_object_ids_for_actions(actor_actions)
-        object_slots = object_slots[selected_valid].to(
-            device=batch_idx.device,
-            dtype=torch.long,
-        )
-        valid_wrong = wrong_ids < int(NUM_OBJECT_CLASSES)
-        if not valid_wrong.any():
-            return output
-        batch_idx = batch_idx[valid_wrong]
-        object_slots = object_slots[valid_wrong]
-        wrong_ids = wrong_ids[valid_wrong]
-        output["object_valid"][batch_idx, object_slots] = True
-        output["object_classes"][batch_idx, object_slots] = wrong_ids
         return output
 
     def _object_distractor_class_inputs(self, object_inputs):
@@ -1596,7 +1526,10 @@ class HeatmapModule(pl.LightningModule):
             selected_valid,
         )
         with torch.no_grad():
-            counterfactual_preds = self._cached_object_prompt_logits(
+            counterfactual_preds = self._object_prompt_counterfactual_logits(
+                imgs,
+                boxes,
+                valid,
                 counterfactual_inputs
             )
 
@@ -1682,8 +1615,16 @@ class HeatmapModule(pl.LightningModule):
             self._object_inputs_from_target(target, imgs.device)
         )
         with torch.no_grad():
-            dropped_preds = self._cached_object_prompt_logits(empty_inputs).detach()
-            distractor_preds = self._cached_object_prompt_logits(
+            dropped_preds = self._object_prompt_counterfactual_logits(
+                imgs,
+                boxes,
+                valid,
+                empty_inputs,
+            ).detach()
+            distractor_preds = self._object_prompt_counterfactual_logits(
+                imgs,
+                boxes,
+                valid,
                 distractor_inputs
             ).detach()
 
@@ -1839,252 +1780,6 @@ class HeatmapModule(pl.LightningModule):
                 )
         return None
 
-    def _motion_confuser_margin(self, motion_logits, actions, selected_valid):
-        margins = torch.full(
-            actions.shape,
-            float("inf"),
-            device=actions.device,
-            dtype=motion_logits.dtype,
-        )
-        rows = torch.nonzero(selected_valid, as_tuple=False)
-        for row in rows:
-            batch_idx = int(row[0].item())
-            actor_idx = int(row[1].item())
-            action_idx = int(actions[batch_idx, actor_idx].item())
-            confusers = self.action_confuser_indices_by_index.get(action_idx)
-            if confusers is None or int(confusers.numel()) == 0:
-                continue
-            confusers = confusers.to(device=actions.device, dtype=torch.long)
-            true_logit = motion_logits[batch_idx, actor_idx, action_idx]
-            max_confuser = motion_logits[batch_idx, actor_idx, confusers].max()
-            margins[batch_idx, actor_idx] = true_logit - max_confuser
-        return margins
-
-    def _object_prompt_action_coupling_loss(
-        self,
-        stage,
-        imgs,
-        boxes,
-        valid,
-        actions,
-        preds,
-        target,
-        object_inputs,
-    ):
-        if not self.uses_object_proposals:
-            return None
-        if (
-            self.object_prompt_wrong_class_loss_weight <= 0
-            and self.object_prompt_sensitivity_loss_weight <= 0
-        ):
-            return None
-        info = self._exact_teacher_object_info(actions, valid, target, preds.device)
-        if info is None:
-            return None
-        exact_compatible = (
-            info["valid"]
-            & info["known_action"]
-            & info["compatible_1based"]
-        )
-        selected_valid = self._first_actor_per_sample_mask(exact_compatible)
-        if not selected_valid.any():
-            return None
-
-        actions = actions.to(device=preds.device, dtype=torch.long)
-        selected_labels = actions[selected_valid]
-        selected_slots = info["idx_1based"].to(device=preds.device, dtype=torch.long)
-        base_true_logits = preds[selected_valid].gather(
-            1,
-            selected_labels.unsqueeze(1),
-        ).squeeze(1)
-
-        weighted_losses = []
-        wrong_preds = None
-        dropped_preds = None
-        dropped_prompt_mask = None
-        if self.object_prompt_wrong_class_loss_weight > 0:
-            wrong_inputs = self._teacher_object_wrong_class_inputs(
-                object_inputs,
-                selected_slots,
-                selected_valid,
-                actions,
-            )
-            wrong_preds = self._cached_object_prompt_logits(wrong_inputs)
-            wrong_true_logits = wrong_preds[selected_valid].gather(
-                1,
-                selected_labels.unsqueeze(1),
-            ).squeeze(1)
-            wrong_drop = base_true_logits - wrong_true_logits
-            loss_wrong = F.relu(
-                self.object_prompt_wrong_class_margin - wrong_drop
-            ).mean()
-            count = int(selected_labels.numel())
-            self.log(
-                f"{stage}_loss_object_prompt_wrong_class",
-                loss_wrong,
-                on_step=stage == "train",
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-                sync_dist=True,
-            )
-            self._log_scalar(
-                f"{stage}_object_prompt_correct_minus_wrong_true_logit",
-                wrong_drop.detach().mean(),
-                count,
-            )
-            self._log_scalar(
-                f"{stage}_object_prompt_wrong_class_margin_sat_rate",
-                (
-                    wrong_drop.detach()
-                    >= self.object_prompt_wrong_class_margin
-                )
-                .float()
-                .mean(),
-                count,
-            )
-            weighted_losses.append(
-                loss_wrong * self.object_prompt_wrong_class_loss_weight
-            )
-
-        if self.object_prompt_sensitivity_loss_weight > 0:
-            motion_logits = getattr(self.model, "last_actor_motion_logits", None)
-            if motion_logits is not None:
-                motion_logits = motion_logits.to(device=preds.device)
-                motion_margin = self._motion_confuser_margin(
-                    motion_logits.float(),
-                    actions,
-                    selected_valid,
-                )
-                ambiguous = (
-                    selected_valid
-                    & (
-                        motion_margin
-                        < self.object_prompt_sensitivity_motion_margin_threshold
-                    )
-                )
-            else:
-                ambiguous = torch.zeros_like(selected_valid, dtype=torch.bool)
-
-            self._log_scalar(
-                f"{stage}_object_prompt_sensitivity_ambiguous_rate",
-                ambiguous[selected_valid].float().mean(),
-                int(selected_valid.sum().item()),
-            )
-            if ambiguous.any():
-                dropped_prompt_mask = ambiguous
-                dropped_inputs = self._teacher_object_removed_inputs(
-                    object_inputs,
-                    info["selected_indices"].to(
-                        device=preds.device,
-                        dtype=torch.long,
-                    ),
-                    ambiguous,
-                )
-                dropped_preds = self._cached_object_prompt_logits(dropped_inputs)
-                ambiguous_labels = actions[ambiguous]
-                base_ambiguous_true = preds[ambiguous].gather(
-                    1,
-                    ambiguous_labels.unsqueeze(1),
-                ).squeeze(1)
-                dropped_true = dropped_preds[ambiguous].gather(
-                    1,
-                    ambiguous_labels.unsqueeze(1),
-                ).squeeze(1)
-                dropped_drop = base_ambiguous_true - dropped_true
-                loss_sensitivity = F.relu(
-                    self.object_prompt_sensitivity_margin - dropped_drop
-                ).mean()
-                count = int(ambiguous_labels.numel())
-                self.log(
-                    f"{stage}_loss_object_prompt_sensitivity",
-                    loss_sensitivity,
-                    on_step=stage == "train",
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                    sync_dist=True,
-                )
-                self._log_scalar(
-                    f"{stage}_object_prompt_correct_minus_dropped_true_logit_ambiguous",
-                    dropped_drop.detach().mean(),
-                    count,
-                )
-                self._log_scalar(
-                    f"{stage}_object_prompt_sensitivity_margin_sat_rate",
-                    (
-                        dropped_drop.detach()
-                        >= self.object_prompt_sensitivity_margin
-                    )
-                    .float()
-                    .mean(),
-                    count,
-                )
-                weighted_losses.append(
-                    loss_sensitivity
-                    * self.object_prompt_sensitivity_loss_weight
-                )
-
-        self._log_uselaptop_prompt_counterfactual_margins(
-            stage,
-            actions,
-            selected_valid,
-            wrong_preds,
-            dropped_preds,
-            dropped_prompt_mask,
-        )
-
-        if not weighted_losses:
-            return None
-        return torch.stack(weighted_losses).sum()
-
-    def _log_uselaptop_prompt_counterfactual_margins(
-        self,
-        stage,
-        actions,
-        selected_valid,
-        wrong_preds,
-        dropped_preds,
-        dropped_prompt_mask,
-    ):
-        uselaptop_idx = self.action_to_index.get("Uselaptop")
-        readbook_idx = self.action_to_index.get("Readbook")
-        watchtv_idx = self.action_to_index.get("WatchTV")
-        if uselaptop_idx is None:
-            return
-        uselaptop_mask = selected_valid & (actions == int(uselaptop_idx))
-        if not uselaptop_mask.any():
-            return
-        count = int(uselaptop_mask.sum().item())
-        if wrong_preds is not None and readbook_idx is not None:
-            margin = (
-                wrong_preds[uselaptop_mask][:, int(uselaptop_idx)]
-                - wrong_preds[uselaptop_mask][:, int(readbook_idx)]
-            )
-            self._log_scalar(
-                f"{stage}_object_prompt_wrong_Uselaptop_minus_Readbook_margin",
-                margin.detach().mean(),
-                count,
-            )
-        if (
-            dropped_preds is not None
-            and dropped_prompt_mask is not None
-            and watchtv_idx is not None
-        ):
-            uselaptop_mask = dropped_prompt_mask & (actions == int(uselaptop_idx))
-            if not uselaptop_mask.any():
-                return
-            count = int(uselaptop_mask.sum().item())
-            margin = (
-                dropped_preds[uselaptop_mask][:, int(uselaptop_idx)]
-                - dropped_preds[uselaptop_mask][:, int(watchtv_idx)]
-            )
-            self._log_scalar(
-                f"{stage}_object_prompt_dropped_Uselaptop_minus_WatchTV_margin",
-                margin.detach().mean(),
-                count,
-            )
-
     def _log_actor_object_prompt_diagnostics(
         self,
         stage,
@@ -2224,375 +1919,6 @@ class HeatmapModule(pl.LightningModule):
             count,
         )
 
-    def _true_minus_confuser_margin(self, values, actions, mask):
-        if values is None or not mask.any():
-            return None
-        actions = actions.to(device=values.device, dtype=torch.long)
-        mask = mask.to(device=values.device, dtype=torch.bool)
-        margins = []
-        for batch_idx, actor_idx in torch.nonzero(mask, as_tuple=False).tolist():
-            action_idx = int(actions[batch_idx, actor_idx].item())
-            confusers = self.action_confuser_indices_by_index.get(action_idx)
-            if confusers is None or int(confusers.numel()) == 0:
-                continue
-            confusers = confusers.to(device=values.device, dtype=torch.long)
-            confusers = confusers[
-                (confusers >= 0) & (confusers < int(values.shape[-1]))
-            ]
-            if int(confusers.numel()) == 0:
-                continue
-            true_value = values[batch_idx, actor_idx, action_idx]
-            max_confuser = values[batch_idx, actor_idx, confusers].max()
-            margins.append(true_value - max_confuser)
-        if not margins:
-            return None
-        return torch.stack(margins)
-
-    def _gather_true_action_value(self, values, actions):
-        actions = actions.to(device=values.device, dtype=torch.long)
-        safe_actions = actions.clamp(0, int(values.shape[-1]) - 1)
-        return values.gather(-1, safe_actions.unsqueeze(-1)).squeeze(-1)
-
-    def _log_object_residual_diagnostics(
-        self,
-        stage,
-        actions,
-        valid,
-        target,
-    ):
-        if stage == "train" or not self.actor_object_residual_head:
-            return
-        coverage = getattr(self.model, "last_object_residual_coverage", None)
-        object_residual = getattr(self.model, "last_object_residual", None)
-        raw_base_logits = getattr(
-            self.model,
-            "last_object_residual_raw_base_logits",
-            None,
-        )
-        base_logits = getattr(self.model, "last_object_residual_base_logits", None)
-        final_logits = getattr(self.model, "last_object_residual_final_logits", None)
-        null_prob = getattr(self.model, "last_object_residual_prompt_null_prob", None)
-        useful_mass = getattr(
-            self.model,
-            "last_object_residual_prompt_useful_mass",
-            None,
-        )
-        fusion_delta = getattr(
-            self.model,
-            "last_actor_object_base_fusion_delta",
-            None,
-        )
-        fusion_gate = getattr(
-            self.model,
-            "last_actor_object_base_fusion_gate",
-            None,
-        )
-        fusion_null_prob = getattr(
-            self.model,
-            "last_actor_object_base_fusion_null_prob",
-            None,
-        )
-        fusion_useful_mass = getattr(
-            self.model,
-            "last_actor_object_base_fusion_useful_mass",
-            None,
-        )
-        fusion_attention = getattr(
-            self.model,
-            "last_actor_object_base_fusion_attention",
-            None,
-        )
-        fusion_attention_bias = getattr(
-            self.model,
-            "last_actor_object_base_fusion_attention_bias",
-            None,
-        )
-        if (
-            coverage is None
-            or object_residual is None
-            or base_logits is None
-            or final_logits is None
-        ):
-            return
-
-        device = coverage.device
-        info = self._exact_teacher_object_info(actions, valid, target, device)
-        if info is None:
-            return
-        actions = actions.to(device=device, dtype=torch.long)
-        valid = valid.to(device=device, dtype=torch.bool)
-        known_objectful = info["valid"] & info["known_action"]
-        exact_compatible = known_objectful & info["compatible_1based"]
-        missing_compatible = known_objectful & ~info["any_compatible"]
-
-        relation_scale = getattr(self.model, "last_object_residual_relation_scale", None)
-        if relation_scale is not None and known_objectful.any():
-            self._log_scalar(
-                f"{stage}_object_residual_relation_scale",
-                relation_scale.to(device=device).float(),
-                int(known_objectful.sum().item()),
-            )
-
-        coverage = coverage.float()
-        object_residual = object_residual.float()
-        if raw_base_logits is not None:
-            raw_base_logits = raw_base_logits.float()
-        base_logits = base_logits.float()
-        final_logits = final_logits.float()
-        valid_count = int(valid.sum().item())
-        if valid_count > 0:
-            residual_abs = object_residual[valid].abs()
-            self._log_scalar(
-                f"{stage}_object_residual_abs_mean",
-                residual_abs.mean(),
-                valid_count,
-            )
-            self._log_scalar(
-                f"{stage}_object_residual_abs_max",
-                residual_abs.max(),
-                valid_count,
-            )
-            if fusion_delta is not None:
-                fusion_delta_norm = fusion_delta.float().norm(dim=-1)
-                self._log_scalar(
-                    f"{stage}_object_fusion_delta_norm",
-                    fusion_delta_norm[valid].mean(),
-                    valid_count,
-                )
-            if fusion_gate is not None:
-                fusion_gate_mean = fusion_gate.float().mean(dim=-1)
-                self._log_scalar(
-                    f"{stage}_object_fusion_gate_mean",
-                    fusion_gate_mean[valid].mean(),
-                    valid_count,
-                )
-
-        fusion_scale = getattr(self.model, "last_actor_object_base_fusion_scale", None)
-        if fusion_scale is not None and known_objectful.any():
-            self._log_scalar(
-                f"{stage}_object_fusion_scale",
-                fusion_scale.to(device=device).float(),
-                int(known_objectful.sum().item()),
-            )
-
-        object_action_indices = self.group_indices.get("object_mapped")
-        objectless = self._labels_in_indices(actions, self.objectless_action_indices)
-        objectless = objectless & valid
-        if objectless.any():
-            count = int(objectless.sum().item())
-            if fusion_useful_mass is not None:
-                self._log_scalar(
-                    f"{stage}_object_fusion_useful_mass_objectless",
-                    fusion_useful_mass.float()[objectless].mean(),
-                    count,
-                )
-            if fusion_null_prob is not None:
-                self._log_scalar(
-                    f"{stage}_object_fusion_null_prob_objectless",
-                    fusion_null_prob.float()[objectless].mean(),
-                    count,
-                )
-        if (
-            objectless.any()
-            and object_action_indices is not None
-            and int(object_action_indices.numel()) > 0
-        ):
-            object_action_indices = object_action_indices.to(
-                device=device,
-                dtype=torch.long,
-            )
-            true_base = self._gather_true_action_value(base_logits, actions)
-            true_final = self._gather_true_action_value(final_logits, actions)
-            max_object_base = base_logits[..., object_action_indices].max(dim=-1).values
-            max_object_final = final_logits[..., object_action_indices].max(
-                dim=-1
-            ).values
-            count = int(objectless.sum().item())
-            self._log_scalar(
-                f"{stage}_object_residual_base_objectless_true_minus_objectful_max",
-                (true_base - max_object_base)[objectless].mean(),
-                count,
-            )
-            self._log_scalar(
-                f"{stage}_object_residual_final_objectless_true_minus_objectful_max",
-                (true_final - max_object_final)[objectless].mean(),
-                count,
-            )
-
-        raw_true = None
-        fused_true = self._gather_true_action_value(base_logits, actions)
-        if raw_base_logits is not None:
-            raw_true = self._gather_true_action_value(raw_base_logits, actions)
-        coverage_true = self._gather_true_action_value(coverage, actions)
-        residual_true = self._gather_true_action_value(object_residual, actions)
-        null_true = None
-        useful_true = None
-        if null_prob is not None:
-            null_true = self._gather_true_action_value(null_prob.float(), actions)
-        if useful_mass is not None:
-            useful_true = self._gather_true_action_value(useful_mass.float(), actions)
-
-        if exact_compatible.any():
-            count = int(exact_compatible.sum().item())
-            self._log_scalar(
-                f"{stage}_object_residual_coverage_true_exact",
-                coverage_true[exact_compatible].mean(),
-                count,
-            )
-            self._log_scalar(
-                f"{stage}_object_residual_true_exact",
-                residual_true[exact_compatible].mean(),
-                count,
-            )
-            if useful_true is not None:
-                self._log_scalar(
-                    f"{stage}_object_residual_useful_mass_true_exact",
-                    useful_true[exact_compatible].mean(),
-                    count,
-                )
-            if null_true is not None:
-                self._log_scalar(
-                    f"{stage}_object_residual_null_prob_true_exact",
-                    null_true[exact_compatible].mean(),
-                    count,
-                )
-            if fusion_useful_mass is not None:
-                self._log_scalar(
-                    f"{stage}_object_fusion_useful_mass_exact",
-                    fusion_useful_mass.float()[exact_compatible].mean(),
-                    count,
-                )
-            if fusion_null_prob is not None:
-                self._log_scalar(
-                    f"{stage}_object_fusion_null_prob_exact",
-                    fusion_null_prob.float()[exact_compatible].mean(),
-                    count,
-                )
-            teacher_slot = info["idx_1based"].to(device=device, dtype=torch.long)
-            if fusion_attention is not None:
-                fusion_teacher_attention = fusion_attention.float().gather(
-                    -1,
-                    teacher_slot.unsqueeze(-1),
-                ).squeeze(-1)
-                self._log_scalar(
-                    f"{stage}_object_fusion_attention_teacher_exact",
-                    fusion_teacher_attention[exact_compatible].mean(),
-                    count,
-                )
-            if fusion_attention_bias is not None:
-                fusion_teacher_bias = fusion_attention_bias.float().gather(
-                    -1,
-                    teacher_slot.unsqueeze(-1),
-                ).squeeze(-1)
-                self._log_scalar(
-                    f"{stage}_object_fusion_attention_bias_teacher_exact",
-                    fusion_teacher_bias[exact_compatible].mean(),
-                    count,
-                )
-            if raw_true is not None:
-                self._log_scalar(
-                    f"{stage}_object_fusion_raw_to_fused_true_logit_delta_exact",
-                    (fused_true - raw_true)[exact_compatible].mean(),
-                    count,
-                )
-                raw_base_margin = self._true_minus_confuser_margin(
-                    raw_base_logits,
-                    actions,
-                    exact_compatible,
-                )
-                if raw_base_margin is not None:
-                    self._log_scalar(
-                        f"{stage}_object_fusion_raw_base_true_minus_confuser_exact",
-                        raw_base_margin.mean(),
-                        int(raw_base_margin.numel()),
-                    )
-            residual_margin = self._true_minus_confuser_margin(
-                object_residual,
-                actions,
-                exact_compatible,
-            )
-            if residual_margin is not None:
-                self._log_scalar(
-                    f"{stage}_object_residual_prompt_delta_true_minus_confuser_exact",
-                    residual_margin.mean(),
-                    int(residual_margin.numel()),
-                )
-            base_margin = self._true_minus_confuser_margin(
-                base_logits,
-                actions,
-                exact_compatible,
-            )
-            if base_margin is not None:
-                self._log_scalar(
-                    f"{stage}_object_residual_base_true_minus_confuser_exact",
-                    base_margin.mean(),
-                    int(base_margin.numel()),
-                )
-            final_margin = self._true_minus_confuser_margin(
-                final_logits,
-                actions,
-                exact_compatible,
-            )
-            if final_margin is not None:
-                self._log_scalar(
-                    f"{stage}_object_residual_final_true_minus_confuser_exact",
-                    final_margin.mean(),
-                    int(final_margin.numel()),
-                )
-
-        if missing_compatible.any():
-            count = int(missing_compatible.sum().item())
-            self._log_scalar(
-                f"{stage}_object_residual_true_missing",
-                residual_true[missing_compatible].mean(),
-                count,
-            )
-            if useful_true is not None:
-                self._log_scalar(
-                    f"{stage}_object_residual_useful_mass_true_missing",
-                    useful_true[missing_compatible].mean(),
-                    count,
-                )
-            if null_true is not None:
-                self._log_scalar(
-                    f"{stage}_object_residual_null_prob_true_missing",
-                    null_true[missing_compatible].mean(),
-                    count,
-                )
-            residual_margin = self._true_minus_confuser_margin(
-                object_residual,
-                actions,
-                missing_compatible,
-            )
-            if residual_margin is not None:
-                self._log_scalar(
-                    f"{stage}_object_residual_prompt_delta_true_minus_confuser_missing",
-                    residual_margin.mean(),
-                    int(residual_margin.numel()),
-                )
-            base_margin = self._true_minus_confuser_margin(
-                base_logits,
-                actions,
-                missing_compatible,
-            )
-            if base_margin is not None:
-                self._log_scalar(
-                    f"{stage}_object_residual_base_true_minus_confuser_missing",
-                    base_margin.mean(),
-                    int(base_margin.numel()),
-                )
-            final_margin = self._true_minus_confuser_margin(
-                final_logits,
-                actions,
-                missing_compatible,
-            )
-            if final_margin is not None:
-                self._log_scalar(
-                    f"{stage}_object_residual_final_true_minus_confuser_missing",
-                    final_margin.mean(),
-                    int(final_margin.numel()),
-                )
-
     def _motion_aux_loss(self, stage, actions, valid):
         if self.motion_aux_loss_weight <= 0:
             return None
@@ -2621,149 +1947,204 @@ class HeatmapModule(pl.LightningModule):
         )
         return loss
 
-    def _linear_epoch_weight(self, initial_weight, final_weight, start_epoch, end_epoch):
-        epoch = int(getattr(self, "current_epoch", 0) or 0)
-        initial_weight = float(initial_weight)
-        final_weight = float(final_weight)
-        start_epoch = int(start_epoch)
-        end_epoch = int(end_epoch)
-        if end_epoch <= start_epoch:
-            return initial_weight
-        if epoch <= start_epoch:
-            return initial_weight
-        if epoch >= end_epoch:
-            return final_weight
-        ratio = float(epoch - start_epoch) / float(end_epoch - start_epoch)
-        return initial_weight + (final_weight - initial_weight) * ratio
-
-    def _object_residual_prompt_relation_effective_weight(self):
-        return self._linear_epoch_weight(
-            self.object_residual_prompt_relation_loss_weight,
-            self.object_residual_prompt_relation_loss_final_weight,
-            self.object_residual_relation_loss_decay_start_epoch,
-            self.object_residual_relation_loss_decay_end_epoch,
-        )
-
-    def _object_residual_evidence_relation_loss(self, stage, actions, valid, target):
-        if not self.actor_object_residual_head:
+    def _actor_object_relation_loss(self, stage, actions, valid, target):
+        if (
+            not self.actor_object_relation_in_transformer
+            or self.actor_object_relation_loss_weight <= 0
+        ):
             return None
-        prompt_weight = self._object_residual_prompt_relation_effective_weight()
-        null_weight = self.object_residual_null_relation_loss_weight
-        if prompt_weight <= 0 and null_weight <= 0:
+        relation_aux = getattr(self.model, "last_actor_object_relation_aux", None)
+        if not relation_aux:
             return None
 
-        prompt_delta = getattr(self.model, "last_object_residual_prompt_delta", None)
-        useful_mass = getattr(self.model, "last_object_residual_prompt_useful_mass", None)
-        if prompt_delta is None and useful_mass is None:
+        first_aux = next(iter(relation_aux.values()))
+        logits0 = first_aux.get("logits")
+        if logits0 is None:
             return None
-
-        device = prompt_delta.device if prompt_delta is not None else useful_mass.device
+        device = logits0.device
         info = self._exact_teacher_object_info(actions, valid, target, device)
         if info is None:
             return None
 
         actions = actions.to(device=device, dtype=torch.long)
         valid = valid.to(device=device, dtype=torch.bool)
+        objectless = self._labels_in_indices(actions, self.objectless_action_indices)
+        objectless = valid & objectless
         known_objectful = info["valid"] & info["known_action"]
         exact_compatible = known_objectful & info["compatible_1based"]
         missing_compatible = known_objectful & ~info["any_compatible"]
-        if known_objectful.any():
-            count = int(known_objectful.sum().item())
-            self._log_scalar(
-                f"{stage}_object_residual_prompt_relation_effective_weight",
-                torch.as_tensor(prompt_weight, device=device, dtype=torch.float32),
-                count,
-            )
-            self._log_scalar(
-                f"{stage}_object_residual_null_relation_weight",
-                torch.as_tensor(null_weight, device=device, dtype=torch.float32),
-                count,
-            )
 
-        terms = []
-        margin_target = self.object_residual_relation_confuser_margin
-        if (
-            prompt_weight > 0
-            and prompt_delta is not None
-            and exact_compatible.any()
-        ):
-            prompt_margins = self._true_minus_confuser_margin(
-                prompt_delta.float(),
-                actions,
-                exact_compatible,
-            )
-            if prompt_margins is not None:
-                loss_prompt = F.relu(margin_target - prompt_margins).mean()
-                count = int(prompt_margins.numel())
-                self.log(
-                    f"{stage}_loss_object_residual_prompt_relation",
-                    loss_prompt,
-                    on_step=stage == "train",
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                    sync_dist=True,
-                )
-                self._log_scalar(
-                    f"{stage}_object_residual_prompt_relation_margin_exact",
-                    prompt_margins.detach().mean(),
-                    count,
-                )
-                self._log_scalar(
-                    f"{stage}_object_residual_prompt_relation_margin_sat_exact",
-                    (prompt_margins.detach() >= margin_target).float().mean(),
-                    count,
-                )
-                terms.append(loss_prompt * prompt_weight)
+        target_index = torch.zeros_like(actions, dtype=torch.long, device=device)
+        selected_index = info["selected_indices"].to(device=device, dtype=torch.long)
+        max_object_index = int(logits0.shape[-1]) - 1
+        target_index[exact_compatible] = selected_index[exact_compatible].clamp(
+            1,
+            max_object_index,
+        )
 
-        if (
-            null_weight > 0
-            and useful_mass is not None
-            and (exact_compatible.any() or missing_compatible.any())
-        ):
-            useful_mass = useful_mass.float()
-            useful_true = self._gather_true_action_value(useful_mass, actions)
-            values = []
-            targets = []
-            if exact_compatible.any():
-                exact_values = useful_true[exact_compatible]
-                values.append(exact_values)
-                targets.append(torch.ones_like(exact_values))
-                self._log_scalar(
-                    f"{stage}_object_residual_useful_mass_loss_exact_mean",
-                    exact_values.detach().mean(),
-                    int(exact_values.numel()),
+        sample_weight = torch.zeros_like(actions, dtype=torch.float32, device=device)
+        sample_weight[exact_compatible] = 1.0
+        null_weight = self.actor_object_relation_null_loss_weight
+        sample_weight[missing_compatible] = null_weight
+        sample_weight[objectless] = null_weight
+        supervised = sample_weight > 0
+        if not supervised.any():
+            return None
+
+        losses = []
+        for block_name, aux in relation_aux.items():
+            logits = aux.get("logits")
+            if logits is None:
+                continue
+            if logits.shape[:2] != target_index.shape:
+                raise RuntimeError(
+                    "actor-object relation logits shape mismatch: "
+                    f"{tuple(logits.shape[:2])} vs {tuple(target_index.shape)}"
                 )
-            if missing_compatible.any():
-                missing_values = useful_true[missing_compatible]
-                values.append(missing_values)
-                targets.append(torch.zeros_like(missing_values))
-                self._log_scalar(
-                    f"{stage}_object_residual_useful_mass_loss_missing_mean",
-                    missing_values.detach().mean(),
-                    int(missing_values.numel()),
-                )
-            useful_values = torch.cat(values).float().clamp(1.0e-4, 1.0 - 1.0e-4)
-            useful_targets = torch.cat(targets).to(dtype=useful_values.dtype)
-            useful_logits = torch.logit(useful_values)
-            loss_null = F.binary_cross_entropy_with_logits(
-                useful_logits,
-                useful_targets,
+            per_item = F.cross_entropy(
+                logits.float().reshape(-1, logits.shape[-1]),
+                target_index.reshape(-1),
+                reduction="none",
+            ).reshape_as(target_index)
+            block_loss = (per_item * sample_weight).sum() / sample_weight.sum().clamp_min(
+                1.0
             )
+            losses.append(block_loss)
             self.log(
-                f"{stage}_loss_object_residual_null_relation",
-                loss_null,
+                f"{stage}_loss_actor_object_relation_block_{block_name}",
+                block_loss,
                 on_step=stage == "train",
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
                 sync_dist=True,
             )
-            terms.append(loss_null * null_weight)
 
-        if not terms:
+        if not losses:
             return None
-        return torch.stack(terms).sum()
+
+        loss = torch.stack(losses).mean()
+        weighted_loss = loss * self.actor_object_relation_loss_weight
+        self.log(
+            f"{stage}_loss_actor_object_relation",
+            loss,
+            on_step=stage == "train",
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+        )
+        self._log_actor_object_relation_metrics(
+            stage,
+            relation_aux,
+            target_index,
+            exact_compatible,
+            missing_compatible,
+            objectless,
+            info,
+        )
+        return weighted_loss
+
+    def _log_actor_object_relation_metrics(
+        self,
+        stage,
+        relation_aux,
+        target_index,
+        exact_compatible,
+        missing_compatible,
+        objectless,
+        info,
+    ):
+        if not relation_aux:
+            return
+        last_aux = relation_aux[sorted(relation_aux.keys(), key=lambda x: int(x))[-1]]
+        logits = last_aux.get("logits")
+        if logits is None:
+            return
+        with torch.no_grad():
+            pred = logits.argmax(dim=-1)
+            if exact_compatible.any():
+                count = int(exact_compatible.sum().item())
+                self._log_scalar(
+                    f"{stage}_relation_exact_teacher_acc",
+                    (pred[exact_compatible] == target_index[exact_compatible])
+                    .float()
+                    .mean(),
+                    count,
+                )
+                object_attention = last_aux.get("object_attention")
+                if object_attention is not None:
+                    teacher_slot = info["idx_1based"].to(
+                        device=object_attention.device,
+                        dtype=torch.long,
+                    )
+                    teacher_prob = object_attention.float().gather(
+                        -1,
+                        teacher_slot.unsqueeze(-1),
+                    ).squeeze(-1)
+                    self._log_scalar(
+                        f"{stage}_relation_exact_teacher_prob",
+                        teacher_prob[exact_compatible].mean(),
+                        count,
+                    )
+                useful_mass = last_aux.get("useful_mass")
+                if useful_mass is not None:
+                    self._log_scalar(
+                        f"{stage}_relation_useful_mass_exact",
+                        useful_mass.float()[exact_compatible].mean(),
+                        count,
+                    )
+                null_prob = last_aux.get("null_prob")
+                if null_prob is not None:
+                    self._log_scalar(
+                        f"{stage}_relation_null_prob_exact",
+                        null_prob.float()[exact_compatible].mean(),
+                        count,
+                    )
+
+            if missing_compatible.any():
+                count = int(missing_compatible.sum().item())
+                self._log_scalar(
+                    f"{stage}_relation_null_rate_missing_objectful",
+                    (pred[missing_compatible] == 0).float().mean(),
+                    count,
+                )
+                useful_mass = last_aux.get("useful_mass")
+                if useful_mass is not None:
+                    self._log_scalar(
+                        f"{stage}_relation_useful_mass_missing_objectful",
+                        useful_mass.float()[missing_compatible].mean(),
+                        count,
+                    )
+                null_prob = last_aux.get("null_prob")
+                if null_prob is not None:
+                    self._log_scalar(
+                        f"{stage}_relation_null_prob_missing_objectful",
+                        null_prob.float()[missing_compatible].mean(),
+                        count,
+                    )
+
+            if objectless.any():
+                count = int(objectless.sum().item())
+                self._log_scalar(
+                    f"{stage}_relation_null_rate_objectless",
+                    (pred[objectless] == 0).float().mean(),
+                    count,
+                )
+                useful_mass = last_aux.get("useful_mass")
+                if useful_mass is not None:
+                    self._log_scalar(
+                        f"{stage}_relation_useful_mass_objectless",
+                        useful_mass.float()[objectless].mean(),
+                        count,
+                    )
+                null_prob = last_aux.get("null_prob")
+                if null_prob is not None:
+                    self._log_scalar(
+                        f"{stage}_relation_null_prob_objectless",
+                        null_prob.float()[objectless].mean(),
+                        count,
+                    )
 
     def _append_nash_mtl_params(self, params):
         if not (
@@ -3009,14 +2390,14 @@ class HeatmapModule(pl.LightningModule):
                 logger=True,
                 sync_dist=True,
             )
-        loss_object_residual_relation = self._object_residual_evidence_relation_loss(
+        loss_actor_object_relation = self._actor_object_relation_loss(
             stage,
             actions,
             valid,
             target,
         )
-        if loss_object_residual_relation is not None:
-            loss_main_task = loss_main_task + loss_object_residual_relation
+        if loss_actor_object_relation is not None:
+            loss_main_task = loss_main_task + loss_actor_object_relation
 
         loss_hard_objectless = self._objectless_object_action_suppression_loss(
             stage,
@@ -3048,28 +2429,7 @@ class HeatmapModule(pl.LightningModule):
                 * self.object_prompt_grounding_loss_weight
             )
 
-        loss_object_prompt_action_coupling = (
-            self._object_prompt_action_coupling_loss(
-                stage,
-                imgs,
-                boxes,
-                valid,
-                actions,
-                preds,
-                target,
-                model_object_inputs,
-            )
-        )
-        if stage == "train" and loss_object_prompt_action_coupling is not None:
-            loss_main_task = loss_main_task + loss_object_prompt_action_coupling
-
         self._log_actor_object_prompt_diagnostics(
-            stage,
-            actions,
-            valid,
-            target,
-        )
-        self._log_object_residual_diagnostics(
             stage,
             actions,
             valid,
@@ -3550,14 +2910,6 @@ class HeatmapModule(pl.LightningModule):
         return (labels.unsqueeze(-1) == indices).any(dim=-1)
 
     def _action_loss(self, scores, labels, loss_fn, valid=None):
-        if self.actor_object_residual_head:
-            labels = labels.to(device=scores.device, dtype=torch.long)
-            if valid is not None:
-                valid = valid.to(device=scores.device, dtype=torch.bool)
-                if not valid.any():
-                    return scores.sum() * 0.0
-                return F.nll_loss(scores[valid].float(), labels[valid])
-            return F.nll_loss(scores.float(), labels)
         if valid is not None:
             valid = valid.to(device=scores.device, dtype=torch.bool)
             if not valid.any():

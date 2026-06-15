@@ -128,19 +128,16 @@ class ToyotaSMDataset(Dataset):
         self.actor_object_residual_head = bool(
             kwargs.get("actor_object_residual_head", 0)
         )
-        if self.actor_object_residual_head and not self.actor_object_prompt_tokens:
+        if self.actor_object_residual_head:
             raise ValueError(
-                "actor_object_residual_head requires actor_object_prompt_tokens"
-            )
-        if self.actor_object_residual_head and not self.actor_interaction_heatmaps:
-            raise ValueError(
-                "actor_object_residual_head requires actor_interaction_heatmaps"
+                "actor_object_residual_head was removed. Use "
+                "actor_object_relation_in_transformer with actor_object_prompt_tokens."
             )
         if self.actor_object_prompt_tokens and not self.actor_prompt:
             raise ValueError("actor_object_prompt_tokens requires actor_prompt")
-        if self.actor_object_prompt_tokens and not self.actor_object_residual_head:
+        if self.actor_object_prompt_tokens and not self.actor_interaction_heatmaps:
             raise ValueError(
-                "actor_object_prompt_tokens requires actor_object_residual_head"
+                "actor_object_prompt_tokens requires actor_interaction_heatmaps"
             )
         self.requires_object_proposals = self.actor_object_prompt_tokens
         self.num_scene_object_tokens = int(kwargs.get("num_scene_object_tokens", 32))
@@ -1953,7 +1950,7 @@ class ToyotaSMDataset(Dataset):
                 frame_heatmaps[sample_pos],
                 self._interaction_heatmap_from_box(box),
             )
-        return frame_heatmaps.max(dim=0).values.clamp_(0.0, 1.0)
+        return frame_heatmaps.mean(dim=0).clamp_(0.0, 1.0)
 
     def _normalized_object_box(self, entry, height, width):
         width = float(width)
