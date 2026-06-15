@@ -60,12 +60,14 @@ class PromptRelationExpert(nn.Module):
         hidden_dim: int = 512,
         relation_dim: int = 256,
         relation_logit_bound: float = 2.0,
-        taxonomy_prior_cap: float = 4.0,
+        compat_prior_scale: float = 1.0,
     ):
         super().__init__()
         self.spec = spec
         self.relation_logit_bound = float(relation_logit_bound)
-        self.taxonomy_prior_cap = float(taxonomy_prior_cap)
+        self.compat_prior_scale = float(compat_prior_scale)
+        if self.compat_prior_scale < 0:
+            raise ValueError("compat_prior_scale must be >= 0")
 
         self.actor_query = nn.Linear(dim, relation_dim, bias=False)
         self.prompt_key = nn.Linear(dim, relation_dim, bias=False)
@@ -107,7 +109,6 @@ class PromptRelationExpert(nn.Module):
         object_classes: Tensor,
         object_confs: Tensor,
         object_valid: Tensor,
-        eps: float = 1e-4,
     ) -> Dict[str, Tensor]:
         B, A, D = actor_tokens.shape
         K = object_prompt_tokens.shape[1]
@@ -184,16 +185,15 @@ class PromptRelationExpert(nn.Module):
             dtype=actor_tokens.dtype
         )
         null_prob = posterior[..., 0]
-        object_posterior = posterior[..., 1:]
-        object_posterior = object_posterior * relation_valid.to(
-            dtype=object_posterior.dtype
+        object_posterior_unnorm = posterior[..., 1:] * relation_valid.to(
+            dtype=posterior.dtype
         )
-        object_posterior_sum = object_posterior.sum(dim=-1, keepdim=True)
+        object_posterior_sum = object_posterior_unnorm.sum(dim=-1, keepdim=True)
         useful_mass = object_posterior_sum.squeeze(-1).clamp(0.0, 1.0)
         object_posterior = torch.where(
             object_posterior_sum > 0,
-            object_posterior / object_posterior_sum.clamp_min(1.0e-6),
-            torch.zeros_like(object_posterior),
+            object_posterior_unnorm / object_posterior_sum.clamp_min(1.0e-6),
+            torch.zeros_like(object_posterior_unnorm),
         )
         relation_delta = torch.sum(object_posterior * raw_masked, dim=-1)
         relation_delta = relation_delta * useful_mass.detach()
@@ -204,7 +204,7 @@ class PromptRelationExpert(nn.Module):
             1.0,
         )
         attn_f = prompt_attention.detach()[:, :, None, :]
-        posterior_gate = object_posterior.detach()
+        posterior_gate = object_posterior_unnorm.detach()
         actor_object_relevance = (
             0.20 + 0.40 * attn_f + 0.40 * posterior_gate
         ).clamp(0.0, 1.0)
@@ -215,11 +215,8 @@ class PromptRelationExpert(nn.Module):
             * useful_mass.detach()[..., None]
         )
         coverage = (compat_back * actor_object_strength).amax(dim=-1).clamp(0.0, 1.0)
-        taxonomy_prior = torch.log1p(compat_back * actor_object_strength / eps).amax(
-            dim=-1
-        )
-        taxonomy_prior = taxonomy_prior.clamp(max=self.taxonomy_prior_cap)
-        relation_delta = relation_delta + taxonomy_prior
+        compat_prior = self.compat_prior_scale * coverage
+        relation_delta = relation_delta + compat_prior
 
         return {
             "prompt_relation_delta": relation_delta,
@@ -245,6 +242,7 @@ class ObjectResidualActionHead(nn.Module):
         relation_logit_bound: float = 2.0,
         relation_scale_init: float = -1.0,
         max_relation_scale: float = 1.5,
+        compat_prior_scale: float = 1.0,
     ):
         super().__init__()
         self.spec = spec
@@ -265,6 +263,7 @@ class ObjectResidualActionHead(nn.Module):
             spec,
             hidden_dim=hidden_dim,
             relation_logit_bound=relation_logit_bound,
+            compat_prior_scale=compat_prior_scale,
         )
         self.relation_scale_logit = nn.Parameter(torch.tensor(float(relation_scale_init)))
         self.max_relation_scale = float(max_relation_scale)

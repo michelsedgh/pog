@@ -385,6 +385,12 @@ def checkpoint_payload(checkpoint_path, hparam_overrides=None):
         "actor_object_residual_head": int(
             hparams.get("actor_object_residual_head", 0)
         ),
+        "actor_object_residual_compat_prior_scale": float(
+            hparams.get("actor_object_residual_compat_prior_scale", 1.0)
+        ),
+        "actor_object_residual_max_relation_scale": float(
+            hparams.get("actor_object_residual_max_relation_scale", 1.5)
+        ),
         "uses_object_proposals": int(uses_prompt_object_proposals(hparams)),
         "num_scene_object_tokens": int(hparams.get("num_scene_object_tokens", 0)),
         "num_object_classes": int(hparams.get("num_object_classes", 19)),
@@ -621,6 +627,12 @@ def main():
             ),
             "actor_object_residual_head": int(
                 hparams.get("actor_object_residual_head", 0)
+            ),
+            "actor_object_residual_compat_prior_scale": float(
+                hparams.get("actor_object_residual_compat_prior_scale", 1.0)
+            ),
+            "actor_object_residual_max_relation_scale": float(
+                hparams.get("actor_object_residual_max_relation_scale", 1.5)
             ),
             "uses_object_proposals": int(uses_object_proposals),
         },

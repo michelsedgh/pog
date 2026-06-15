@@ -39,6 +39,8 @@ CORE_COLUMNS = [
     "val_loss_main_deploy",
     "val_loss_grounding_aux",
     "val_object_residual_relation_scale",
+    "val_object_residual_abs_mean",
+    "val_object_residual_abs_max",
     "val_object_residual_coverage_true_exact",
     "val_object_residual_true_exact",
     "val_object_residual_true_missing",
@@ -52,6 +54,8 @@ CORE_COLUMNS = [
     "val_object_residual_base_true_minus_confuser_missing",
     "val_object_residual_final_true_minus_confuser_exact",
     "val_object_residual_final_true_minus_confuser_missing",
+    "val_object_residual_base_objectless_true_minus_objectful_max",
+    "val_object_residual_final_objectless_true_minus_objectful_max",
     "val_object_residual_prompt_relation_effective_weight",
     "val_object_residual_null_relation_weight",
     "val_loss_object_residual_prompt_relation",
@@ -322,6 +326,8 @@ def print_compact_epoch_summary(epoch_df):
         "val_group_phone_tv_acc",
         "val_group_drink_cup_bottle_glass_acc",
         "val_group_drink_acc",
+        "val_object_residual_abs_mean",
+        "val_object_residual_abs_max",
         "val_object_residual_true_exact",
         "val_object_residual_true_missing",
         "val_object_residual_useful_mass_true_exact",
@@ -395,6 +401,8 @@ def print_compact_best(epoch_df):
         "val_group_laptop_book_tv_acc",
         "val_group_phone_tv_acc",
         "val_object_residual_relation_scale",
+        "val_object_residual_abs_mean",
+        "val_object_residual_abs_max",
         "val_object_residual_coverage_true_exact",
         "val_object_residual_true_exact",
         "val_object_residual_true_missing",
@@ -408,6 +416,8 @@ def print_compact_best(epoch_df):
         "val_object_residual_base_true_minus_confuser_missing",
         "val_object_residual_final_true_minus_confuser_exact",
         "val_object_residual_final_true_minus_confuser_missing",
+        "val_object_residual_base_objectless_true_minus_objectful_max",
+        "val_object_residual_final_objectless_true_minus_objectful_max",
         "val_object_residual_prompt_relation_effective_weight",
         "val_object_residual_null_relation_weight",
         "val_loss_object_residual_prompt_relation",
@@ -741,6 +751,8 @@ def print_decision(epoch_df):
     object_mapped_acc = metric(latest, "val_group_object_mapped_acc")
     objectless_acc = metric(latest, "val_group_objectless_acc")
     object_residual_relation_scale = metric(latest, "val_object_residual_relation_scale")
+    object_residual_abs_mean = metric(latest, "val_object_residual_abs_mean")
+    object_residual_abs_max = metric(latest, "val_object_residual_abs_max")
     object_residual_coverage_exact = metric(
         latest,
         "val_object_residual_coverage_true_exact",
@@ -792,6 +804,14 @@ def print_decision(epoch_df):
     object_residual_final_margin_missing = metric(
         latest,
         "val_object_residual_final_true_minus_confuser_missing",
+    )
+    object_residual_base_objectless_margin = metric(
+        latest,
+        "val_object_residual_base_objectless_true_minus_objectful_max",
+    )
+    object_residual_final_objectless_margin = metric(
+        latest,
+        "val_object_residual_final_objectless_true_minus_objectful_max",
     )
     object_residual_prompt_relation_weight = metric(
         latest,
@@ -1014,6 +1034,8 @@ def print_decision(epoch_df):
         print(
             "object residual evidence: "
             f"scale {fmt(object_residual_relation_scale)}, "
+            f"abs_mean {fmt(object_residual_abs_mean)}, "
+            f"abs_max {fmt(object_residual_abs_max)}, "
             f"coverage_exact {fmt(object_residual_coverage_exact)}, "
             f"residual_exact {fmt(object_residual_exact)}, "
             f"residual_missing {fmt(object_residual_missing)}, "
@@ -1026,7 +1048,9 @@ def print_decision(epoch_df):
             f"base_margin_exact {fmt(object_residual_base_margin_exact)}, "
             f"base_margin_missing {fmt(object_residual_base_margin_missing)}, "
             f"final_margin_exact {fmt(object_residual_final_margin_exact)}, "
-            f"final_margin_missing {fmt(object_residual_final_margin_missing)}"
+            f"final_margin_missing {fmt(object_residual_final_margin_missing)}, "
+            f"objectless_base_margin {fmt(object_residual_base_objectless_margin)}, "
+            f"objectless_final_margin {fmt(object_residual_final_objectless_margin)}"
         )
     if (
         pd.notna(object_residual_prompt_relation_loss)

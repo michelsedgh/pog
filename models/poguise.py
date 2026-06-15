@@ -381,6 +381,12 @@ class POGUISE(pl.LightningModule):
                                 1.5,
                             )
                         ),
+                        compat_prior_scale=float(
+                            self.hparams.get(
+                                "actor_object_residual_compat_prior_scale",
+                                1.0,
+                            )
+                        ),
                     )
                 )
         if self.hparams.get("linear_probe", 0):
@@ -885,6 +891,11 @@ class POGUISE(pl.LightningModule):
             "--actor_object_residual_max_relation_scale",
             type=float,
             default=1.5,
+        )
+        parser.add_argument(
+            "--actor_object_residual_compat_prior_scale",
+            type=float,
+            default=1.0,
         )
         parser.add_argument(
             "--actor_object_prompt_box_prior_weight",

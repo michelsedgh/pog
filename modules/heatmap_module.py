@@ -2294,6 +2294,50 @@ class HeatmapModule(pl.LightningModule):
         object_residual = object_residual.float()
         base_logits = base_logits.float()
         final_logits = final_logits.float()
+        valid_count = int(valid.sum().item())
+        if valid_count > 0:
+            residual_abs = object_residual[valid].abs()
+            self._log_scalar(
+                f"{stage}_object_residual_abs_mean",
+                residual_abs.mean(),
+                valid_count,
+            )
+            self._log_scalar(
+                f"{stage}_object_residual_abs_max",
+                residual_abs.max(),
+                valid_count,
+            )
+
+        object_action_indices = self.group_indices.get("object_mapped")
+        objectless = self._labels_in_indices(actions, self.objectless_action_indices)
+        objectless = objectless & valid
+        if (
+            objectless.any()
+            and object_action_indices is not None
+            and int(object_action_indices.numel()) > 0
+        ):
+            object_action_indices = object_action_indices.to(
+                device=device,
+                dtype=torch.long,
+            )
+            true_base = self._gather_true_action_value(base_logits, actions)
+            true_final = self._gather_true_action_value(final_logits, actions)
+            max_object_base = base_logits[..., object_action_indices].max(dim=-1).values
+            max_object_final = final_logits[..., object_action_indices].max(
+                dim=-1
+            ).values
+            count = int(objectless.sum().item())
+            self._log_scalar(
+                f"{stage}_object_residual_base_objectless_true_minus_objectful_max",
+                (true_base - max_object_base)[objectless].mean(),
+                count,
+            )
+            self._log_scalar(
+                f"{stage}_object_residual_final_objectless_true_minus_objectful_max",
+                (true_final - max_object_final)[objectless].mean(),
+                count,
+            )
+
         coverage_true = self._gather_true_action_value(coverage, actions)
         residual_true = self._gather_true_action_value(object_residual, actions)
         null_true = None
