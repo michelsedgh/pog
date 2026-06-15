@@ -391,6 +391,7 @@ class HeatmapModule(pl.LightningModule):
                 "model.actor_head",
                 "model.actor_motion_head",
                 "model.presence_head",
+                "model.actor_object_base_fusion",
                 "model.object_residual_action_head",
             ]
             if self.model.hparams.get("use_register_tokens", 0):
@@ -508,6 +509,13 @@ class HeatmapModule(pl.LightningModule):
                 params += list(self.model.actor_motion_head.parameters())
             if self.model.presence_head is not None:
                 params += list(self.model.presence_head.parameters())
+            actor_object_base_fusion = getattr(
+                self.model,
+                "actor_object_base_fusion",
+                None,
+            )
+            if actor_object_base_fusion is not None:
+                params += list(actor_object_base_fusion.parameters())
             object_residual_head = getattr(
                 self.model,
                 "object_residual_action_head",

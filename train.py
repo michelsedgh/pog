@@ -221,7 +221,7 @@ def _validate_active_actor_action_path(module):
         if getattr(model, "actor_head", None) is None:
             raise RuntimeError(
                 "actor_object_residual_head requires actor_head base logits. "
-                "Runtime objects may only add bounded residual evidence."
+                "Runtime objects must use the bounded actor-object action path."
             )
         if getattr(model, "object_residual_action_head", None) is None:
             raise RuntimeError(
@@ -544,6 +544,11 @@ def main():
         )
     if hparams.actor_object_prompt_tokens and not hparams.actor_prompt:
         raise ValueError("actor_object_prompt_tokens requires actor_prompt")
+    if getattr(hparams, "actor_object_base_fusion", 0):
+        if not hparams.actor_object_prompt_tokens:
+            raise ValueError(
+                "actor_object_base_fusion requires --actor_object_prompt_tokens 1"
+            )
     if getattr(hparams, "actor_object_residual_head", 0):
         if not hparams.actor_object_prompt_tokens:
             raise ValueError(
@@ -556,7 +561,7 @@ def main():
     elif hparams.actor_object_prompt_tokens:
         raise ValueError(
             "actor_object_prompt_tokens requires --actor_object_residual_head 1; "
-            "runtime objects may only enter as bounded residual evidence."
+            "runtime objects must use the bounded actor-object action path."
         )
     if (
         hparams.actor_object_prompt_tokens

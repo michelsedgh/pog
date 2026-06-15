@@ -231,6 +231,96 @@ class PromptRelationExpert(nn.Module):
         }
 
 
+class ActorObjectContextFusion(nn.Module):
+    """Fuse runtime object context into actor tokens before action classification."""
+
+    def __init__(
+        self,
+        dim: int,
+        hidden_dim: int = 512,
+        relation_dim: int = 256,
+        fusion_scale_init: float = -2.0,
+        max_fusion_scale: float = 1.0,
+    ):
+        super().__init__()
+        self.actor_norm = nn.LayerNorm(dim)
+        self.object_norm = nn.LayerNorm(dim)
+        self.actor_query = nn.Linear(dim, relation_dim, bias=False)
+        self.object_key = nn.Linear(dim, relation_dim, bias=False)
+        self.object_value = nn.Linear(dim, dim, bias=False)
+        self.context_proj = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, dim),
+        )
+        self.gate = nn.Sequential(
+            nn.LayerNorm(3 * dim),
+            nn.Linear(3 * dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, dim),
+            nn.Sigmoid(),
+        )
+        self.fusion_scale_logit = nn.Parameter(torch.tensor(float(fusion_scale_init)))
+        self.max_fusion_scale = float(max_fusion_scale)
+        if self.max_fusion_scale < 0:
+            raise ValueError("max_fusion_scale must be >= 0")
+
+    def forward(
+        self,
+        actor_tokens: Tensor,
+        object_prompt_tokens: Tensor,
+        object_confs: Tensor,
+        object_valid: Tensor,
+    ) -> Dict[str, Tensor]:
+        object_prompt_tokens = object_prompt_tokens.to(
+            device=actor_tokens.device,
+            dtype=actor_tokens.dtype,
+        )
+        object_valid = object_valid.to(device=actor_tokens.device, dtype=torch.bool)
+        object_confs = object_confs.to(
+            device=actor_tokens.device,
+            dtype=actor_tokens.dtype,
+        ).clamp(0.0, 1.0)
+        object_confs = object_confs * object_valid.to(dtype=object_confs.dtype)
+
+        q = self.actor_query(self.actor_norm(actor_tokens))
+        k = self.object_key(self.object_norm(object_prompt_tokens))
+        scores = torch.matmul(q, k.transpose(1, 2)) / (q.shape[-1] ** 0.5)
+        conf_bias = torch.log(object_confs.clamp_min(1.0e-4))[:, None, :]
+        scores = scores + conf_bias
+        scores = scores.masked_fill(~object_valid[:, None, :], -1.0e4)
+
+        attention = F.softmax(scores.float(), dim=-1).to(dtype=actor_tokens.dtype)
+        attention = attention * object_valid[:, None, :].to(dtype=attention.dtype)
+        attention_sum = attention.sum(dim=-1, keepdim=True)
+        attention = torch.where(
+            attention_sum > 0,
+            attention / attention_sum.clamp_min(1.0e-6),
+            torch.zeros_like(attention),
+        )
+
+        values = self.object_value(object_prompt_tokens)
+        context = torch.matmul(attention, values)
+        has_context = object_valid.any(dim=-1)[:, None, None].to(
+            dtype=actor_tokens.dtype
+        )
+        context = context * has_context
+
+        gate = self.gate(
+            torch.cat([actor_tokens, context, actor_tokens * context], dim=-1)
+        )
+        delta = self.context_proj(context) * gate * has_context
+        scale = self.max_fusion_scale * torch.sigmoid(self.fusion_scale_logit)
+        fused = actor_tokens + scale * delta
+        return {
+            "actor_tokens": fused,
+            "object_context": context,
+            "object_attention": attention,
+            "fusion_scale": scale.detach(),
+        }
+
+
 class ObjectResidualActionHead(nn.Module):
     """Prompt-aware bounded residual over base PO-GUISE+ actor logits."""
 

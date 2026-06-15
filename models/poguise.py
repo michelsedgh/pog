@@ -16,6 +16,7 @@ from datasets.toyota_action_taxonomy import (
     toyota_objectless_action_names,
 )
 from models.object_residual_action_head import (
+    ActorObjectContextFusion,
     ObjectResidualActionSpec,
     ObjectResidualActionHead,
 )
@@ -180,7 +181,7 @@ class POGUISE(pl.LightningModule):
         if self.actor_object_prompt_tokens_enabled and not self.actor_object_residual_head_enabled:
             raise ValueError(
                 "actor_object_prompt_tokens requires actor_object_residual_head; "
-                "runtime objects may only enter as bounded residual evidence."
+                "runtime objects must use the bounded actor-object action path."
             )
         if self.actor_interaction_heatmaps and not self.actor_prompt:
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
@@ -210,6 +211,7 @@ class POGUISE(pl.LightningModule):
                 )
         self.use_register_tokens = bool(self.hparams.get("use_register_tokens", 0))
         self.object_residual_action_head = None
+        self.actor_object_base_fusion = None
         self._create_network()
         # freeze backbone if specified
         if self.hparams.freeze_backbone:
@@ -338,6 +340,32 @@ class POGUISE(pl.LightningModule):
                 self.net.num_features,
                 self.hparams.num_classes,
             )
+            if self.hparams.get("actor_object_base_fusion", 0):
+                if not self.actor_object_prompt_tokens_enabled:
+                    raise ValueError(
+                        "actor_object_base_fusion requires actor_object_prompt_tokens"
+                    )
+                self.actor_object_base_fusion = ActorObjectContextFusion(
+                    self.net.num_features,
+                    hidden_dim=int(
+                        self.hparams.get(
+                            "actor_object_base_fusion_hidden_dim",
+                            512,
+                        )
+                    ),
+                    fusion_scale_init=float(
+                        self.hparams.get(
+                            "actor_object_base_fusion_scale_init",
+                            -2.0,
+                        )
+                    ),
+                    max_fusion_scale=float(
+                        self.hparams.get(
+                            "actor_object_base_fusion_max_scale",
+                            1.0,
+                        )
+                    ),
+                )
             self.actor_motion_head = (
                 nn.Linear(self.net.num_features, self.hparams.num_classes)
                 if (
@@ -514,6 +542,9 @@ class POGUISE(pl.LightningModule):
                 if self.presence_head is not None:
                     for param in self.presence_head.parameters():
                         param.requires_grad = False
+                if self.actor_object_base_fusion is not None:
+                    for param in self.actor_object_base_fusion.parameters():
+                        param.requires_grad = False
                 if self.object_residual_action_head is not None:
                     for param in self.object_residual_action_head.parameters():
                         param.requires_grad = False
@@ -581,6 +612,9 @@ class POGUISE(pl.LightningModule):
                             param.requires_grad = True
                 if self.presence_head is not None:
                     for param in self.presence_head.parameters():
+                        param.requires_grad = True
+                if self.actor_object_base_fusion is not None:
+                    for param in self.actor_object_base_fusion.parameters():
                         param.requires_grad = True
                 if self.object_residual_action_head is not None:
                     for param in self.object_residual_action_head.parameters():
@@ -663,6 +697,9 @@ class POGUISE(pl.LightningModule):
             self.last_actor_object_prompt_attention_logits = None
             self.last_actor_object_prompt_attention = None
             self.last_actor_object_prompt_valid = None
+            self.last_actor_object_base_fusion_attention = None
+            self.last_actor_object_base_fusion_scale = None
+            self.last_actor_action_tokens = None
             self.last_object_residual_head_output = None
             self.last_object_residual_base_logits = None
             self.last_object_residual_final_logits = None
@@ -677,8 +714,8 @@ class POGUISE(pl.LightningModule):
                 return x_actor
 
             action_scores = None
-            base_logits = self.actor_head(x_actor)
             prompt_valid = None
+            prompt_classes = None
             if (
                 self.actor_object_prompt_tokens_enabled
                 and x_object_prompt is not None
@@ -703,6 +740,30 @@ class POGUISE(pl.LightningModule):
                 self.last_actor_object_prompt_tokens = x_object_prompt
                 self.last_actor_object_prompt_valid = prompt_valid
 
+            x_actor_action = x_actor
+            if self.actor_object_base_fusion is not None:
+                if x_object_prompt is None or prompt_valid is None:
+                    raise RuntimeError(
+                        "actor_object_base_fusion requires runtime object prompt tokens"
+                    )
+                if object_confs is None:
+                    raise ValueError("actor_object_base_fusion requires object_confs")
+                fusion_output = self.actor_object_base_fusion(
+                    x_actor,
+                    x_object_prompt,
+                    object_confs,
+                    prompt_valid,
+                )
+                x_actor_action = fusion_output["actor_tokens"]
+                self.last_actor_object_base_fusion_attention = fusion_output[
+                    "object_attention"
+                ]
+                self.last_actor_object_base_fusion_scale = fusion_output[
+                    "fusion_scale"
+                ]
+            self.last_actor_action_tokens = x_actor_action
+            base_logits = self.actor_head(x_actor_action)
+
             if self.object_residual_action_head is not None:
                 if boxes is None or valid is None:
                     raise ValueError("actor_object_residual_head requires actor boxes")
@@ -716,7 +777,7 @@ class POGUISE(pl.LightningModule):
                         "object_confs, and object_valid"
                     )
                 head_output = self.object_residual_action_head(
-                    actor_tokens=x_actor,
+                    actor_tokens=x_actor_action,
                     actor_valid=valid,
                     base_logits=base_logits,
                     object_prompt_tokens=x_object_prompt,
@@ -747,7 +808,8 @@ class POGUISE(pl.LightningModule):
                 ]
                 self.last_actor_object_prompt_valid = prompt_valid
                 self.last_object_residual_cache = {
-                    "actor_tokens": x_actor,
+                    "raw_actor_tokens": x_actor,
+                    "actor_tokens": x_actor_action,
                     "actor_valid": valid,
                     "base_logits": base_logits,
                     "object_prompt_tokens": x_object_prompt,
@@ -823,10 +885,22 @@ class POGUISE(pl.LightningModule):
             if object_valid is None
             else object_valid.to(device=prompt_tokens.device, dtype=torch.bool)
         )
+        actor_tokens = cache["actor_tokens"]
+        base_logits = cache["base_logits"]
+        if self.actor_object_base_fusion is not None:
+            raw_actor_tokens = cache.get("raw_actor_tokens", actor_tokens)
+            fusion_output = self.actor_object_base_fusion(
+                raw_actor_tokens,
+                prompt_tokens,
+                cache["object_confs"],
+                prompt_valid,
+            )
+            actor_tokens = fusion_output["actor_tokens"]
+            base_logits = self.actor_head(actor_tokens)
         out = self.object_residual_action_head(
-            actor_tokens=cache["actor_tokens"],
+            actor_tokens=actor_tokens,
             actor_valid=cache["actor_valid"],
-            base_logits=cache["base_logits"],
+            base_logits=base_logits,
             object_prompt_tokens=prompt_tokens,
             object_classes=prompt_classes,
             object_confs=cache["object_confs"],
@@ -875,6 +949,22 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--num_scene_object_tokens", type=int, default=32)
         parser.add_argument("--num_object_classes", type=int, default=19)
         parser.add_argument("--actor_object_prompt_tokens", type=int, default=0)
+        parser.add_argument("--actor_object_base_fusion", type=int, default=0)
+        parser.add_argument(
+            "--actor_object_base_fusion_hidden_dim",
+            type=int,
+            default=512,
+        )
+        parser.add_argument(
+            "--actor_object_base_fusion_scale_init",
+            type=float,
+            default=-2.0,
+        )
+        parser.add_argument(
+            "--actor_object_base_fusion_max_scale",
+            type=float,
+            default=1.0,
+        )
         parser.add_argument("--actor_object_residual_head", type=int, default=0)
         parser.add_argument("--actor_object_residual_hidden_dim", type=int, default=512)
         parser.add_argument(
