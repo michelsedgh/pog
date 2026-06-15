@@ -2608,9 +2608,13 @@ class HeatmapModule(pl.LightningModule):
                     missing_values.detach().mean(),
                     int(missing_values.numel()),
                 )
-            useful_values = torch.cat(values).clamp(1.0e-4, 1.0 - 1.0e-4)
-            useful_targets = torch.cat(targets)
-            loss_null = F.binary_cross_entropy(useful_values, useful_targets)
+            useful_values = torch.cat(values).float().clamp(1.0e-4, 1.0 - 1.0e-4)
+            useful_targets = torch.cat(targets).to(dtype=useful_values.dtype)
+            useful_logits = torch.logit(useful_values)
+            loss_null = F.binary_cross_entropy_with_logits(
+                useful_logits,
+                useful_targets,
+            )
             self.log(
                 f"{stage}_loss_object_residual_null_relation",
                 loss_null,
