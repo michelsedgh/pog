@@ -39,6 +39,14 @@ CORE_COLUMNS = [
     "val_loss_main_deploy",
     "val_loss_grounding_aux",
     "val_loss_actor_object_relation",
+    "val_loss_actor_object_engagement",
+    "val_actor_object_engagement_acc",
+    "val_actor_object_engagement_none_acc",
+    "val_actor_object_engagement_laptop_acc",
+    "val_actor_object_engagement_book_acc",
+    "val_actor_object_engagement_phone_tablet_acc",
+    "val_actor_object_engagement_tv_monitor_acc",
+    "val_actor_object_engagement_laptop_book_tv_acc",
     "val_relation_exact_teacher_acc",
     "val_relation_exact_teacher_prob",
     "val_relation_null_rate_objectless",
@@ -76,7 +84,27 @@ CORE_COLUMNS = [
     "val_object_prompt_drop_exact_true_prob_drop",
     "val_object_prompt_drop_exact_pred_match",
     "val_object_prompt_drop_exact_acc",
+    "val_object_prompt_drop_Uselaptop_true_logit_drop",
+    "val_object_prompt_drop_Uselaptop_true_prob_drop",
+    "val_object_prompt_drop_Uselaptop_pred_match",
+    "val_object_prompt_drop_Readbook_true_logit_drop",
+    "val_object_prompt_drop_WatchTV_true_logit_drop",
+    "val_object_prompt_drop_Usetelephone_true_logit_drop",
     "val_actor_object_prompt_token_count",
+    "val_token_selection_visual_keep_rate",
+    "val_token_selection_visual_keep_count",
+    "val_token_selection_actor_box_keep_rate",
+    "val_token_selection_visible_object_box_keep_rate",
+    "val_token_selection_exact_teacher_object_keep_rate",
+    "val_token_selection_interaction_heatmap_keep_rate",
+    "val_token_selection_laptop_box_keep_rate",
+    "val_token_selection_book_box_keep_rate",
+    "val_token_selection_phone_box_keep_rate",
+    "val_token_selection_tv_monitor_box_keep_rate",
+    "val_token_selection_Uselaptop_teacher_object_keep_rate",
+    "val_token_selection_Readbook_teacher_object_keep_rate",
+    "val_token_selection_WatchTV_teacher_object_keep_rate",
+    "val_token_selection_Usetelephone_teacher_object_keep_rate",
     "val_loss_motion_aux",
     "val_motion_aux_acc",
     "train_nash_weight_action",
@@ -303,6 +331,13 @@ def print_compact_epoch_summary(epoch_df):
         "val_group_drink_cup_bottle_glass_acc",
         "val_group_drink_acc",
         "val_loss_actor_object_relation",
+        "val_loss_actor_object_engagement",
+        "val_actor_object_engagement_acc",
+        "val_actor_object_engagement_laptop_acc",
+        "val_actor_object_engagement_book_acc",
+        "val_actor_object_engagement_phone_tablet_acc",
+        "val_actor_object_engagement_tv_monitor_acc",
+        "val_actor_object_engagement_laptop_book_tv_acc",
         "val_relation_exact_teacher_acc",
         "val_relation_exact_teacher_prob",
         "val_relation_useful_mass_exact",
@@ -324,7 +359,16 @@ def print_compact_epoch_summary(epoch_df):
         "val_object_prompt_drop_objectless_kl",
         "val_object_prompt_distractor_objectless_object_action_pred_rate",
         "val_object_prompt_drop_exact_true_logit_drop",
+        "val_object_prompt_drop_Uselaptop_true_logit_drop",
+        "val_object_prompt_drop_Uselaptop_true_prob_drop",
         "val_actor_object_prompt_token_count",
+        "val_token_selection_visual_keep_rate",
+        "val_token_selection_actor_box_keep_rate",
+        "val_token_selection_visible_object_box_keep_rate",
+        "val_token_selection_exact_teacher_object_keep_rate",
+        "val_token_selection_interaction_heatmap_keep_rate",
+        "val_token_selection_laptop_box_keep_rate",
+        "val_token_selection_Uselaptop_teacher_object_keep_rate",
         "val_interaction_heatmap_positive_mean",
         "val_interaction_heatmap_pred_max",
         "val_interaction_heatmap_soft_iou",
@@ -369,6 +413,13 @@ def print_compact_best(epoch_df):
         "val_group_laptop_book_tv_acc",
         "val_group_phone_tv_acc",
         "val_loss_actor_object_relation",
+        "val_loss_actor_object_engagement",
+        "val_actor_object_engagement_acc",
+        "val_actor_object_engagement_laptop_acc",
+        "val_actor_object_engagement_book_acc",
+        "val_actor_object_engagement_phone_tablet_acc",
+        "val_actor_object_engagement_tv_monitor_acc",
+        "val_actor_object_engagement_laptop_book_tv_acc",
         "val_relation_exact_teacher_acc",
         "val_relation_exact_teacher_prob",
         "val_relation_useful_mass_exact",
@@ -391,6 +442,15 @@ def print_compact_best(epoch_df):
         "val_object_prompt_distractor_objectless_object_action_pred_rate",
         "val_object_prompt_drop_exact_true_logit_drop",
         "val_object_prompt_drop_exact_true_prob_drop",
+        "val_object_prompt_drop_Uselaptop_true_logit_drop",
+        "val_object_prompt_drop_Uselaptop_true_prob_drop",
+        "val_object_prompt_drop_Uselaptop_pred_match",
+        "val_token_selection_actor_box_keep_rate",
+        "val_token_selection_visible_object_box_keep_rate",
+        "val_token_selection_exact_teacher_object_keep_rate",
+        "val_token_selection_interaction_heatmap_keep_rate",
+        "val_token_selection_laptop_box_keep_rate",
+        "val_token_selection_Uselaptop_teacher_object_keep_rate",
         "val_actor_object_prompt_token_count",
         "val_action_Uselaptop_acc",
         "val_action_Readbook_acc",
@@ -716,6 +776,25 @@ def print_decision(epoch_df):
         latest,
         "val_relation_useful_mass_missing_objectful",
     )
+    engagement_loss = metric(latest, "val_loss_actor_object_engagement")
+    engagement_acc = metric(latest, "val_actor_object_engagement_acc")
+    engagement_laptop_acc = metric(
+        latest,
+        "val_actor_object_engagement_laptop_acc",
+    )
+    engagement_book_acc = metric(latest, "val_actor_object_engagement_book_acc")
+    engagement_phone_acc = metric(
+        latest,
+        "val_actor_object_engagement_phone_tablet_acc",
+    )
+    engagement_tv_acc = metric(
+        latest,
+        "val_actor_object_engagement_tv_monitor_acc",
+    )
+    engagement_lbt_acc = metric(
+        latest,
+        "val_actor_object_engagement_laptop_book_tv_acc",
+    )
     pos = metric(latest, "val_interaction_heatmap_positive_mean")
     pred_max = metric(latest, "val_interaction_heatmap_pred_max")
     soft_iou = metric(latest, "val_interaction_heatmap_soft_iou")
@@ -814,7 +893,53 @@ def print_decision(epoch_df):
         latest,
         "val_object_prompt_drop_exact_acc",
     )
+    prompt_drop_uselaptop_logit = metric(
+        latest,
+        "val_object_prompt_drop_Uselaptop_true_logit_drop",
+    )
+    prompt_drop_uselaptop_prob = metric(
+        latest,
+        "val_object_prompt_drop_Uselaptop_true_prob_drop",
+    )
+    prompt_drop_uselaptop_match = metric(
+        latest,
+        "val_object_prompt_drop_Uselaptop_pred_match",
+    )
+    prompt_drop_readbook_logit = metric(
+        latest,
+        "val_object_prompt_drop_Readbook_true_logit_drop",
+    )
+    prompt_drop_watchtv_logit = metric(
+        latest,
+        "val_object_prompt_drop_WatchTV_true_logit_drop",
+    )
+    prompt_drop_phone_logit = metric(
+        latest,
+        "val_object_prompt_drop_Usetelephone_true_logit_drop",
+    )
     prompt_tokens = metric(latest, "val_actor_object_prompt_token_count")
+    token_keep_visual = metric(latest, "val_token_selection_visual_keep_rate")
+    token_keep_actor = metric(latest, "val_token_selection_actor_box_keep_rate")
+    token_keep_visible_obj = metric(
+        latest,
+        "val_token_selection_visible_object_box_keep_rate",
+    )
+    token_keep_teacher = metric(
+        latest,
+        "val_token_selection_exact_teacher_object_keep_rate",
+    )
+    token_keep_interaction = metric(
+        latest,
+        "val_token_selection_interaction_heatmap_keep_rate",
+    )
+    token_keep_laptop = metric(latest, "val_token_selection_laptop_box_keep_rate")
+    token_keep_book = metric(latest, "val_token_selection_book_box_keep_rate")
+    token_keep_phone = metric(latest, "val_token_selection_phone_box_keep_rate")
+    token_keep_tv = metric(latest, "val_token_selection_tv_monitor_box_keep_rate")
+    token_keep_uselaptop_teacher = metric(
+        latest,
+        "val_token_selection_Uselaptop_teacher_object_keep_rate",
+    )
 
     heatmap_missing_mask_rate = metric(
         latest,
@@ -885,6 +1010,16 @@ def print_decision(epoch_df):
             f"null_prob_missing {fmt(relation_null_prob_missing)}, "
             f"useful_missing {fmt(relation_useful_missing)}"
         )
+    if pd.notna(engagement_acc) or pd.notna(engagement_loss):
+        print(
+            "actor-object engagement: "
+            f"loss {fmt(engagement_loss)}, acc {fmt(engagement_acc)}, "
+            f"laptop {fmt(engagement_laptop_acc)}, "
+            f"book {fmt(engagement_book_acc)}, "
+            f"phone_tablet {fmt(engagement_phone_acc)}, "
+            f"tv_monitor {fmt(engagement_tv_acc)}, "
+            f"laptop_book_tv {fmt(engagement_lbt_acc)}"
+        )
     if pd.notna(prompt_acc) or pd.notna(prompt_loss):
         print(
             "object prompt grounding: "
@@ -928,6 +1063,42 @@ def print_decision(epoch_df):
             f"exact_match {fmt(prompt_drop_exact_match)}, "
             f"exact_acc {fmt(prompt_drop_exact_acc)}"
         )
+    if (
+        pd.notna(prompt_drop_uselaptop_logit)
+        or pd.notna(prompt_drop_readbook_logit)
+        or pd.notna(prompt_drop_watchtv_logit)
+    ):
+        print(
+            "object-prompt action causality: "
+            f"uselaptop_logit_drop {fmt(prompt_drop_uselaptop_logit)}, "
+            f"uselaptop_prob_drop {fmt(prompt_drop_uselaptop_prob)}, "
+            f"uselaptop_match {fmt(prompt_drop_uselaptop_match)}, "
+            f"readbook_logit_drop {fmt(prompt_drop_readbook_logit)}, "
+            f"watchtv_logit_drop {fmt(prompt_drop_watchtv_logit)}, "
+            f"phone_logit_drop {fmt(prompt_drop_phone_logit)}"
+        )
+    if pd.notna(token_keep_visual):
+        print(
+            "token-selection retention: "
+            f"visual {fmt(token_keep_visual)}, "
+            f"actor_box {fmt(token_keep_actor)}, "
+            f"visible_obj_box {fmt(token_keep_visible_obj)}, "
+            f"teacher_obj_box {fmt(token_keep_teacher)}, "
+            f"interaction_hm {fmt(token_keep_interaction)}"
+        )
+    if (
+        pd.notna(token_keep_laptop)
+        or pd.notna(token_keep_uselaptop_teacher)
+        or pd.notna(token_keep_book)
+    ):
+        print(
+            "token-selection object retention: "
+            f"laptop_box {fmt(token_keep_laptop)}, "
+            f"book_box {fmt(token_keep_book)}, "
+            f"phone_box {fmt(token_keep_phone)}, "
+            f"tv_box {fmt(token_keep_tv)}, "
+            f"uselaptop_teacher {fmt(token_keep_uselaptop_teacher)}"
+        )
     if pd.notna(heatmap_missing_mask_rate):
         print(
             "missing-aware heatmap supervision: "
@@ -966,6 +1137,9 @@ def print_decision(epoch_df):
 
     if pd.notna(f1_delta) and f1_delta < -0.01:
         print("STOP/ROLL BACK: action F1 dropped more than 0.01 from epoch 0.")
+        return
+    if pd.notna(engagement_lbt_acc) and engagement_lbt_acc >= 0.70:
+        print("GOOD ENGAGEMENT SIGN: object-state semantics are being learned.")
         return
     if pd.notna(prompt_exact_correct) and prompt_exact_correct >= 0.70:
         print("GOOD PROMPT SIGN: exact compatible objects are grounding to prompt tokens.")
@@ -1047,6 +1221,37 @@ def print_row(title, row):
             f"exact_prob_drop {metric(row, 'val_object_prompt_drop_exact_true_prob_drop'):.4f}, "
             f"exact_match {metric(row, 'val_object_prompt_drop_exact_pred_match'):.4f}, "
             f"exact_acc {metric(row, 'val_object_prompt_drop_exact_acc'):.4f}"
+        )
+    if pd.notna(metric(row, "val_object_prompt_drop_Uselaptop_true_logit_drop")):
+        print(
+            "object-prompt action causality: "
+            "uselaptop_logit_drop "
+            f"{metric(row, 'val_object_prompt_drop_Uselaptop_true_logit_drop'):.4f}, "
+            "uselaptop_prob_drop "
+            f"{metric(row, 'val_object_prompt_drop_Uselaptop_true_prob_drop'):.4f}, "
+            "uselaptop_match "
+            f"{metric(row, 'val_object_prompt_drop_Uselaptop_pred_match'):.4f}, "
+            "readbook_logit_drop "
+            f"{metric(row, 'val_object_prompt_drop_Readbook_true_logit_drop'):.4f}, "
+            "watchtv_logit_drop "
+            f"{metric(row, 'val_object_prompt_drop_WatchTV_true_logit_drop'):.4f}, "
+            "phone_logit_drop "
+            f"{metric(row, 'val_object_prompt_drop_Usetelephone_true_logit_drop'):.4f}"
+        )
+    if pd.notna(metric(row, "val_token_selection_visual_keep_rate")):
+        print(
+            "token-selection retention: "
+            f"visual {metric(row, 'val_token_selection_visual_keep_rate'):.4f}, "
+            f"actor_box {metric(row, 'val_token_selection_actor_box_keep_rate'):.4f}, "
+            "visible_obj_box "
+            f"{metric(row, 'val_token_selection_visible_object_box_keep_rate'):.4f}, "
+            "teacher_obj_box "
+            f"{metric(row, 'val_token_selection_exact_teacher_object_keep_rate'):.4f}, "
+            "interaction_hm "
+            f"{metric(row, 'val_token_selection_interaction_heatmap_keep_rate'):.4f}, "
+            f"laptop_box {metric(row, 'val_token_selection_laptop_box_keep_rate'):.4f}, "
+            "uselaptop_teacher "
+            f"{metric(row, 'val_token_selection_Uselaptop_teacher_object_keep_rate'):.4f}"
         )
     if pd.notna(metric(row, "val_objectless_with_object_visible_acc")):
         print(
@@ -1180,9 +1385,10 @@ def main():
     print_decision(epoch_df)
 
     print("\nREAD THIS:")
-    print("- Main proof: val_f1/per-action accuracy stay healthy while prompt grounding, relation NULL/useful-mass, and interaction heatmaps improve.")
+    print("- Main proof: val_f1/per-action accuracy stay healthy while engagement, relation NULL/useful-mass, prompt grounding, and interaction heatmaps improve.")
     print("- PO-GUISE+ actor/video tokens make the decision; runtime objects update actor tokens inside the transformer before actor_head.")
     print("- Exact compatible detections should attend to the teacher object and raise relation useful mass.")
+    print("- Engagement should separate laptop/book/phone/TV state; this is the key low-motion object-use signal.")
     print("- Missing compatible detections and objectless actions should push relation attention to NULL.")
     print("- Objectless classes should route relation attention to NULL; hard-negative object-action pred rate remains the protection check.")
     print("- Heatmap/object-channel metrics are secondary; use --verbose when debugging teacher quality.")

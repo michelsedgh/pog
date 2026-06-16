@@ -39,7 +39,7 @@ except ImportError:
     DeepSpeedCPUAdam = None
 
 
-DEFAULT_MOTION_AUX_LOSS_WEIGHT = 0.25
+DEFAULT_MOTION_AUX_LOSS_WEIGHT = 0.0
 DEPLOY_KEY_ACTIONS = (
     "Uselaptop",
     "Readbook",
@@ -48,6 +48,20 @@ DEPLOY_KEY_ACTIONS = (
     "Sitdown",
     "Laydown",
 )
+ENGAGEMENT_STATE_NAMES = (
+    "none",
+    "laptop",
+    "book",
+    "phone_tablet",
+    "tv_monitor",
+    "drink",
+    "cooking",
+    "eating",
+    "other_object",
+)
+ENGAGEMENT_STATE_TO_INDEX = {
+    name: index for index, name in enumerate(ENGAGEMENT_STATE_NAMES)
+}
 
 
 class HeatmapModule(pl.LightningModule):
@@ -166,6 +180,19 @@ class HeatmapModule(pl.LightningModule):
         )
         if self.actor_object_relation_loss_weight < 0:
             raise ValueError("actor_object_relation_loss_weight must be >= 0")
+        self.actor_object_engagement_loss_weight = float(
+            hparams.get("actor_object_engagement_loss_weight", 0.0)
+        )
+        if self.actor_object_engagement_loss_weight < 0:
+            raise ValueError("actor_object_engagement_loss_weight must be >= 0")
+        if (
+            self.actor_object_engagement_loss_weight > 0
+            and not self.actor_object_relation_in_transformer
+        ):
+            raise ValueError(
+                "actor_object_engagement_loss_weight requires "
+                "actor_object_relation_in_transformer"
+            )
         self.actor_object_relation_null_loss_weight = float(
             hparams.get("actor_object_relation_null_loss_weight", 0.5)
         )
@@ -196,16 +223,16 @@ class HeatmapModule(pl.LightningModule):
                 "object_prompt_wrong_class and object_prompt_sensitivity losses "
                 "belong to the removed late object-action correction experiments."
             )
-        self.object_class_dropout_prob = float(
-            hparams.get("object_class_dropout_prob", 0.0)
-        )
-        if not 0.0 <= self.object_class_dropout_prob <= 1.0:
-            raise ValueError("object_class_dropout_prob must be in [0, 1]")
-        self.object_class_wrong_prob = float(
-            hparams.get("object_class_wrong_prob", 0.0)
-        )
-        if not 0.0 <= self.object_class_wrong_prob <= 1.0:
-            raise ValueError("object_class_wrong_prob must be in [0, 1]")
+        if (
+            float(hparams.get("object_class_dropout_prob", 0.0)) > 0
+            or float(hparams.get("object_class_wrong_prob", 0.0)) > 0
+        ):
+            raise ValueError(
+                "object_class_dropout_prob and object_class_wrong_prob are not "
+                "part of the clean detector-guided PO-GUISE+ run. Keep runtime "
+                "object class prompts faithful and use engagement supervision for "
+                "object-action semantics."
+            )
         self.num_classes = hparams.num_classes
         self.dataset_name = hparams.dataset_artifact
         self.is_toyota = str(self.dataset_name).lower() == "toyotasm"
@@ -323,6 +350,8 @@ class HeatmapModule(pl.LightningModule):
             "objectless",
             torch.empty(0, dtype=torch.long),
         )
+        self.engagement_state_names = ENGAGEMENT_STATE_NAMES
+        self.engagement_targets_by_action = self._build_engagement_targets_by_action()
         self.hard_negative_object_ids = {
             int(OBJECT_TO_ID[object_name]): object_name
             for object_names in self.action_object_map.values()
@@ -356,6 +385,7 @@ class HeatmapModule(pl.LightningModule):
                 "model.net.relation_heatmap_proj",
                 "model.actor_head",
                 "model.actor_motion_head",
+                "model.actor_object_engagement_head",
                 "model.presence_head",
             ]
             if self.model.hparams.get("use_register_tokens", 0):
@@ -475,6 +505,8 @@ class HeatmapModule(pl.LightningModule):
                 params += list(self.model.actor_head.parameters())
             if getattr(self.model, "actor_motion_head", None) is not None:
                 params += list(self.model.actor_motion_head.parameters())
+            if getattr(self.model, "actor_object_engagement_head", None) is not None:
+                params += list(self.model.actor_object_engagement_head.parameters())
             if self.model.presence_head is not None:
                 params += list(self.model.presence_head.parameters())
             for name, param in self.model.net.named_parameters():
@@ -632,6 +664,50 @@ class HeatmapModule(pl.LightningModule):
         if objectless_indices:
             groups["objectless"] = torch.tensor(objectless_indices, dtype=torch.long)
         return groups
+
+    def _engagement_state_for_action(self, action_name):
+        action_name = str(action_name)
+        objectless_names = set(
+            toyota_objectless_action_names(self.task_type, self.action_taxonomy)
+        )
+        if action_name in objectless_names:
+            return "none"
+        if action_name == "Uselaptop":
+            return "laptop"
+        if action_name == "Readbook":
+            return "book"
+        if action_name in {"Usetelephone", "Usetablet"}:
+            return "phone_tablet"
+        if action_name == "WatchTV":
+            return "tv_monitor"
+        if action_name == "Drink" or action_name.startswith("Drink."):
+            return "drink"
+        if action_name.startswith("Pour."):
+            return "drink"
+        if (
+            action_name == "Cut"
+            or action_name == "Cutbread"
+            or action_name.startswith("Cook.")
+            or action_name.startswith("Makecoffee.")
+            or action_name.startswith("Maketea.")
+        ):
+            return "cooking"
+        if action_name.startswith("Eat.") or action_name == "Takepills":
+            return "eating"
+        if action_name in self.action_object_map:
+            return "other_object"
+        return None
+
+    def _build_engagement_targets_by_action(self):
+        targets = torch.full((int(self.num_classes),), -1, dtype=torch.long)
+        if not self.is_toyota:
+            return targets
+        for action_idx, action_name in enumerate(self.action_names):
+            state_name = self._engagement_state_for_action(action_name)
+            if state_name is None:
+                continue
+            targets[int(action_idx)] = int(ENGAGEMENT_STATE_TO_INDEX[state_name])
+        return targets
 
     def _interaction_audit_action_indices(self):
         if not self.is_toyota:
@@ -1085,57 +1161,6 @@ class HeatmapModule(pl.LightningModule):
             ),
         }
 
-    def _object_class_dropout_inputs(self, object_inputs, stage):
-        if stage != "train" or not object_inputs:
-            return object_inputs
-        class_drop = float(self.object_class_dropout_prob)
-        class_wrong = float(self.object_class_wrong_prob)
-        if class_drop <= 0.0 and class_wrong <= 0.0:
-            return object_inputs
-
-        output = {name: value.clone() for name, value in object_inputs.items()}
-        object_valid = output["object_valid"]
-        object_classes = output["object_classes"]
-        if not object_valid.any():
-            return output
-
-        none_id = int(self.model.hparams.get("num_object_classes", NUM_OBJECT_CLASSES))
-        if class_drop > 0.0:
-            drop_mask = (
-                object_valid
-                & (torch.rand_like(output["object_confs"]) < class_drop)
-            )
-            object_classes[drop_mask] = none_id
-            self._log_scalar(
-                "train_object_class_dropout_rate",
-                drop_mask.float().mean(),
-                int(drop_mask.numel()),
-            )
-        if class_wrong > 0.0:
-            wrong_mask = (
-                object_valid
-                & (object_classes != none_id)
-                & (torch.rand_like(output["object_confs"]) < class_wrong)
-            )
-            if wrong_mask.any():
-                num_classes = int(
-                    self.model.hparams.get("num_object_classes", NUM_OBJECT_CLASSES)
-                )
-                replacement = torch.randint(
-                    low=0,
-                    high=num_classes,
-                    size=object_classes.shape,
-                    device=object_classes.device,
-                    dtype=object_classes.dtype,
-                )
-                object_classes[wrong_mask] = replacement[wrong_mask]
-            self._log_scalar(
-                "train_object_class_wrong_rate",
-                wrong_mask.float().mean(),
-                int(wrong_mask.numel()),
-            )
-        return output
-
     def _exact_teacher_object_info(self, actions, valid, target, device):
         required = (
             "object_classes",
@@ -1168,27 +1193,36 @@ class HeatmapModule(pl.LightningModule):
         if num_objects <= 0:
             return None
 
-        idx_1based = (selected_indices - 1).clamp(0, num_objects - 1)
-        idx_0based = selected_indices.clamp(0, num_objects - 1)
-        in_range_1based = (
+        # Toyota interaction_object_index uses one-based object slots in the
+        # current preprocessed targets. Keep the zero-based interpretation
+        # around only as a compatibility audit path.
+        slot_index_from_one_based = (selected_indices - 1).clamp(0, num_objects - 1)
+        slot_index_from_zero_based = selected_indices.clamp(0, num_objects - 1)
+        in_range_one_based = (
             selected_valid
             & (selected_indices > 0)
             & ((selected_indices - 1) < num_objects)
         )
-        in_range_0based = (
+        in_range_zero_based = (
             selected_valid
             & (selected_indices >= 0)
             & (selected_indices < num_objects)
         )
-        class_1based = object_classes.gather(1, idx_1based)
-        class_0based = object_classes.gather(1, idx_0based)
-        valid_1based = in_range_1based & object_valid.gather(1, idx_1based)
-        valid_0based = in_range_0based & object_valid.gather(1, idx_0based)
+        class_from_one_based = object_classes.gather(1, slot_index_from_one_based)
+        class_from_zero_based = object_classes.gather(1, slot_index_from_zero_based)
+        valid_from_one_based = in_range_one_based & object_valid.gather(
+            1,
+            slot_index_from_one_based,
+        )
+        valid_from_zero_based = in_range_zero_based & object_valid.gather(
+            1,
+            slot_index_from_zero_based,
+        )
 
         known_action = torch.zeros_like(valid, dtype=torch.bool)
         any_compatible = torch.zeros_like(valid, dtype=torch.bool)
-        compatible_1based = torch.zeros_like(valid, dtype=torch.bool)
-        compatible_0based = torch.zeros_like(valid, dtype=torch.bool)
+        compatible_from_one_based = torch.zeros_like(valid, dtype=torch.bool)
+        compatible_from_zero_based = torch.zeros_like(valid, dtype=torch.bool)
         for action_idx, object_ids in self.action_object_ids_by_index.items():
             action_mask = valid & (actions == int(action_idx))
             if not action_mask.any():
@@ -1200,14 +1234,18 @@ class HeatmapModule(pl.LightningModule):
                 object_classes.unsqueeze(-1) == object_ids.view(1, 1, -1)
             ).any(dim=-1) & object_valid
             any_compatible |= action_mask & object_match.any(dim=1, keepdim=True)
-            class_match_1based = (
-                class_1based.unsqueeze(-1) == object_ids.view(1, 1, -1)
+            class_match_one_based = (
+                class_from_one_based.unsqueeze(-1) == object_ids.view(1, 1, -1)
             ).any(dim=-1)
-            class_match_0based = (
-                class_0based.unsqueeze(-1) == object_ids.view(1, 1, -1)
+            class_match_zero_based = (
+                class_from_zero_based.unsqueeze(-1) == object_ids.view(1, 1, -1)
             ).any(dim=-1)
-            compatible_1based |= action_mask & valid_1based & class_match_1based
-            compatible_0based |= action_mask & valid_0based & class_match_0based
+            compatible_from_one_based |= (
+                action_mask & valid_from_one_based & class_match_one_based
+            )
+            compatible_from_zero_based |= (
+                action_mask & valid_from_zero_based & class_match_zero_based
+            )
 
         return {
             "actions": actions,
@@ -1215,15 +1253,262 @@ class HeatmapModule(pl.LightningModule):
             "object_classes": object_classes,
             "object_valid": object_valid,
             "selected_indices": selected_indices,
-            "idx_1based": idx_1based,
-            "idx_0based": idx_0based,
-            "valid_1based": valid_1based,
-            "valid_0based": valid_0based,
+            "slot_index_from_one_based": slot_index_from_one_based,
+            "slot_index_from_zero_based": slot_index_from_zero_based,
+            "valid_from_one_based": valid_from_one_based,
+            "valid_from_zero_based": valid_from_zero_based,
             "known_action": known_action,
             "any_compatible": any_compatible,
-            "compatible_1based": compatible_1based,
-            "compatible_0based": compatible_0based,
+            "compatible_from_one_based": compatible_from_one_based,
+            "compatible_from_zero_based": compatible_from_zero_based,
         }
+
+    def _log_token_selection_diagnostics(self, stage, actions, valid, target):
+        if stage == "train":
+            return
+        net = getattr(self.model, "net", None)
+        diagnostics = getattr(net, "last_token_selection_diagnostics", None)
+        if not diagnostics:
+            return
+        selected_mask = diagnostics.get("selected_mask")
+        window_size = diagnostics.get("window_size")
+        if selected_mask is None or window_size is None:
+            return
+
+        device = selected_mask.device
+        selected_mask = selected_mask.to(device=device, dtype=torch.float32)
+        if selected_mask.ndim != 2:
+            raise RuntimeError(
+                "token-selection selected_mask must have shape [B,N], got "
+                f"{tuple(selected_mask.shape)}"
+            )
+        batch_size, num_tokens = selected_mask.shape
+        count = int(batch_size)
+        self._log_scalar(
+            f"{stage}_token_selection_visual_keep_rate",
+            selected_mask.mean(),
+            count,
+        )
+        self._log_scalar(
+            f"{stage}_token_selection_visual_keep_count",
+            selected_mask.sum(dim=-1).mean(),
+            count,
+        )
+
+        def log_region_keep_rate(metric_name, prior, sample_mask, selected=None):
+            if prior is None:
+                return
+            prior = prior.to(device=device, dtype=torch.float32)
+            selected_for_prior = selected_mask if selected is None else selected
+            selected_for_prior = selected_for_prior.to(device=device, dtype=torch.float32)
+            if prior.shape != selected_for_prior.shape:
+                raise RuntimeError(
+                    f"{metric_name} prior shape {tuple(prior.shape)} does not "
+                    f"match selected mask {tuple(selected_for_prior.shape)}"
+                )
+            sample_mask = sample_mask.to(device=device, dtype=torch.bool)
+            denom = prior.sum(dim=-1)
+            keep_valid = sample_mask & (denom > 0)
+            if not keep_valid.any():
+                return
+            keep_rate = (prior * selected_for_prior).sum(dim=-1) / denom.clamp_min(
+                1.0e-6
+            )
+            sample_count = int(keep_valid.sum().item())
+            self._log_scalar(
+                f"{stage}_{metric_name}",
+                keep_rate[keep_valid].mean(),
+                sample_count,
+            )
+            self._log_count(
+                f"{stage}_{metric_name}_count",
+                keep_valid.float().sum(),
+            )
+
+        if not hasattr(net, "_make_box_token_prior"):
+            return
+
+        actions = actions.to(device=device, dtype=torch.long)
+        valid = valid.to(device=device, dtype=torch.bool)
+        boxes = target.get("boxes")
+        if boxes is not None:
+            boxes = boxes.to(device=device, dtype=torch.float32)
+            actor_prior = net._make_box_token_prior(
+                boxes,
+                valid,
+                window_size,
+                expand=float(self.model.hparams.get("actor_bbox_prior_expand", 1.75)),
+            )
+            log_region_keep_rate(
+                "token_selection_actor_box_keep_rate",
+                actor_prior,
+                valid.any(dim=1),
+            )
+
+        object_boxes = target.get("object_boxes")
+        object_valid = target.get("object_valid")
+        object_classes = target.get("object_classes")
+        if (
+            object_boxes is not None
+            and object_valid is not None
+            and object_classes is not None
+        ):
+            object_boxes = object_boxes.to(device=device, dtype=torch.float32)
+            object_valid = object_valid.to(device=device, dtype=torch.bool)
+            object_classes = object_classes.to(device=device, dtype=torch.long)
+            object_prior = net._make_box_token_prior(
+                object_boxes,
+                object_valid,
+                window_size,
+                expand=float(
+                    self.model.hparams.get(
+                        "actor_object_prompt_box_prior_expand",
+                        1.25,
+                    )
+                ),
+            )
+            log_region_keep_rate(
+                "token_selection_visible_object_box_keep_rate",
+                object_prior,
+                object_valid.any(dim=1),
+            )
+            for object_name in ("laptop", "book", "phone", "tv_monitor"):
+                object_id = OBJECT_TO_ID.get(object_name)
+                if object_id is None:
+                    continue
+                class_valid = object_valid & (object_classes == int(object_id))
+                class_prior = net._make_box_token_prior(
+                    object_boxes,
+                    class_valid,
+                    window_size,
+                    expand=float(
+                        self.model.hparams.get(
+                            "actor_object_prompt_box_prior_expand",
+                            1.25,
+                        )
+                    ),
+                )
+                safe_name = object_name.replace(".", "_")
+                log_region_keep_rate(
+                    f"token_selection_{safe_name}_box_keep_rate",
+                    class_prior,
+                    class_valid.any(dim=1),
+                )
+
+            info = self._exact_teacher_object_info(actions, valid, target, device)
+            exact_compatible = None
+            if info is not None:
+                exact_compatible = (
+                    info["valid"]
+                    & info["known_action"]
+                    & info["compatible_from_one_based"]
+                )
+            if exact_compatible is not None and exact_compatible.any():
+                B, A = actions.shape
+                if B != batch_size:
+                    raise RuntimeError(
+                        "token-selection diagnostics batch mismatch: "
+                        f"{B} actions vs {batch_size} selected masks"
+                    )
+                teacher_slots = info["slot_index_from_one_based"].to(
+                    device=device,
+                    dtype=torch.long,
+                )
+                teacher_boxes = object_boxes.gather(
+                    1,
+                    teacher_slots.unsqueeze(-1).expand(-1, -1, 4),
+                )
+                flat_teacher_boxes = teacher_boxes.reshape(B * A, 1, 4)
+                flat_teacher_valid = exact_compatible.reshape(B * A, 1)
+                flat_prior = net._make_box_token_prior(
+                    flat_teacher_boxes,
+                    flat_teacher_valid,
+                    window_size,
+                    expand=float(
+                        self.model.hparams.get(
+                            "actor_object_prompt_box_prior_expand",
+                            1.25,
+                        )
+                    ),
+                )
+                flat_selected = (
+                    selected_mask[:, None, :]
+                    .expand(-1, A, -1)
+                    .reshape(B * A, num_tokens)
+                )
+                flat_exact = exact_compatible.reshape(B * A)
+                log_region_keep_rate(
+                    "token_selection_exact_teacher_object_keep_rate",
+                    flat_prior,
+                    flat_exact,
+                    selected=flat_selected,
+                )
+                for action_name in (
+                    "Uselaptop",
+                    "Readbook",
+                    "WatchTV",
+                    "Usetelephone",
+                ):
+                    action_idx = self._action_index(action_name)
+                    if action_idx is None:
+                        continue
+                    action_mask = exact_compatible & (actions == int(action_idx))
+                    safe_name = action_name.replace(".", "_")
+                    log_region_keep_rate(
+                        f"token_selection_{safe_name}_teacher_object_keep_rate",
+                        flat_prior,
+                        action_mask.reshape(B * A),
+                        selected=flat_selected,
+                    )
+
+        if (
+            "interaction_heatmap" in target
+            and "interaction_heatmap_valid" in target
+            and len(window_size) == 3
+        ):
+            target_heatmap = target["interaction_heatmap"].to(
+                device=device,
+                dtype=torch.float32,
+            )
+            heatmap_valid = target["interaction_heatmap_valid"].to(
+                device=device,
+                dtype=torch.bool,
+            )
+            if target_heatmap.ndim != 4:
+                raise RuntimeError(
+                    "interaction_heatmap must have shape [B,A,H,W], got "
+                    f"{tuple(target_heatmap.shape)}"
+                )
+            B, A, _, _ = target_heatmap.shape
+            frames, height, width = [int(v) for v in window_size]
+            flat_heatmap = target_heatmap.reshape(B * A, 1, *target_heatmap.shape[-2:])
+            spatial_prior = F.interpolate(
+                flat_heatmap,
+                size=(height, width),
+                mode="area",
+            ).reshape(B * A, height * width)
+            heatmap_prior = (
+                spatial_prior[:, None, :]
+                .expand(-1, frames, -1)
+                .reshape(B * A, frames * height * width)
+                .clamp_min(0.0)
+            )
+            flat_selected = (
+                selected_mask[:, None, :]
+                .expand(-1, A, -1)
+                .reshape(B * A, num_tokens)
+            )
+            heatmap_sample_valid = (
+                valid
+                & heatmap_valid
+                & (target_heatmap.flatten(2).sum(dim=-1) > 0)
+            )
+            log_region_keep_rate(
+                "token_selection_interaction_heatmap_keep_rate",
+                heatmap_prior,
+                heatmap_sample_valid.reshape(B * A),
+                selected=flat_selected,
+            )
 
     def _object_prompt_grounding_loss(self, stage, actions, valid, target):
         if (
@@ -1249,11 +1534,11 @@ class HeatmapModule(pl.LightningModule):
         exact_compatible = (
             info["valid"]
             & info["known_action"]
-            & info["compatible_1based"]
+            & info["compatible_from_one_based"]
         )
         if not exact_compatible.any():
             return None
-        target_slots = info["idx_1based"][exact_compatible].to(
+        target_slots = info["slot_index_from_one_based"][exact_compatible].to(
             device=prompt_logits.device,
             dtype=torch.long,
         )
@@ -1595,7 +1880,7 @@ class HeatmapModule(pl.LightningModule):
             exact_compatible = (
                 info["valid"]
                 & info["known_action"]
-                & info["compatible_1based"]
+                & info["compatible_from_one_based"]
             )
 
         has_objectless = bool(objectless_visible.any().item())
@@ -1778,6 +2063,58 @@ class HeatmapModule(pl.LightningModule):
                     (dropped_pred[exact_compatible] == labels).float().mean(),
                     count,
                 )
+                for action_name in (
+                    "Uselaptop",
+                    "Readbook",
+                    "WatchTV",
+                    "Usetelephone",
+                ):
+                    action_idx = self._action_index(action_name)
+                    if action_idx is None:
+                        continue
+                    action_mask = exact_compatible & (actions == int(action_idx))
+                    if not action_mask.any():
+                        continue
+                    action_labels = actions[action_mask]
+                    action_base_logits = preds[action_mask].gather(
+                        1,
+                        action_labels.unsqueeze(1),
+                    ).squeeze(1)
+                    action_dropped_logits = dropped_preds[action_mask].gather(
+                        1,
+                        action_labels.unsqueeze(1),
+                    ).squeeze(1)
+                    action_base_prob = base_prob[action_mask].gather(
+                        1,
+                        action_labels.unsqueeze(1),
+                    ).squeeze(1)
+                    action_dropped_prob = dropped_prob[action_mask].gather(
+                        1,
+                        action_labels.unsqueeze(1),
+                    ).squeeze(1)
+                    action_count = int(action_labels.numel())
+                    safe_name = action_name.replace(".", "_")
+                    self._log_scalar(
+                        f"{stage}_object_prompt_drop_{safe_name}_true_logit_drop",
+                        (action_base_logits - action_dropped_logits).mean(),
+                        action_count,
+                    )
+                    self._log_scalar(
+                        f"{stage}_object_prompt_drop_{safe_name}_true_prob_drop",
+                        (action_base_prob - action_dropped_prob).mean(),
+                        action_count,
+                    )
+                    self._log_scalar(
+                        f"{stage}_object_prompt_drop_{safe_name}_pred_match",
+                        (base_pred[action_mask] == dropped_pred[action_mask])
+                        .float()
+                        .mean(),
+                        action_count,
+                    )
+                    self._log_count(
+                        f"{stage}_object_prompt_drop_{safe_name}_count",
+                        action_mask.float().sum(),
+                    )
         return None
 
     def _log_actor_object_prompt_diagnostics(
@@ -1856,12 +2193,12 @@ class HeatmapModule(pl.LightningModule):
             count = int(valid_known.sum().item())
             self._log_scalar(
                 f"{stage}_object_prompt_exact_teacher_valid_rate_1based",
-                info["valid_1based"][valid_known].float().mean(),
+                info["valid_from_one_based"][valid_known].float().mean(),
                 count,
             )
             self._log_scalar(
                 f"{stage}_object_prompt_exact_compatible_rate_1based",
-                info["compatible_1based"][valid_known].float().mean(),
+                info["compatible_from_one_based"][valid_known].float().mean(),
                 count,
             )
             self._log_scalar(
@@ -1873,12 +2210,12 @@ class HeatmapModule(pl.LightningModule):
         exact_compatible = (
             info["valid"]
             & info["known_action"]
-            & info["compatible_1based"]
+            & info["compatible_from_one_based"]
         )
         if not exact_compatible.any():
             return
 
-        target_slots = info["idx_1based"][exact_compatible].to(
+        target_slots = info["slot_index_from_one_based"][exact_compatible].to(
             device=device,
             dtype=torch.long,
         )
@@ -1971,7 +2308,7 @@ class HeatmapModule(pl.LightningModule):
         objectless = self._labels_in_indices(actions, self.objectless_action_indices)
         objectless = valid & objectless
         known_objectful = info["valid"] & info["known_action"]
-        exact_compatible = known_objectful & info["compatible_1based"]
+        exact_compatible = known_objectful & info["compatible_from_one_based"]
         missing_compatible = known_objectful & ~info["any_compatible"]
 
         target_index = torch.zeros_like(actions, dtype=torch.long, device=device)
@@ -2045,6 +2382,81 @@ class HeatmapModule(pl.LightningModule):
         )
         return weighted_loss
 
+    def _actor_object_engagement_loss(self, stage, actions, valid):
+        if self.actor_object_engagement_loss_weight <= 0:
+            return None
+        logits = getattr(self.model, "last_actor_object_engagement_logits", None)
+        if logits is None:
+            raise RuntimeError(
+                "actor_object_engagement_loss_weight is enabled, but the model did "
+                "not produce last_actor_object_engagement_logits"
+            )
+        if logits.ndim != 3:
+            raise RuntimeError(
+                "actor-object engagement logits must have shape [B,A,S], got "
+                f"{tuple(logits.shape)}"
+            )
+        device = logits.device
+        valid = valid.to(device=device, dtype=torch.bool)
+        actions = actions.to(device=device, dtype=torch.long)
+        in_range = valid & (actions >= 0) & (actions < int(self.num_classes))
+        if not in_range.any():
+            return None
+
+        targets_by_action = self.engagement_targets_by_action.to(device=device)
+        targets = torch.full_like(actions, -1, dtype=torch.long, device=device)
+        targets[in_range] = targets_by_action[actions[in_range]]
+        supervised = in_range & (targets >= 0)
+        if not supervised.any():
+            return None
+
+        loss = F.cross_entropy(logits[supervised].float(), targets[supervised])
+        count = int(supervised.sum().item())
+        self.log(
+            f"{stage}_loss_actor_object_engagement",
+            loss,
+            on_step=stage == "train",
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+        )
+        with torch.no_grad():
+            pred = logits.argmax(dim=-1)
+            self._log_scalar(
+                f"{stage}_actor_object_engagement_acc",
+                (pred[supervised] == targets[supervised]).float().mean(),
+                count,
+            )
+            for state_idx, state_name in enumerate(self.engagement_state_names):
+                state_mask = supervised & (targets == int(state_idx))
+                if not state_mask.any():
+                    continue
+                self._log_scalar(
+                    f"{stage}_actor_object_engagement_{state_name}_acc",
+                    (pred[state_mask] == targets[state_mask]).float().mean(),
+                    int(state_mask.sum().item()),
+                )
+            action_mask = supervised & self._labels_in_indices(
+                actions,
+                torch.tensor(
+                    [
+                        self.action_to_index[action_name]
+                        for action_name in ("Uselaptop", "Readbook", "WatchTV")
+                        if action_name in self.action_to_index
+                    ],
+                    dtype=torch.long,
+                    device=device,
+                ),
+            )
+            if action_mask.any():
+                self._log_scalar(
+                    f"{stage}_actor_object_engagement_laptop_book_tv_acc",
+                    (pred[action_mask] == targets[action_mask]).float().mean(),
+                    int(action_mask.sum().item()),
+                )
+        return loss * self.actor_object_engagement_loss_weight
+
     def _log_actor_object_relation_metrics(
         self,
         stage,
@@ -2074,7 +2486,7 @@ class HeatmapModule(pl.LightningModule):
                 )
                 object_attention = last_aux.get("object_attention")
                 if object_attention is not None:
-                    teacher_slot = info["idx_1based"].to(
+                    teacher_slot = info["slot_index_from_one_based"].to(
                         device=object_attention.device,
                         dtype=torch.long,
                     )
@@ -2345,13 +2757,12 @@ class HeatmapModule(pl.LightningModule):
             raise ValueError(f"{stage} actor batch has no valid actor slots")
 
         object_inputs = self._object_inputs_from_target(target, imgs.device)
-        model_object_inputs = self._object_class_dropout_inputs(object_inputs, stage)
         data = self.model(
             imgs,
             boxes=boxes,
             valid=valid,
             action_labels=actions,
-            **model_object_inputs,
+            **object_inputs,
         )
         preds, hm_preds, presence_logits = self._unpack_model_data(data)
 
@@ -2399,6 +2810,14 @@ class HeatmapModule(pl.LightningModule):
         if loss_actor_object_relation is not None:
             loss_main_task = loss_main_task + loss_actor_object_relation
 
+        loss_actor_object_engagement = self._actor_object_engagement_loss(
+            stage,
+            actions,
+            valid,
+        )
+        if loss_actor_object_engagement is not None:
+            loss_main_task = loss_main_task + loss_actor_object_engagement
+
         loss_hard_objectless = self._objectless_object_action_suppression_loss(
             stage,
             preds,
@@ -2424,11 +2843,12 @@ class HeatmapModule(pl.LightningModule):
             loss_object_prompt_grounding is not None
             and self.object_prompt_grounding_loss_weight > 0
         ):
-            grounding_aux_terms.append(
-                loss_object_prompt_grounding
-                * self.object_prompt_grounding_loss_weight
+            loss_main_task = (
+                loss_main_task
+                + loss_object_prompt_grounding * self.object_prompt_grounding_loss_weight
             )
 
+        self._log_token_selection_diagnostics(stage, actions, valid, target)
         self._log_actor_object_prompt_diagnostics(
             stage,
             actions,
@@ -2463,7 +2883,7 @@ class HeatmapModule(pl.LightningModule):
                 actions,
                 preds,
                 target,
-                model_object_inputs,
+                object_inputs,
             )
         )
         if (
@@ -2573,13 +2993,13 @@ class HeatmapModule(pl.LightningModule):
                         self.objectless_action_indices,
                     )
                     known_object = valid & heatmap_info["known_action"]
-                    teacher_missing = known_object & ~heatmap_info["valid_1based"]
+                    teacher_missing = known_object & ~heatmap_info["valid_from_one_based"]
                     teacher_mismatch = (
                         known_object
-                        & heatmap_info["valid_1based"]
-                        & ~heatmap_info["compatible_1based"]
+                        & heatmap_info["valid_from_one_based"]
+                        & ~heatmap_info["compatible_from_one_based"]
                     )
-                    exact_compatible = known_object & heatmap_info["compatible_1based"]
+                    exact_compatible = known_object & heatmap_info["compatible_from_one_based"]
 
                     heatmap_valid = (heatmap_valid & ~teacher_missing) | (
                         valid & heatmap_objectless

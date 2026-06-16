@@ -10,6 +10,8 @@ import os.path
 import pickle
 from datasets.object_vocab import NUM_OBJECT_CLASSES
 
+ACTOR_OBJECT_ENGAGEMENT_NUM_STATES = 9
+
 
 def load_state_dict(
     model, state_dict, prefix="", ignore_missing="relative_position_index"
@@ -134,6 +136,31 @@ class Classifier(nn.Module):
         return self.classifier(x)
 
 
+class ActorObjectEngagementHead(nn.Module):
+    """Auxiliary head that teaches actor tokens object-interaction state."""
+
+    def __init__(self, dim, num_states):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(3 * dim),
+            nn.Linear(3 * dim, dim),
+            nn.GELU(),
+            nn.Linear(dim, int(num_states)),
+        )
+
+    def forward(self, actor_tokens, object_context):
+        if actor_tokens.shape != object_context.shape:
+            raise RuntimeError(
+                "actor/object engagement inputs must have matching shape, got "
+                f"{tuple(actor_tokens.shape)} and {tuple(object_context.shape)}"
+            )
+        x = torch.cat(
+            [actor_tokens, object_context, actor_tokens * object_context],
+            dim=-1,
+        )
+        return self.net(x)
+
+
 class POGUISE(pl.LightningModule):
     def __init__(self, net_size="t", pretrained=None, **kwargs):
         super().__init__()
@@ -151,6 +178,9 @@ class POGUISE(pl.LightningModule):
         )
         self.actor_object_relation_in_transformer = bool(
             self.hparams.get("actor_object_relation_in_transformer", 0)
+        )
+        self.actor_object_engagement_enabled = (
+            float(self.hparams.get("actor_object_engagement_loss_weight", 0.0)) > 0.0
         )
         if bool(self.hparams.get("actor_object_slot_head", 0)):
             raise ValueError(
@@ -187,6 +217,11 @@ class POGUISE(pl.LightningModule):
         if self.actor_object_relation_in_transformer and not self.actor_object_prompt_tokens_enabled:
             raise ValueError(
                 "actor_object_relation_in_transformer requires actor_object_prompt_tokens"
+            )
+        if self.actor_object_engagement_enabled and not self.actor_object_relation_in_transformer:
+            raise ValueError(
+                "actor_object_engagement_loss_weight requires "
+                "actor_object_relation_in_transformer"
             )
         if self.actor_interaction_heatmaps and not self.actor_prompt:
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
@@ -434,14 +469,20 @@ class POGUISE(pl.LightningModule):
         # Mapping to classification output
         self.net.head = nn.Identity(self.net.num_features, self.net.num_features)
         self.head = nn.Linear(self.net.num_features, self.hparams.num_classes)
+        self.actor_object_engagement_head = None
         if self.actor_prompt:
             self.actor_head = nn.Linear(
                 self.net.num_features,
                 self.hparams.num_classes,
             )
+            if self.actor_object_engagement_enabled:
+                self.actor_object_engagement_head = ActorObjectEngagementHead(
+                    self.net.num_features,
+                    ACTOR_OBJECT_ENGAGEMENT_NUM_STATES,
+                )
             self.actor_motion_head = (
                 nn.Linear(self.net.num_features, self.hparams.num_classes)
-                if float(self.hparams.get("motion_aux_loss_weight", 0.25)) > 0.0
+                if float(self.hparams.get("motion_aux_loss_weight", 0.0)) > 0.0
                 else None
             )
             self.presence_head = (
@@ -637,6 +678,8 @@ class POGUISE(pl.LightningModule):
             self.last_actor_object_prompt_attention_logits = None
             self.last_actor_object_prompt_attention = None
             self.last_actor_object_prompt_valid = None
+            self.last_actor_object_relation_context = None
+            self.last_actor_object_engagement_logits = None
             self.last_actor_action_tokens = None
             self.last_actor_object_relation_aux = getattr(
                 self.net,
@@ -676,6 +719,28 @@ class POGUISE(pl.LightningModule):
                     self.last_actor_object_prompt_attention = grounding[
                         "object_attention"
                     ]
+            relation_context = None
+            if self.last_actor_object_relation_aux:
+                last_block = sorted(
+                    self.last_actor_object_relation_aux.keys(),
+                    key=lambda value: int(value),
+                )[-1]
+                relation_context = self.last_actor_object_relation_aux[last_block].get(
+                    "object_context"
+                )
+                if relation_context is not None:
+                    relation_context = relation_context.to(
+                        device=x_actor.device,
+                        dtype=x_actor.dtype,
+                    )
+                    self.last_actor_object_relation_context = relation_context
+            if (
+                self.actor_object_engagement_head is not None
+                and relation_context is not None
+            ):
+                self.last_actor_object_engagement_logits = (
+                    self.actor_object_engagement_head(x_actor, relation_context)
+                )
             if self.actor_motion_head is not None:
                 self.last_actor_motion_logits = self.actor_motion_head(x_actor)
             self.last_actor_action_tokens = x_actor
@@ -749,8 +814,6 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--num_scene_object_tokens", type=int, default=32)
         parser.add_argument("--num_object_classes", type=int, default=19)
         parser.add_argument("--actor_object_prompt_tokens", type=int, default=0)
-        parser.add_argument("--actor_object_base_fusion", type=int, default=0)
-        parser.add_argument("--actor_object_residual_head", type=int, default=0)
         parser.add_argument(
             "--actor_object_prompt_box_prior_weight",
             type=float,

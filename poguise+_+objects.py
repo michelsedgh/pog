@@ -35,11 +35,9 @@ FRAMES_PART2_TAR_FILE_ID = "1BGn2PAyNrH2k59snixN5z7eTFFVEmkBW"
 FRAMES_PART2_SQLITE_FILE_ID = "1Qy8wk3_y2dnSKEuNCMsM3tV3LrlgVY1S"
 
 OBJECT_CACHE_FILE_ID = "1kmCdEhfH_LUBNDlC4C1pUXtwz9PEORyp"
-RESUME_CKPT_FILE_ID = "1RcZZLkaonD8nmD6Bf_5HSTSU3aYaAsO2"
 HARD_NEGATIVES_FILE_ID = "13u7AZ5-MRrQMe6k2wwK1HW3S7kmn8_7v"
 
 SKELETON_ZIP = f"{DATA_DIR}/toyota_smarthome_skeleton_v1.2.zip"
-RESUME_CKPT_PATH = f"{DATA_DIR}/object_v2_resume_epoch.ckpt"
 OBJECT_DETECTOR_CACHE = f"{DATA_DIR}/toyota_rfdetr_2xlarge_coco19_full.jsonl"
 HARD_NEGATIVE_MANIFEST = f"{DATA_DIR}/hard_negatives.json"
 
@@ -163,7 +161,6 @@ downloads = [
     (FRAMES_PART2_TAR_FILE_ID, FRAMES_PART2_TAR),
     (FRAMES_PART2_SQLITE_FILE_ID, FRAMES_PART2_SQLITE),
     (OBJECT_CACHE_FILE_ID, OBJECT_DETECTOR_CACHE),
-    (RESUME_CKPT_FILE_ID, RESUME_CKPT_PATH),
     (HARD_NEGATIVES_FILE_ID, HARD_NEGATIVE_MANIFEST),
 ]
 
@@ -224,7 +221,7 @@ for sample in sample_dirs:
     sample_frames = sorted(os.listdir(sample_path))[:3]
     print(sample, sample_frames, flush=True)
 
-for path in [SKELETON_ZIP, OBJECT_DETECTOR_CACHE, RESUME_CKPT_PATH, HARD_NEGATIVE_MANIFEST]:
+for path in [SKELETON_ZIP, OBJECT_DETECTOR_CACHE, HARD_NEGATIVE_MANIFEST]:
     if not os.path.exists(path) or os.path.getsize(path) <= 0:
         raise RuntimeError(f"Missing or empty required file: {path}")
     print(f"Verified: {path} ({os.path.getsize(path) / 1e9:.2f} GB)", flush=True)
@@ -233,8 +230,6 @@ with open("/content/poguise_colab_env.sh", "w") as f:
     f.write(f"""export REPO_DIR='{REPO_DIR}'
 export DATA_DIR='{DATA_DIR}'
 export SKELETON_ZIP='{SKELETON_ZIP}'
-export CKPT_PATH='{RESUME_CKPT_PATH}'
-export RESUME_CKPT_PATH='{RESUME_CKPT_PATH}'
 export OBJECT_DETECTOR_CACHE='{OBJECT_DETECTOR_CACHE}'
 export HARD_NEGATIVE_MANIFEST='{HARD_NEGATIVE_MANIFEST}'
 export FRAME_COUNT_CACHE='{FRAME_COUNT_CACHE}'
@@ -255,7 +250,6 @@ print("Frame union:", FRAME_UNION_DIR, flush=True)
 print("Skeleton zip:", SKELETON_ZIP, flush=True)
 print("Object cache:", OBJECT_DETECTOR_CACHE, flush=True)
 print("Hard negatives:", HARD_NEGATIVE_MANIFEST, flush=True)
-print("Resume checkpoint:", RESUME_CKPT_PATH, flush=True)
 
 from pathlib import Path
 from datetime import datetime
@@ -397,8 +391,60 @@ def run_training_with_epoch_summaries(cmd, run_name, epoch_dir, poll_secs=20):
     summarize_run(run_dir, verbose=True)
     return str(run_dir)
 
+def parse_object_pressure_preset(argv):
+    argv = list(argv)
+    preset = "clean"
+    if "--object-pressure" in argv:
+        idx = argv.index("--object-pressure")
+        if idx + 1 >= len(argv):
+            raise SystemExit("--object-pressure requires clean or wild")
+        preset = argv[idx + 1].strip().lower()
+        del argv[idx : idx + 2]
+    if len(argv) > 1:
+        raise SystemExit(f"Unknown launcher arguments: {' '.join(argv[1:])}")
+    if preset not in {"clean", "wild"}:
+        raise SystemExit("--object-pressure must be clean or wild")
+    return preset
+
+def set_cmd_arg(cmd, key, value):
+    value = str(value)
+    if key in cmd:
+        idx = cmd.index(key)
+        if idx + 1 >= len(cmd):
+            raise RuntimeError(f"{key} is missing a value")
+        cmd[idx + 1] = value
+    else:
+        cmd.extend([key, value])
+
+def apply_object_pressure_preset(cmd, preset):
+    if preset == "clean":
+        print("OBJECT_PRESSURE_PRESET: clean", flush=True)
+        return
+    changes = {
+        "--actor_object_relation_null_logit_init": "3.5",
+        "--actor_object_relation_geometry_bias_weight": "0.75",
+        "--actor_object_relation_heatmap_bias_weight": "1.50",
+        "--actor_object_relation_max_scale": "1.50",
+        "--token_selection_object_weight": "0.25",
+        "--token_selection_heatmap_weight": "0.30",
+        "--actor_object_prompt_box_prior_weight": "0.15",
+        "--actor_object_prompt_box_prior_expand": "1.50",
+        "--actor_object_relation_loss_weight": "0.75",
+        "--actor_object_engagement_loss_weight": "0.50",
+        "--object_prompt_grounding_loss_weight": "0.35",
+        "--objectless_prompt_consistency_loss_weight": "0.20",
+        "--objectless_object_action_suppression_loss_weight": "0.70",
+        "--objectful_low_motion_aug_prob": "0.50",
+    }
+    print("OBJECT_PRESSURE_PRESET: wild", flush=True)
+    for key, value in changes.items():
+        set_cmd_arg(cmd, key, value)
+        print(f"  {key} {value}", flush=True)
+
+OBJECT_PRESSURE_PRESET = parse_object_pressure_preset(sys.argv)
 TS = datetime.now().strftime("%Y%m%d_%H%M%S")
-RUN_NAME = f"actor_object_relation_phaseb_{TS}"
+RUN_LABEL = "wild10" if OBJECT_PRESSURE_PRESET == "wild" else "diag10"
+RUN_NAME = f"actor_object_engagement_{RUN_LABEL}_{TS}"
 EPOCH_DIR = str(Path(DATA_DIR) / "checkpoints" / RUN_NAME / "epoch_checkpoints")
 
 cmd = [
@@ -453,24 +499,8 @@ cmd = [
     "--object_ignore_regions", "c03=0,0,0.26,0.42",
     "--object_conf_threshold", "0.25",
 
-    "--object_token_box_jitter", "0.0",
-    "--object_token_confidence_noise", "0.0",
-
-    "--interaction_heatmap_size", "56",
     "--interaction_heatmap_sigma", "2.5",
-    "--interaction_guided_sampling", "1",
-    "--interaction_min_sampled_object_frames", "1",
-    "--interaction_repair_radius_frames", "8",
-    "--interaction_quality_min_actor_score", "1.0",
-    "--interaction_quality_min_track_frames", "1",
-    "--interaction_quality_min_track_coverage", "0.0",
-
-    "--objectless_hard_negative_sampling", "1",
     "--objectless_hard_negative_min_sampled_object_frames", "2",
-
-    "--freeze_backbone", "0",
-    "--interaction_warmup_freeze_actor_path", "0",
-    "--interaction_unfreeze_last_blocks", "0",
 
     "--class_balanced_sampler", "1",
     "--hard_negative_sampler", "1",
@@ -484,8 +514,6 @@ cmd = [
     "--sim_metric", "1",
     "--topk_type", "1",
 
-    "--mixup", "0",
-
     "--grad_weights", "1",
     "--nash_update_weights_every", "20",
     "--nash_max_norm", "2.0",
@@ -496,34 +524,21 @@ cmd = [
     "--poguiseplus_heatmap_log_eps", "1e-6",
     "--poguiseplus_normalized_heatmap_loss", "1",
     "--poguiseplus_heatmap_mse_scale", "1000",
-    "--poguiseplus_interaction_heatmap_pos_loss_weight", "0.20",
-    "--poguiseplus_interaction_heatmap_pos_weight", "8.0",
-    "--poguiseplus_interaction_heatmap_center_loss_weight", "0.10",
-    "--poguiseplus_interaction_heatmap_center_temperature", "10.0",
 
-    "--motion_aux_loss_weight", "0.35",
     "--actor_object_relation_loss_weight", "0.50",
+    "--actor_object_engagement_loss_weight", "0.30",
     "--actor_object_relation_null_loss_weight", "0.50",
-    "--object_prompt_grounding_loss_weight", "0.30",
-    "--objectless_prompt_consistency_loss_weight", "0.25",
-    "--objectless_object_action_suppression_loss_weight", "0.60",
-    "--object_class_dropout_prob", "0.0",
-    "--object_class_wrong_prob", "0.0",
+    "--object_prompt_grounding_loss_weight", "0.25",
+    "--objectless_prompt_consistency_loss_weight", "0.15",
+    "--objectless_object_action_suppression_loss_weight", "0.40",
 
-    "--toyota_pose_guided_sampling", "1",
-    "--toyota_min_pose_frames", "1",
-    "--objectful_low_motion_aug_prob", "0.25",
-    "--toyota_synthetic_warmup_epochs", "2",
-    "--toyota_synthetic_two_actor_prob", "0.30",
-    "--toyota_synthetic_three_actor_prob", "0.0",
-    "--toyota_synthetic_same_class_prob", "0.45",
-    "--toyota_synthetic_confuser_prob", "0.65",
+    "--objectful_low_motion_aug_prob", "0.35",
 
     "--batch_size", "32",
     "--accum_grad_batches", "2",
 
-    "--max_epochs", "51",
-    "--t_max_scheduler", "51",
+    "--max_epochs", "10",
+    "--t_max_scheduler", "10",
 
     "--lr", "3e-5",
     "--lr_head", "5e-4",
@@ -559,5 +574,6 @@ cmd = [
     "--model_name", RUN_NAME,
 ]
 
+apply_object_pressure_preset(cmd, OBJECT_PRESSURE_PRESET)
 run_dir = run_training_with_epoch_summaries(cmd, RUN_NAME, EPOCH_DIR, poll_secs=20)
 print("RUN_DIR:", run_dir)

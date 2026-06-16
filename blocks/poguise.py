@@ -962,7 +962,6 @@ class ActorObjectRelationUpdate(nn.Module):
             nn.Sigmoid(),
         )
 
-        self.scale_logit = nn.Parameter(torch.tensor(-2.0))
         self.max_scale = float(max_scale)
         if self.max_scale < 0:
             raise ValueError("max_scale must be non-negative")
@@ -1016,24 +1015,34 @@ class ActorObjectRelationUpdate(nn.Module):
         attn = torch.softmax(logits.float(), dim=-1).to(actor_tokens.dtype)
 
         null_prob = attn[..., 0]
-        object_attn = attn[..., 1:] * object_valid[:, None, :].to(dtype=attn.dtype)
-        useful_mass = object_attn.sum(dim=-1).clamp(0.0, 1.0)
+        object_posterior = attn[..., 1:] * object_valid[:, None, :].to(
+            dtype=attn.dtype
+        )
+        object_mass = object_posterior.sum(dim=-1, keepdim=True).clamp(0.0, 1.0)
+        object_attn = torch.where(
+            object_mass > 0,
+            object_posterior / object_mass.clamp_min(1.0e-6),
+            torch.zeros_like(object_posterior),
+        )
+        useful_mass = object_mass.squeeze(-1)
 
         object_context = torch.matmul(object_attn, v)
-        object_context = object_context * useful_mass[..., None]
+        object_context = object_context * object_mass
 
         update_in = torch.cat([actor_tokens, object_context], dim=-1)
         delta = self.out(update_in)
         gate = self.gate(update_in)
 
-        scale = self.max_scale * torch.sigmoid(self.scale_logit)
+        scale = actor_tokens.new_tensor(self.max_scale)
         actor_tokens = actor_tokens + scale * gate * delta
 
         aux = {
             "logits": logits,
-            "object_attention": object_attn,
+            "object_attention": object_posterior,
+            "object_attention_norm": object_attn,
             "null_prob": null_prob,
             "useful_mass": useful_mass,
+            "object_context": object_context,
             "scale": scale.detach(),
             "gate": gate.detach(),
         }
@@ -1932,6 +1941,7 @@ class VisionTransformer(nn.Module):
         heatmap_end = heatmap_start + self.n_heatmap_tokens
         self.last_actor_object_relation_aux = {}
         self.last_actor_object_grounding = None
+        self.last_token_selection_diagnostics = None
         # keep the global indexes of non-keyframe tokens during pruning
         idx = torch.arange(0, N, device=x.device).unsqueeze(0).repeat(B, 1)
         for i in range(self.depth):
@@ -1981,6 +1991,16 @@ class VisionTransformer(nn.Module):
                     None if relation_bias is None else relation_bias.detach()
                 )
                 self.last_actor_object_relation_aux[str(i)] = relation_aux
+
+        selected_mask = torch.zeros(B, N, dtype=torch.bool, device=x.device)
+        if idx is not None and idx.numel() > 0:
+            selected_mask.scatter_(1, idx.clamp(0, N - 1).long(), True)
+        self.last_token_selection_diagnostics = {
+            "selected_indices": idx.detach() if idx is not None else None,
+            "selected_mask": selected_mask.detach(),
+            "num_visual_tokens": int(N),
+            "window_size": tuple(int(v) for v in ws),
+        }
 
         if self.n_actor_tokens > 0:
             x_actor = x[:, actor_start:actor_end, :]

@@ -440,8 +440,9 @@ def build_parser():
         type=float,
         default=10.0,
     )
-    parser.add_argument("--motion_aux_loss_weight", type=float, default=0.25)
+    parser.add_argument("--motion_aux_loss_weight", type=float, default=0.0)
     parser.add_argument("--actor_object_relation_loss_weight", type=float, default=0.0)
+    parser.add_argument("--actor_object_engagement_loss_weight", type=float, default=0.0)
     parser.add_argument(
         "--actor_object_relation_null_loss_weight",
         type=float,
@@ -458,8 +459,6 @@ def build_parser():
         type=float,
         default=0.3,
     )
-    parser.add_argument("--object_class_dropout_prob", type=float, default=0.0)
-    parser.add_argument("--object_class_wrong_prob", type=float, default=0.0)
     parser.add_argument("--deepspeed_optim", type=int, default=0)
     parser.add_argument("--kp_only", type=int, default=0)
 
