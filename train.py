@@ -444,17 +444,17 @@ def build_parser():
     parser.add_argument("--actor_object_relation_loss_weight", type=float, default=0.0)
     parser.add_argument("--actor_object_engagement_loss_weight", type=float, default=0.0)
     parser.add_argument(
-        "--actor_object_confuser_engagement_loss_weight",
+        "--actor_object_binding_state_loss_weight",
         type=float,
         default=0.0,
     )
     parser.add_argument(
-        "--actor_object_confuser_action_loss_weight",
+        "--actor_object_binding_action_loss_weight",
         type=float,
         default=0.0,
     )
     parser.add_argument(
-        "--actor_object_confuser_margin",
+        "--actor_object_binding_margin",
         type=float,
         default=0.5,
     )

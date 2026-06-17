@@ -934,6 +934,7 @@ class ActorObjectRelationUpdate(nn.Module):
         hidden_dim=512,
         max_scale=1.0,
         null_logit_init=None,
+        binding_num_states=0,
     ):
         super().__init__()
         if null_logit_init is None:
@@ -961,6 +962,24 @@ class ActorObjectRelationUpdate(nn.Module):
             nn.Linear(gate_hidden, 1),
             nn.Sigmoid(),
         )
+
+        self.binding_num_states = int(binding_num_states)
+        if self.binding_num_states > 0:
+            self.binding = nn.Sequential(
+                nn.LayerNorm(3 * dim),
+                nn.Linear(3 * dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, dim),
+                nn.GELU(),
+            )
+            self.binding_delta = nn.Linear(dim, dim)
+            self.binding_state_head = nn.Linear(dim, self.binding_num_states)
+            nn.init.zeros_(self.binding_delta.weight)
+            nn.init.zeros_(self.binding_delta.bias)
+        else:
+            self.binding = None
+            self.binding_delta = None
+            self.binding_state_head = None
 
         self.max_scale = float(max_scale)
         if self.max_scale < 0:
@@ -1031,6 +1050,15 @@ class ActorObjectRelationUpdate(nn.Module):
 
         update_in = torch.cat([actor_tokens, object_context], dim=-1)
         delta = self.out(update_in)
+        binding_state_logits = None
+        if self.binding is not None:
+            binding_in = torch.cat(
+                [actor_tokens, object_context, actor_tokens * object_context],
+                dim=-1,
+            )
+            binding_feat = self.binding(binding_in)
+            delta = delta + self.binding_delta(binding_feat)
+            binding_state_logits = self.binding_state_head(binding_feat)
         gate = self.gate(update_in)
 
         scale = actor_tokens.new_tensor(self.max_scale)
@@ -1046,6 +1074,8 @@ class ActorObjectRelationUpdate(nn.Module):
             "scale": scale.detach(),
             "gate": gate.detach(),
         }
+        if binding_state_logits is not None:
+            aux["binding_state_logits"] = binding_state_logits
         return actor_tokens, aux
 
 
@@ -1170,6 +1200,7 @@ class VisionTransformer(nn.Module):
         actor_object_relation_null_logit_init=4.0,
         actor_object_relation_geometry_bias_weight=0.5,
         actor_object_relation_heatmap_bias_weight=1.0,
+        actor_object_binding_num_states=0,
         return_heatmap_features=False,
         **kwargs,
     ):
@@ -1258,6 +1289,9 @@ class VisionTransformer(nn.Module):
         self.actor_object_relation_heatmap_bias_weight = float(
             actor_object_relation_heatmap_bias_weight
         )
+        self.actor_object_binding_num_states = int(actor_object_binding_num_states)
+        if self.actor_object_binding_num_states < 0:
+            raise ValueError("actor_object_binding_num_states must be non-negative")
         if self.actor_object_relation_dim <= 0:
             raise ValueError("actor_object_relation_dim must be positive")
         if self.actor_object_relation_hidden_dim <= 0:
@@ -1381,6 +1415,7 @@ class VisionTransformer(nn.Module):
                         hidden_dim=self.actor_object_relation_hidden_dim,
                         max_scale=self.actor_object_relation_max_scale,
                         null_logit_init=self.actor_object_relation_null_logit_init,
+                        binding_num_states=self.actor_object_binding_num_states,
                     )
                     for block_idx in self.actor_object_relation_blocks
                 }

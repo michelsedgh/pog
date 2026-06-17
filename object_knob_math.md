@@ -502,32 +502,15 @@ poguiseplus_heatmap_mse_scale:
 For live transfer, a slightly broader target (`2.0-2.5`) can be reasonable
 because laptop-on-lap relation is spatially approximate.
 
-## Sampling Knobs
+## Removed Sampling Hack
 
-### `objectful_low_motion_aug_prob`
+The previous `objectful_low_motion_aug_prob` sampler was removed. It changed the
+temporal training geometry by sampling a tight low-motion span instead of the
+normal live-style window. That made it a pressure hack rather than a PO-GUISE+
+object-action architecture mechanism.
 
-Code path: `_maybe_low_motion_objectful_frame_indices`.
-
-For state-like object actions:
-
-```text
-Uselaptop, Readbook, WatchTV, Usetelephone, Usetablet, Eat.Attable
-```
-
-with probability `p`, it resamples the clip center from the lowest-motion 15% of
-candidate frames. Window radius is about 8% of the original sampled span.
-
-Ranges:
-
-```text
-0.00       no low-motion pressure
-0.25-0.40  mild
-0.50-0.70  strong
-0.90-0.95  overdrive; most state-like samples become low-motion
-1.00       destructive; can undertrain active motion variants
-```
-
-This is the most important sampling knob for paused laptop transfer.
+Paused laptop transfer should now be tested through actor-object binding
+metrics and live/saved-video probes, not by changing the sampled temporal span.
 
 ### Object Detector Confidence Threshold
 
@@ -589,27 +572,25 @@ val_token_selection_Uselaptop_teacher_object_keep_rate
 
 If it does not, token selection is not responding as expected.
 
-### `engagement_lowmotion_overdrive6`
+### `binding_state_overdrive6`
 
 ```text
-engagement_loss = 1.50
-low_motion_aug = 0.90
+binding_state_loss = 1.25
+binding_action_loss = 0.50
 ```
 
-This is extreme because engagement CE starts around `log(9)=2.20`, so weighted
-engagement can contribute roughly `3.3` early, comparable to or larger than
-action CE. Low-motion augmentation makes nearly every eligible laptop/book/TV
-sample state-like.
-
-It should visibly raise:
+This is extreme because engagement/binding CE starts around `log(9)=2.20`, so a
+state loss above `1.0` can compete directly with action CE. It should visibly
+raise:
 
 ```text
-val_actor_object_engagement_laptop_acc
+val_actor_object_binding_state_margin
+val_actor_object_binding_state_pass_rate
 val_actor_object_engagement_laptop_book_tv_acc
 ```
 
-If it raises engagement but not object-drop Uselaptop logit, actor_head is not
-using the state feature.
+If binding margins rise but object-drop Uselaptop logit does not, the actor head
+is still not using the binding feature.
 
 ### `relation_causality_overdrive6`
 
@@ -645,7 +626,6 @@ box_prior = 0.60
 engagement_loss = 2.0
 relation_loss = 2.0
 grounding_loss = 1.0
-low_motion_aug = 0.95
 ```
 
 This is intentionally destructive. It is not a final candidate. It asks:
@@ -699,4 +679,3 @@ val_token_selection_Uselaptop_teacher_object_keep_rate
 val_relation_useful_mass_exact
 val_objectless_with_object_visible_object_action_pred_rate
 ```
-

@@ -136,31 +136,6 @@ class Classifier(nn.Module):
         return self.classifier(x)
 
 
-class ActorObjectEngagementHead(nn.Module):
-    """Auxiliary head that teaches actor tokens object-interaction state."""
-
-    def __init__(self, dim, num_states):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.LayerNorm(3 * dim),
-            nn.Linear(3 * dim, dim),
-            nn.GELU(),
-            nn.Linear(dim, int(num_states)),
-        )
-
-    def forward(self, actor_tokens, object_context):
-        if actor_tokens.shape != object_context.shape:
-            raise RuntimeError(
-                "actor/object engagement inputs must have matching shape, got "
-                f"{tuple(actor_tokens.shape)} and {tuple(object_context.shape)}"
-            )
-        x = torch.cat(
-            [actor_tokens, object_context, actor_tokens * object_context],
-            dim=-1,
-        )
-        return self.net(x)
-
-
 class POGUISE(pl.LightningModule):
     def __init__(self, net_size="t", pretrained=None, **kwargs):
         super().__init__()
@@ -183,7 +158,7 @@ class POGUISE(pl.LightningModule):
             float(self.hparams.get("actor_object_engagement_loss_weight", 0.0)) > 0.0
             or float(
                 self.hparams.get(
-                    "actor_object_confuser_engagement_loss_weight",
+                    "actor_object_binding_state_loss_weight",
                     0.0,
                 )
             )
@@ -357,6 +332,11 @@ class POGUISE(pl.LightningModule):
                     "actor_object_relation_heatmap_bias_weight",
                     1.0,
                 ),
+                actor_object_binding_num_states=(
+                    ACTOR_OBJECT_ENGAGEMENT_NUM_STATES
+                    if self.actor_object_engagement_enabled
+                    else 0
+                ),
                 return_heatmap_features=return_heatmap_features,
                 trt_safe_attention=self.hparams.get("trt_safe_attention", 0),
             )
@@ -451,6 +431,11 @@ class POGUISE(pl.LightningModule):
                     "actor_object_relation_heatmap_bias_weight",
                     1.0,
                 ),
+                actor_object_binding_num_states=(
+                    ACTOR_OBJECT_ENGAGEMENT_NUM_STATES
+                    if self.actor_object_engagement_enabled
+                    else 0
+                ),
                 return_heatmap_features=return_heatmap_features,
                 trt_safe_attention=self.hparams.get("trt_safe_attention", 0),
             )
@@ -476,17 +461,11 @@ class POGUISE(pl.LightningModule):
         # Mapping to classification output
         self.net.head = nn.Identity(self.net.num_features, self.net.num_features)
         self.head = nn.Linear(self.net.num_features, self.hparams.num_classes)
-        self.actor_object_engagement_head = None
         if self.actor_prompt:
             self.actor_head = nn.Linear(
                 self.net.num_features,
                 self.hparams.num_classes,
             )
-            if self.actor_object_engagement_enabled:
-                self.actor_object_engagement_head = ActorObjectEngagementHead(
-                    self.net.num_features,
-                    ACTOR_OBJECT_ENGAGEMENT_NUM_STATES,
-                )
             self.actor_motion_head = (
                 nn.Linear(self.net.num_features, self.hparams.num_classes)
                 if float(self.hparams.get("motion_aux_loss_weight", 0.0)) > 0.0
@@ -741,13 +720,16 @@ class POGUISE(pl.LightningModule):
                         dtype=x_actor.dtype,
                     )
                     self.last_actor_object_relation_context = relation_context
-            if (
-                self.actor_object_engagement_head is not None
-                and relation_context is not None
-            ):
-                self.last_actor_object_engagement_logits = (
-                    self.actor_object_engagement_head(x_actor, relation_context)
-                )
+                binding_state_logits = self.last_actor_object_relation_aux[
+                    last_block
+                ].get("binding_state_logits")
+                if binding_state_logits is not None:
+                    self.last_actor_object_engagement_logits = (
+                        binding_state_logits.to(
+                            device=x_actor.device,
+                            dtype=x_actor.dtype,
+                        )
+                    )
             if self.actor_motion_head is not None:
                 self.last_actor_motion_logits = self.actor_motion_head(x_actor)
             self.last_actor_action_tokens = x_actor

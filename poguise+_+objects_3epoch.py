@@ -429,10 +429,12 @@ def apply_object_pressure_preset(cmd, preset):
         "--actor_object_prompt_box_prior_expand": "1.50",
         "--actor_object_relation_loss_weight": "0.75",
         "--actor_object_engagement_loss_weight": "0.50",
+        "--actor_object_binding_state_loss_weight": "0.75",
+        "--actor_object_binding_action_loss_weight": "0.35",
+        "--actor_object_binding_margin": "0.50",
         "--object_prompt_grounding_loss_weight": "0.35",
         "--objectless_prompt_consistency_loss_weight": "0.20",
         "--objectless_object_action_suppression_loss_weight": "0.70",
-        "--objectful_low_motion_aug_prob": "0.50",
     }
     print("OBJECT_PRESSURE_PRESET: wild", flush=True)
     for key, value in changes.items():
@@ -525,12 +527,13 @@ cmd = [
 
     "--actor_object_relation_loss_weight", "0.50",
     "--actor_object_engagement_loss_weight", "0.30",
+    "--actor_object_binding_state_loss_weight", "0.50",
+    "--actor_object_binding_action_loss_weight", "0.25",
+    "--actor_object_binding_margin", "0.50",
     "--actor_object_relation_null_loss_weight", "0.50",
     "--object_prompt_grounding_loss_weight", "0.25",
     "--objectless_prompt_consistency_loss_weight", "0.15",
     "--objectless_object_action_suppression_loss_weight", "0.40",
-
-    "--objectful_low_motion_aug_prob", "0.35",
 
     "--batch_size", "32",
     "--accum_grad_batches", "2",

@@ -6,6 +6,102 @@ Reference clone: `reference_repos/RicardoP0_poguise_original` at commit `ae476ea
 
 Current repo head audited: `476547960c006b9af54335683d1813080d7d437c`.
 
+## 2026-06-17 Update: What The Laptop-On-Lap Probe Proved
+
+The latest saved-video probe changes the conclusion. The object path is not
+failing to see the laptop.
+
+On `live_test_clips/laptop_on_lap_20260605_135113.mp4`, the object-enabled
+checkpoint often produced:
+
+```text
+relation block 9:
+  top object = laptop
+  laptop attention ~= 0.98-0.99
+  NULL ~= 0.00-0.03
+
+engagement/action:
+  engagement top = book
+  Readbook top-1
+```
+
+Many of those failing windows had no book object detected at all. This rules
+out the simple explanation that the detector or relation module is selecting
+the wrong object.
+
+The current failure is:
+
+```text
+selected object identity = laptop
+actor/object semantic state = book
+final action = Readbook
+```
+
+That means the architecture still lacks a strong **object-class-to-action-state
+binding** inside the main representation. More object attention cannot fix this
+by itself; the model already attends to laptop.
+
+### Low-Motion Augmentation Was Removed
+
+The old low-motion sampler was a training-only pressure term. It was not part
+of PO-GUISE or PO-GUISE+.
+
+It could replace the normal Toyota/live-style temporal span with a tight
+low-motion span around one center frame:
+
+```text
+standard/live-style sample:
+  16 frames across roughly the full labeled/window span
+
+low-motion augmentation:
+  16 frames across a small local low-motion span
+```
+
+That was a distribution-changing augmentation, so it has been removed from
+`datasets/toyotasm.py` and from the training launchers. Only reintroduce a
+data-side augmentation later if it preserves the same temporal geometry used by
+live inference.
+
+### Corrected Missing Mechanism
+
+The engagement head added so far is post-transformer auxiliary supervision:
+
+```text
+actor token + object_context -> engagement logits
+actor token -> actor_head -> action logits
+```
+
+That helps diagnose the issue, but the probe shows it can still predict
+`book` even when the relation context is a laptop. The missing mechanism is
+not just an auxiliary readout. It is an in-transformer binding representation:
+
+```text
+actor token
++ selected object token/class
++ relation confidence/NULL state
+    -> actor-object binding/state token or binding update
+    -> later transformer blocks update actor token
+    -> actor_head(actor token)
+```
+
+The binding target should directly supervise object-state confusers on the real
+input:
+
+```text
+Uselaptop + selected laptop:
+  laptop_state > book_state / phone_state / tv_state + margin
+  Uselaptop logit > Readbook / Usetelephone / WatchTV logits + margin
+
+Readbook + selected book:
+  book_state > laptop_state / phone_state / tv_state + margin
+  Readbook logit > Uselaptop / Usetelephone / WatchTV logits + margin
+```
+
+The key difference from the current confuser loss is that this acts on the
+**real selected object input**, not only on a fake same-box wrong-class
+counterfactual. The fake-object loss can remain a diagnostic or weak regularizer,
+but it is not sufficient by itself.
+
 ## Bottom Line
 
 The detector is not the main failure. The object prompt path is learning to ground laptop detections, and the relation path often attends to the laptop in the live debug probe. The failure is that this object relation is not action-causal enough:
@@ -289,15 +385,20 @@ Use Nash-MTL only between:
 
 Do not create separate competing Nash tasks for every auxiliary.
 
-## The Missing Head: Actor-Object Engagement State
+## The Missing Mechanism: Actor-Object Binding State
 
-Add one training-only auxiliary:
+The corrected implementation puts this binding state inside the
+actor-object relation update:
 
 ```text
-ActorObjectEngagementHead
+actor token + selected object context + actor*object context
+    -> binding feature
+    -> actor-token delta inside the transformer
+    -> coarse binding-state logits for auxiliary supervision
 ```
 
-It should predict coarse object-interaction state from the actor token and relation context:
+It predicts coarse object-interaction state from the same representation that
+updates the actor token:
 
 ```text
 none/objectless
@@ -335,13 +436,19 @@ engagement target:
   laptop for Uselaptop even if detector missed laptop
 ```
 
-That is the exact missing signal. It teaches the actor representation:
+That signal is necessary, but not sufficient. The latest probe showed cases
+where the relation selected laptop and the auxiliary itself still predicted
+`book`. So the semantic state should not only be decoded after the transformer;
+it should be injected as a binding representation before the final actor token
+is classified.
+
+The corrected mechanism teaches the actor representation:
 
 ```text
 this looks like laptop engagement
 ```
 
-even when the detector is missing or the hands are not actively typing.
+from both actor appearance and selected object identity.
 
 This is not a late action residual. It is an auxiliary representation loss. Final inference still uses:
 
@@ -475,13 +582,10 @@ poguiseplus_interaction_heatmap_center_loss_weight 0.0
 
 Only re-enable positive/center losses if interaction heatmaps collapse or center L2 fails.
 
-### Keep And Increase Slightly
+### Removed From The Clean Architecture Diagnostic
 
-```text
---objectful_low_motion_aug_prob 0.35
-```
-
-The dataset sampler already searches low landmark-motion windows for state-like object actions. Keep it and slightly increase it for the state run.
+The low-motion sampler and its CLI flag were removed. The clean diagnostic now
+tests object-action binding without changing the temporal training geometry.
 
 ## Recommended 10-Epoch Diagnostic Setup
 
@@ -500,7 +604,6 @@ Use:
 --objectless_prompt_consistency_loss_weight 0.15
 --objectless_object_action_suppression_loss_weight 0.40
 --motion_aux_loss_weight 0.0
---objectful_low_motion_aug_prob 0.35
 --toyota_synthetic_two_actor_prob 0.0
 --toyota_synthetic_three_actor_prob 0.0
 --toyota_synthetic_confuser_prob 0.0
@@ -540,13 +643,10 @@ engagement_laptop_acc
 engagement_book_acc
 engagement_phone_tablet_acc
 engagement_tv_monitor_acc
-engagement_low_motion_uselaptop_acc
-
 object_prompt_grounding_acc
 interaction_heatmap_soft_iou
 interaction_heatmap_center_l2
 
-object_ablation_low_motion_laptop_delta
 wrong_class_laptop_state_delta
 ```
 
@@ -555,7 +655,7 @@ The key new proof is:
 ```text
 low-motion laptop windows:
   relation attends laptop or heatmap localizes laptop region
-  engagement predicts laptop state
+  binding/engagement predicts laptop state
   actor_head predicts Uselaptop more than Readbook
   removing/changing laptop prompt measurably lowers laptop-state confidence
 ```
@@ -593,7 +693,11 @@ no-object live probe becomes meaningfully different from object-token probe
 Readbook no longer absorbs static laptop-on-lap windows as often
 ```
 
-If engagement accuracy improves but action still does not, then actor_head is not using the state feature. At that point, the next clean step is not a residual; it is to inject the engagement representation back into the actor token inside the transformer or immediately before actor_head as a representation MLP, still without adding separate action logits.
+If engagement accuracy improves but action still does not, then actor_head is
+not using the state feature. The next clean step is not a residual action
+branch; it is to inject the binding representation back into the actor token
+inside the transformer or immediately before actor_head as a representation MLP,
+still without adding separate action logits.
 
 ## Final Architecture Recommendation
 
