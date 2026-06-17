@@ -209,11 +209,6 @@ class ToyotaSMDataset(Dataset):
             raise ValueError(
                 "toyota_actor_box_scale_max must be greater than or equal to min"
             )
-        self.toyota_actor_background_box_prob = float(
-            kwargs.get("toyota_actor_background_box_prob", 0.5)
-        )
-        if not 0 <= self.toyota_actor_background_box_prob <= 1:
-            raise ValueError("toyota_actor_background_box_prob must be in [0, 1]")
         self.pose_landmarks = int(kwargs.get("toyota_pose_landmarks", 13))
         if self.n_landmarks > 0 and self.pose_landmarks != self.n_landmarks:
             raise ValueError(
@@ -414,7 +409,6 @@ class ToyotaSMDataset(Dataset):
         parser.add_argument("--toyota_actor_box_center_jitter", type=float, default=0.08)
         parser.add_argument("--toyota_actor_box_scale_min", type=float, default=0.9)
         parser.add_argument("--toyota_actor_box_scale_max", type=float, default=1.3)
-        parser.add_argument("--toyota_actor_background_box_prob", type=float, default=0.5)
         parser.add_argument("--object_detector_cache", type=str, default=None)
         parser.add_argument("--object_camera_allowlist", type=str, default=None)
         parser.add_argument("--object_ignore_regions", type=str, default=None)
@@ -1428,7 +1422,6 @@ class ToyotaSMDataset(Dataset):
         boxes[slot] = box
         valid[slot] = True
         actions[slot] = label.long() if torch.is_tensor(label) else int(label)
-        self._fill_invalid_actor_boxes(boxes, valid)
         return {
             "actions": actions,
             "boxes": boxes,
@@ -1482,54 +1475,6 @@ class ToyotaSMDataset(Dataset):
         if jittered[2] <= jittered[0] or jittered[3] <= jittered[1]:
             return box
         return jittered
-
-    def _fill_invalid_actor_boxes(self, boxes, valid):
-        if self.set_type != "train" or self.toyota_actor_background_box_prob <= 0:
-            return
-        invalid_slots = torch.nonzero(~valid, as_tuple=False).flatten().tolist()
-        if not invalid_slots:
-            return
-        valid_slots = torch.nonzero(valid, as_tuple=False).flatten().tolist()
-        for slot in invalid_slots:
-            if np.random.random() > self.toyota_actor_background_box_prob:
-                continue
-            if valid_slots and np.random.random() < 0.5:
-                src_slot = valid_slots[int(np.random.randint(0, len(valid_slots)))]
-                boxes[slot] = self._shift_actor_box_negative(boxes[src_slot])
-            else:
-                boxes[slot] = self._random_actor_box()
-
-    def _random_actor_box(self):
-        width = float(np.random.uniform(0.08, 0.45))
-        height = float(np.random.uniform(0.10, 0.65))
-        x1 = float(np.random.uniform(0.0, 1.0 - width))
-        y1 = float(np.random.uniform(0.0, 1.0 - height))
-        return torch.tensor([x1, y1, x1 + width, y1 + height], dtype=torch.float32)
-
-    def _shift_actor_box_negative(self, box):
-        x1, y1, x2, y2 = [float(v) for v in box.tolist()]
-        bw = max(x2 - x1, 1e-4)
-        bh = max(y2 - y1, 1e-4)
-        cx = (x1 + x2) * 0.5
-        cy = (y1 + y2) * 0.5
-        cx += np.random.choice([-1.0, 1.0]) * np.random.uniform(0.65, 1.35) * bw
-        cy += np.random.uniform(-0.75, 0.75) * bh
-        scale_w = np.random.uniform(0.6, 1.6)
-        scale_h = np.random.uniform(0.6, 1.6)
-        bw *= scale_w
-        bh *= scale_h
-        shifted = torch.tensor(
-            [
-                max(0.0, cx - bw * 0.5),
-                max(0.0, cy - bh * 0.5),
-                min(1.0, cx + bw * 0.5),
-                min(1.0, cy + bh * 0.5),
-            ],
-            dtype=torch.float32,
-        )
-        if shifted[2] <= shifted[0] or shifted[3] <= shifted[1]:
-            return self._random_actor_box()
-        return shifted
 
     def _resolve_frame_source(self):
         if self.frame_source != "auto":

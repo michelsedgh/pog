@@ -38,8 +38,6 @@ try:
 except ImportError:
     DeepSpeedCPUAdam = None
 
-
-DEFAULT_MOTION_AUX_LOSS_WEIGHT = 0.0
 DEPLOY_KEY_ACTIONS = (
     "Uselaptop",
     "Readbook",
@@ -176,11 +174,6 @@ class HeatmapModule(pl.LightningModule):
             raise ValueError(
                 "poguiseplus_interaction_heatmap_center_temperature must be > 0"
             )
-        self.motion_aux_loss_weight = float(
-            hparams.get("motion_aux_loss_weight", DEFAULT_MOTION_AUX_LOSS_WEIGHT)
-        )
-        if self.motion_aux_loss_weight < 0:
-            raise ValueError("motion_aux_loss_weight must be >= 0")
         self.actor_object_relation_loss_weight = float(
             hparams.get("actor_object_relation_loss_weight", 0.0)
         )
@@ -196,11 +189,6 @@ class HeatmapModule(pl.LightningModule):
         )
         if self.actor_object_binding_state_loss_weight < 0:
             raise ValueError("actor_object_binding_state_loss_weight must be >= 0")
-        self.actor_object_binding_action_loss_weight = float(
-            hparams.get("actor_object_binding_action_loss_weight", 0.0)
-        )
-        if self.actor_object_binding_action_loss_weight < 0:
-            raise ValueError("actor_object_binding_action_loss_weight must be >= 0")
         self.actor_object_binding_margin = float(
             hparams.get("actor_object_binding_margin", 0.5)
         )
@@ -249,14 +237,6 @@ class HeatmapModule(pl.LightningModule):
                 "actor-object engagement supervision requires "
                 "actor_object_relation_in_transformer"
             )
-        if (
-            self.actor_object_binding_action_loss_weight > 0
-            and not self.actor_object_relation_in_transformer
-        ):
-            raise ValueError(
-                "actor_object_binding_action_loss_weight requires "
-                "actor_object_relation_in_transformer"
-            )
         if missing_view_enabled and not (
             self.actor_object_relation_in_transformer and self.uses_object_proposals
         ):
@@ -269,13 +249,6 @@ class HeatmapModule(pl.LightningModule):
         )
         if self.actor_object_relation_null_loss_weight < 0:
             raise ValueError("actor_object_relation_null_loss_weight must be >= 0")
-        self.objectless_object_action_suppression_loss_weight = float(
-            hparams.get("objectless_object_action_suppression_loss_weight", 0.3)
-        )
-        if self.objectless_object_action_suppression_loss_weight < 0:
-            raise ValueError(
-                "objectless_object_action_suppression_loss_weight must be >= 0"
-            )
         self.object_prompt_grounding_loss_weight = float(
             hparams.get("object_prompt_grounding_loss_weight", 0.0)
         )
@@ -429,7 +402,6 @@ class HeatmapModule(pl.LightningModule):
                 "model.net.relation_heatmap_norm",
                 "model.net.relation_heatmap_proj",
                 "model.actor_head",
-                "model.actor_motion_head",
                 "model.presence_head",
             ]
             if self.model.hparams.get("use_register_tokens", 0):
@@ -513,47 +485,18 @@ class HeatmapModule(pl.LightningModule):
             unique.append(param)
         return unique
 
-    def _interaction_unfrozen_backbone_params(self):
-        if not self.actor_interaction_heatmaps:
-            return []
-        count = int(self.model.hparams.get("interaction_unfreeze_last_blocks", 0) or 0)
-        if count <= 0:
-            return []
-        blocks = getattr(self.model.net, "blocks", None)
-        if blocks is None:
-            raise ValueError("interaction_unfreeze_last_blocks requires model.net.blocks")
-        if count > len(blocks):
-            raise ValueError(
-                f"interaction_unfreeze_last_blocks={count} exceeds depth={len(blocks)}"
-            )
-        params = []
-        for block in blocks[-count:]:
-            params.extend(block.parameters())
-        if getattr(self.model.net, "fc_norm", None) is not None:
-            params.extend(self.model.net.fc_norm.parameters())
-        if getattr(self.model.net, "norm", None) is not None:
-            params.extend(self.model.net.norm.parameters())
-        return params
-
     def _head_params(self):
         if not self.actor_prompt:
             return list(self.model.head.parameters())
 
-        freeze_actor_path = self.actor_interaction_heatmaps and self.model.hparams.get(
-            "interaction_warmup_freeze_actor_path", 0
-        )
-
         params = []
-        if not freeze_actor_path:
-            if getattr(self.model, "actor_head", None) is not None:
-                params += list(self.model.actor_head.parameters())
-            if getattr(self.model, "actor_motion_head", None) is not None:
-                params += list(self.model.actor_motion_head.parameters())
-            if self.model.presence_head is not None:
-                params += list(self.model.presence_head.parameters())
-            for name, param in self.model.net.named_parameters():
-                if self._actor_prompt_param_name(name):
-                    params.append(param)
+        if getattr(self.model, "actor_head", None) is not None:
+            params += list(self.model.actor_head.parameters())
+        if self.model.presence_head is not None:
+            params += list(self.model.presence_head.parameters())
+        for name, param in self.model.net.named_parameters():
+            if self._actor_prompt_param_name(name):
+                params.append(param)
         return self._unique_params(params)
 
     def _backbone_params(self, include_heatmap_head=True):
@@ -1630,7 +1573,6 @@ class HeatmapModule(pl.LightningModule):
                 "last_actor_action_tokens",
                 "last_actor_object_relation_aux",
                 "last_actor_action_logits",
-                "last_actor_motion_logits",
             )
         }
         net = getattr(self.model, "net", None)
@@ -2258,34 +2200,6 @@ class HeatmapModule(pl.LightningModule):
             count,
         )
 
-    def _motion_aux_loss(self, stage, actions, valid):
-        if self.motion_aux_loss_weight <= 0:
-            return None
-        motion_logits = getattr(self.model, "last_actor_motion_logits", None)
-        if motion_logits is None:
-            return None
-        valid = valid.to(device=motion_logits.device, dtype=torch.bool)
-        if not valid.any():
-            return None
-        actions = actions.to(device=motion_logits.device, dtype=torch.long)
-        loss = F.cross_entropy(motion_logits[valid].float(), actions[valid])
-        self.log(
-            f"{stage}_loss_motion_aux",
-            loss,
-            on_step=stage == "train",
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-            sync_dist=True,
-        )
-        pred_labels = motion_logits[valid].argmax(dim=-1)
-        self._log_scalar(
-            f"{stage}_motion_aux_acc",
-            (pred_labels == actions[valid]).float().mean(),
-            int(valid.sum().item()),
-        )
-        return loss
-
     def _actor_object_relation_loss(self, stage, actions, valid, target):
         if (
             not self.actor_object_relation_in_transformer
@@ -2464,16 +2378,22 @@ class HeatmapModule(pl.LightningModule):
         stage,
         valid,
         actions,
-        preds,
         target,
     ):
-        if (
-            self.actor_object_binding_state_loss_weight <= 0
-            and self.actor_object_binding_action_loss_weight <= 0
-        ):
+        if self.actor_object_binding_state_loss_weight <= 0:
             return None
 
-        device = preds.device
+        engagement_logits = getattr(
+            self.model,
+            "last_actor_object_engagement_logits",
+            None,
+        )
+        if engagement_logits is None:
+            raise RuntimeError(
+                "actor_object_binding_state_loss_weight is enabled, but the "
+                "model did not produce binding state logits"
+            )
+        device = engagement_logits.device
         info = self._exact_teacher_object_info(actions, valid, target, device)
         if info is None:
             return None
@@ -2488,141 +2408,74 @@ class HeatmapModule(pl.LightningModule):
         if not exact_compatible.any():
             return None
 
-        margin = preds.new_tensor(float(self.actor_object_binding_margin))
-        total_loss = preds.sum() * 0.0
-
-        action_margins = []
-        if self.actor_object_binding_action_loss_weight > 0:
-            for action_idx, confuser_indices in self.action_confuser_indices_by_index.items():
-                action_mask = exact_compatible & (actions == int(action_idx))
-                if not action_mask.any():
-                    continue
-                confuser_indices = confuser_indices.to(device=device, dtype=torch.long)
-                true_logits = preds[action_mask].float()[:, int(action_idx)]
-                confuser_logits = preds[action_mask].float().index_select(
-                    1,
-                    confuser_indices,
-                )
-                action_margin = true_logits - confuser_logits.max(dim=1).values
-                action_margins.append(action_margin)
-                action_name = self.action_names[int(action_idx)]
-                safe_name = action_name.replace(".", "_")
-                self._log_scalar(
-                    f"{stage}_actor_object_binding_action_{safe_name}_margin",
-                    action_margin.detach().mean(),
-                    int(action_mask.sum().item()),
-                )
-
-            if action_margins:
-                action_margin_all = torch.cat(action_margins)
-                action_loss = F.relu(margin - action_margin_all).mean()
-                total_loss = (
-                    total_loss
-                    + action_loss * self.actor_object_binding_action_loss_weight
-                )
-                count = int(action_margin_all.numel())
-                self.log(
-                    f"{stage}_loss_actor_object_binding_action",
-                    action_loss,
-                    on_step=stage == "train",
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                    sync_dist=True,
-                )
-                self._log_scalar(
-                    f"{stage}_actor_object_binding_action_margin",
-                    action_margin_all.detach().mean(),
-                    count,
-                )
-                self._log_scalar(
-                    f"{stage}_actor_object_binding_action_pass_rate",
-                    (action_margin_all.detach() >= margin.detach()).float().mean(),
-                    count,
-                )
-
+        margin = engagement_logits.new_tensor(float(self.actor_object_binding_margin))
         state_margins = []
-        if self.actor_object_binding_state_loss_weight > 0:
-            engagement_logits = getattr(
-                self.model,
-                "last_actor_object_engagement_logits",
-                None,
+        targets_by_action = self.engagement_targets_by_action.to(device=device)
+        for action_idx, confuser_indices in self.action_confuser_indices_by_index.items():
+            if int(action_idx) >= int(targets_by_action.numel()):
+                continue
+            true_state_idx = int(targets_by_action[int(action_idx)].item())
+            if true_state_idx < 0:
+                continue
+            confuser_state_ids = []
+            for confuser_idx in confuser_indices.tolist():
+                if int(confuser_idx) >= int(targets_by_action.numel()):
+                    continue
+                state_idx = int(targets_by_action[int(confuser_idx)].item())
+                if state_idx >= 0 and state_idx != true_state_idx:
+                    confuser_state_ids.append(state_idx)
+            confuser_state_ids = sorted(set(confuser_state_ids))
+            if not confuser_state_ids:
+                continue
+            action_mask = exact_compatible & (actions == int(action_idx))
+            if not action_mask.any():
+                continue
+            state_index = torch.tensor(
+                confuser_state_ids,
+                device=device,
+                dtype=torch.long,
             )
-            if engagement_logits is None:
-                raise RuntimeError(
-                    "actor_object_binding_state_loss_weight is enabled, but the "
-                    "model did not produce binding state logits"
-                )
-            targets_by_action = self.engagement_targets_by_action.to(device=device)
-            for action_idx, confuser_indices in self.action_confuser_indices_by_index.items():
-                if int(action_idx) >= int(targets_by_action.numel()):
-                    continue
-                true_state_idx = int(targets_by_action[int(action_idx)].item())
-                if true_state_idx < 0:
-                    continue
-                confuser_state_ids = []
-                for confuser_idx in confuser_indices.tolist():
-                    if int(confuser_idx) >= int(targets_by_action.numel()):
-                        continue
-                    state_idx = int(targets_by_action[int(confuser_idx)].item())
-                    if state_idx >= 0 and state_idx != true_state_idx:
-                        confuser_state_ids.append(state_idx)
-                confuser_state_ids = sorted(set(confuser_state_ids))
-                if not confuser_state_ids:
-                    continue
-                action_mask = exact_compatible & (actions == int(action_idx))
-                if not action_mask.any():
-                    continue
-                state_index = torch.tensor(
-                    confuser_state_ids,
-                    device=device,
-                    dtype=torch.long,
-                )
-                state_logits = engagement_logits[action_mask].float()
-                true_state = state_logits[:, true_state_idx]
-                confuser_state = state_logits.index_select(1, state_index).max(
-                    dim=1
-                ).values
-                state_margin = true_state - confuser_state
-                state_margins.append(state_margin)
-                action_name = self.action_names[int(action_idx)]
-                safe_name = action_name.replace(".", "_")
-                self._log_scalar(
-                    f"{stage}_actor_object_binding_state_{safe_name}_margin",
-                    state_margin.detach().mean(),
-                    int(action_mask.sum().item()),
-                )
+            state_logits = engagement_logits[action_mask].float()
+            true_state = state_logits[:, true_state_idx]
+            confuser_state = state_logits.index_select(1, state_index).max(
+                dim=1
+            ).values
+            state_margin = true_state - confuser_state
+            state_margins.append(state_margin)
+            action_name = self.action_names[int(action_idx)]
+            safe_name = action_name.replace(".", "_")
+            self._log_scalar(
+                f"{stage}_actor_object_binding_state_{safe_name}_margin",
+                state_margin.detach().mean(),
+                int(action_mask.sum().item()),
+            )
 
-            if state_margins:
-                state_margin_all = torch.cat(state_margins)
-                state_loss = F.relu(margin - state_margin_all).mean()
-                total_loss = (
-                    total_loss
-                    + state_loss * self.actor_object_binding_state_loss_weight
-                )
-                count = int(state_margin_all.numel())
-                self.log(
-                    f"{stage}_loss_actor_object_binding_state",
-                    state_loss,
-                    on_step=stage == "train",
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                    sync_dist=True,
-                )
-                self._log_scalar(
-                    f"{stage}_actor_object_binding_state_margin",
-                    state_margin_all.detach().mean(),
-                    count,
-                )
-                self._log_scalar(
-                    f"{stage}_actor_object_binding_state_pass_rate",
-                    (state_margin_all.detach() >= margin.detach()).float().mean(),
-                    count,
-                )
-
-        if not action_margins and not state_margins:
+        if not state_margins:
             return None
+
+        state_margin_all = torch.cat(state_margins)
+        state_loss = F.relu(margin - state_margin_all).mean()
+        total_loss = state_loss * self.actor_object_binding_state_loss_weight
+        count = int(state_margin_all.numel())
+        self.log(
+            f"{stage}_loss_actor_object_binding_state",
+            state_loss,
+            on_step=stage == "train",
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+        )
+        self._log_scalar(
+            f"{stage}_actor_object_binding_state_margin",
+            state_margin_all.detach().mean(),
+            count,
+        )
+        self._log_scalar(
+            f"{stage}_actor_object_binding_state_pass_rate",
+            (state_margin_all.detach() >= margin.detach()).float().mean(),
+            count,
+        )
 
         self._log_count(
             f"{stage}_actor_object_binding_count",
@@ -2979,15 +2832,6 @@ class HeatmapModule(pl.LightningModule):
                         "weight_decay": self.weight_decay_head,
                     }
                 )
-            unfrozen_backbone_params = self._interaction_unfrozen_backbone_params()
-            if unfrozen_backbone_params:
-                params.append(
-                    {
-                        "params": unfrozen_backbone_params,
-                        "lr": self.lr,
-                        "weight_decay": self.weight_decay,
-                    }
-                )
             if (
                 self.actor_interaction_heatmaps
                 and getattr(self.model.hparams, "lr_head_hm", None)
@@ -3002,9 +2846,8 @@ class HeatmapModule(pl.LightningModule):
                 )
             if not params:
                 raise ValueError(
-                    "No trainable parameters selected. For interaction warmup, set "
-                    "--lr_head > 0, --lr_head_hm > 0, or "
-                    "--interaction_unfreeze_last_blocks > 0."
+                    "No trainable parameters selected. Set --lr_head > 0 or "
+                    "--lr_head_hm > 0."
                 )
             self._append_nash_mtl_params(params)
             optimizer = optim.AdamW(params)
@@ -3163,11 +3006,6 @@ class HeatmapModule(pl.LightningModule):
         )
 
         loss_main_task = loss_action
-        loss_motion_aux = self._motion_aux_loss(stage, actions, valid)
-        if loss_motion_aux is not None:
-            loss_main_task = (
-                loss_main_task + loss_motion_aux * self.motion_aux_loss_weight
-            )
         if presence_logits is not None:
             loss_presence = F.binary_cross_entropy_with_logits(
                 presence_logits, valid.float()
@@ -3205,7 +3043,6 @@ class HeatmapModule(pl.LightningModule):
             stage,
             valid,
             actions,
-            preds,
             target,
         )
         if loss_actor_object_binding is not None:
@@ -3222,20 +3059,6 @@ class HeatmapModule(pl.LightningModule):
         )
         if loss_actor_object_missing_view is not None:
             loss_main_task = loss_main_task + loss_actor_object_missing_view
-
-        loss_hard_objectless = self._objectless_object_action_suppression_loss(
-            stage,
-            preds,
-            actions,
-            valid,
-            target,
-        )
-        if loss_hard_objectless is not None:
-            loss_main_task = (
-                loss_main_task
-                + loss_hard_objectless
-                * self.objectless_object_action_suppression_loss_weight
-            )
 
         grounding_aux_terms = []
         loss_object_prompt_grounding = self._object_prompt_grounding_loss(
@@ -3760,59 +3583,6 @@ class HeatmapModule(pl.LightningModule):
         sample_has_hard_object = visible_hard_object.any(dim=1)
         objectless = self._labels_in_indices(actions, self.objectless_action_indices)
         return valid & objectless & sample_has_hard_object[:, None]
-
-    def _objectless_object_action_suppression_loss(
-        self,
-        stage,
-        full_preds,
-        actions,
-        valid,
-        target,
-    ):
-        if self.objectless_object_action_suppression_loss_weight <= 0:
-            return None
-        hard_mask = self._objectless_hard_negative_mask(
-            full_preds,
-            actions,
-            valid,
-            target,
-        )
-        object_action_indices = self.group_indices.get("object_mapped")
-        if (
-            hard_mask is None
-            or object_action_indices is None
-            or int(object_action_indices.numel()) == 0
-        ):
-            return None
-        if not hard_mask.any():
-            return None
-
-        object_action_indices = object_action_indices.to(
-            device=full_preds.device,
-            dtype=torch.long,
-        )
-        probs = self._action_probs(full_preds)[hard_mask]
-        object_action_prob = probs[:, object_action_indices].sum(dim=-1).clamp(
-            0.0,
-            1.0 - 1e-6,
-        )
-        loss = -torch.log1p(-object_action_prob).mean()
-        count = int(object_action_prob.numel())
-        self.log(
-            f"{stage}_loss_objectless_object_action_suppression",
-            loss,
-            on_step=stage == "train",
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-            sync_dist=True,
-        )
-        self._log_scalar(
-            f"{stage}_objectless_with_object_visible_object_action_prob",
-            object_action_prob.detach().mean(),
-            count,
-        )
-        return loss
 
     def _log_objectless_hard_negative_metrics(
         self,

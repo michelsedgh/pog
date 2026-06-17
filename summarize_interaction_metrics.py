@@ -48,11 +48,8 @@ CORE_COLUMNS = [
     "val_actor_object_engagement_tv_monitor_acc",
     "val_actor_object_engagement_laptop_book_tv_acc",
     "val_loss_actor_object_binding_state",
-    "val_loss_actor_object_binding_action",
     "val_actor_object_binding_state_margin",
-    "val_actor_object_binding_action_margin",
     "val_actor_object_binding_state_pass_rate",
-    "val_actor_object_binding_action_pass_rate",
     "val_actor_object_binding_count",
     "val_relation_exact_teacher_acc",
     "val_relation_exact_teacher_prob",
@@ -64,7 +61,6 @@ CORE_COLUMNS = [
     "val_relation_null_prob_exact",
     "val_relation_null_prob_objectless",
     "val_relation_null_prob_missing_objectful",
-    "val_loss_objectless_object_action_suppression",
     "val_loss_object_prompt_grounding",
     "val_object_prompt_grounding_acc",
     "val_object_prompt_grounding_true_prob",
@@ -112,8 +108,6 @@ CORE_COLUMNS = [
     "val_token_selection_Readbook_teacher_object_keep_rate",
     "val_token_selection_WatchTV_teacher_object_keep_rate",
     "val_token_selection_Usetelephone_teacher_object_keep_rate",
-    "val_loss_motion_aux",
-    "val_motion_aux_acc",
     "train_nash_weight_action",
     "train_nash_weight_heatmap",
     "train_nash_weight_main_deploy",
@@ -353,11 +347,8 @@ def print_compact_epoch_summary(epoch_df):
         "val_actor_object_engagement_tv_monitor_acc",
         "val_actor_object_engagement_laptop_book_tv_acc",
         "val_loss_actor_object_binding_state",
-        "val_loss_actor_object_binding_action",
         "val_actor_object_binding_state_margin",
-        "val_actor_object_binding_action_margin",
         "val_actor_object_binding_state_pass_rate",
-        "val_actor_object_binding_action_pass_rate",
         "val_actor_object_binding_count",
         "train_actor_object_missing_view_count",
         "train_loss_actor_object_missing_view_action",
@@ -450,11 +441,8 @@ def print_compact_best(epoch_df):
         "val_actor_object_engagement_tv_monitor_acc",
         "val_actor_object_engagement_laptop_book_tv_acc",
         "val_loss_actor_object_binding_state",
-        "val_loss_actor_object_binding_action",
         "val_actor_object_binding_state_margin",
-        "val_actor_object_binding_action_margin",
         "val_actor_object_binding_state_pass_rate",
-        "val_actor_object_binding_action_pass_rate",
         "val_actor_object_binding_count",
         "val_relation_exact_teacher_acc",
         "val_relation_exact_teacher_prob",
@@ -1000,8 +988,6 @@ def print_decision(epoch_df):
         latest,
         "val_objectless_with_object_visible_object_action_pred_rate",
     )
-    motion_aux_loss = metric(latest, "val_loss_motion_aux")
-    motion_aux_acc = metric(latest, "val_motion_aux_acc")
     actor_all_slot = metric(latest, "val_actor_all_slot_acc")
     actor_pair = metric(latest, "val_actor_pair_acc")
     actor_pair_swap = metric(latest, "val_actor_pair_swap_acc")
@@ -1012,22 +998,13 @@ def print_decision(epoch_df):
         latest,
         "val_loss_actor_object_binding_state",
     )
-    binding_action_loss = metric(latest, "val_loss_actor_object_binding_action")
     binding_state_margin = metric(
         latest,
         "val_actor_object_binding_state_margin",
     )
-    binding_action_margin = metric(
-        latest,
-        "val_actor_object_binding_action_margin",
-    )
     binding_state_pass = metric(
         latest,
         "val_actor_object_binding_state_pass_rate",
-    )
-    binding_action_pass = metric(
-        latest,
-        "val_actor_object_binding_action_pass_rate",
     )
     binding_count = metric(latest, "val_actor_object_binding_count")
     missing_view_count = metric(latest, "train_actor_object_missing_view_count")
@@ -1107,16 +1084,13 @@ def print_decision(epoch_df):
             f"tv_monitor {fmt(engagement_tv_acc)}, "
             f"laptop_book_tv {fmt(engagement_lbt_acc)}"
         )
-    if pd.notna(binding_state_margin) or pd.notna(binding_action_margin):
+    if pd.notna(binding_state_margin):
         print(
-            "object-action binding margins: "
+            "object-action binding state margin: "
             f"count {fmt(binding_count, 0)}, "
             f"state_loss {fmt(binding_state_loss)}, "
             f"state_margin {fmt(binding_state_margin)}, "
-            f"state_pass {fmt(binding_state_pass)}, "
-            f"action_loss {fmt(binding_action_loss)}, "
-            f"action_margin {fmt(binding_action_margin)}, "
-            f"action_pass {fmt(binding_action_pass)}"
+            f"state_pass {fmt(binding_state_pass)}"
         )
     if pd.notna(missing_view_count):
         print(
@@ -1222,11 +1196,6 @@ def print_decision(epoch_df):
             "objectless hard negatives: "
             f"acc {fmt(hard_objectless)}, count {fmt(hard_objectless_count, 0)}, "
             f"object_action_pred_rate {fmt(hard_object_action_rate)}"
-        )
-    if pd.notna(motion_aux_loss):
-        print(
-            "aux safeguards: "
-            f"motion_loss {fmt(motion_aux_loss)}, motion_acc {fmt(motion_aux_acc)}"
         )
     if (
         pd.notna(actor_all_slot)
@@ -1370,12 +1339,6 @@ def print_row(title, row):
             f"count {metric(row, 'val_objectless_with_object_visible_count'):.0f}, "
             "object_action_pred_rate "
             f"{metric(row, 'val_objectless_with_object_visible_object_action_pred_rate'):.4f}"
-        )
-    if pd.notna(metric(row, "val_loss_motion_aux")):
-        print(
-            "aux safeguards: "
-            f"motion_loss {metric(row, 'val_loss_motion_aux'):.4f}, "
-            f"motion_acc {metric(row, 'val_motion_aux_acc'):.4f}"
         )
     print(
         "poguise+ heatmap loss: "

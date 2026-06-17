@@ -263,8 +263,22 @@ def main():
     parser.add_argument("--test_fraction", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--object_conf_threshold", type=float, default=0.25)
-    parser.add_argument("--object_camera_allowlist", default="tv_monitor=c05,c06")
-    parser.add_argument("--object_ignore_regions", default="c03=0,0,0.26,0.42")
+    parser.add_argument(
+        "--object_camera_allowlist",
+        default=None,
+        help=(
+            "Optional class camera allowlist, e.g. tv_monitor=c05,c06. "
+            "Default disables view filtering."
+        ),
+    )
+    parser.add_argument(
+        "--object_ignore_regions",
+        default=None,
+        help=(
+            "Optional normalized camera ignore regions, e.g. "
+            "c03=0,0,0.26,0.42. Default disables region filtering."
+        ),
+    )
     parser.add_argument("--base_predictions_csv", default=None)
     parser.add_argument("--output_csv", default=None)
     args = parser.parse_args()

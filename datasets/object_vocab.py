@@ -89,16 +89,6 @@ DEFAULT_OBJECT_CLASS_THRESHOLDS = {
     "refrigerator": 0.55,
 }
 
-DEFAULT_OBJECT_CAMERA_ALLOWLIST = {
-    "tv_monitor": {"c05", "c06"},
-}
-
-DEFAULT_OBJECT_IGNORE_REGIONS = {
-    # Static recording/control hardware in the top-left of Toyota kitchen camera c03.
-    "c03": [(0.0, 0.0, 0.26, 0.42)],
-}
-
-
 def normalize_camera_id(camera_id):
     text = str(camera_id).strip().lower()
     if not text:
@@ -119,10 +109,7 @@ def camera_id_from_file_id(file_id):
 
 def parse_object_camera_allowlist(text=None):
     if text is None:
-        return {
-            name: set(cameras)
-            for name, cameras in DEFAULT_OBJECT_CAMERA_ALLOWLIST.items()
-        }
+        return {}
     if isinstance(text, dict):
         return {
             str(name): {
@@ -184,10 +171,7 @@ def _parse_normalized_region(text):
 
 def parse_object_ignore_regions(text=None):
     if text is None:
-        return {
-            camera: list(regions)
-            for camera, regions in DEFAULT_OBJECT_IGNORE_REGIONS.items()
-        }
+        return {}
     if isinstance(text, dict):
         parsed = {}
         for camera, regions in text.items():

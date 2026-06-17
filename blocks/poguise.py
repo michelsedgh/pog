@@ -1436,6 +1436,9 @@ class VisionTransformer(nn.Module):
         for relation_update in self.actor_object_relation_updates.values():
             nn.init.zeros_(relation_update.out[-1].weight)
             nn.init.zeros_(relation_update.out[-1].bias)
+            if relation_update.binding_delta is not None:
+                nn.init.zeros_(relation_update.binding_delta.weight)
+                nn.init.zeros_(relation_update.binding_delta.bias)
 
         self.head.weight.data.mul_(init_scale)
         self.head.bias.data.mul_(init_scale)

@@ -64,7 +64,7 @@ live inference.
 
 ### Detector-Success Frame Forcing Was Removed
 
-The old `interaction_guided_sampling` path changed which frames were sampled
+The old detector-success sampling path changed which frames were sampled
 for objectful clips by replacing normally sampled frames with frames where the
 expected object detector succeeded. The old objectless hard-negative sampling
 path did the inverse for objectless clips by forcing object-visible frames. The
@@ -353,29 +353,18 @@ objectful missing compatible -> NULL
 
 But relation loss only teaches "which object." It does not teach "what state this actor-object relation represents."
 
-### 4. Motion Auxiliary Is Working Against The Desired Concept
+### 4. Motion Auxiliary Was Removed
 
-Current launcher uses:
-
-```text
---motion_aux_loss_weight 0.35
-```
-
-This is an extra action classifier on actor tokens. It is not in PO-GUISE/PO-GUISE+. For this problem it likely reinforces the exact shortcut we dislike:
+The old motion auxiliary was a second action classifier on actor tokens. It was
+not part of PO-GUISE/PO-GUISE+ and could reinforce the shortcut we dislike:
 
 ```text
 motion pattern -> action
 ```
 
-The main live failure is low-motion state classification. A motion auxiliary action head is the wrong pressure unless it is specifically designed to classify motion regime, not action.
-
-Recommendation:
-
-```text
-motion_aux_loss_weight = 0.0
-```
-
-for the object-state diagnostic.
+That path has been removed. The only action classifier is now the main actor
+head; object-action semantics are shaped through relation, engagement, binding
+state, heatmap, and normal action CE.
 
 ### 5. Loss Grouping Is Messy
 
@@ -386,7 +375,7 @@ action CE
 heatmap localization
 ```
 
-Current training has action, relation, object prompt grounding, objectless suppression, objectless consistency, motion auxiliary, pose heatmap, interaction heatmap, positive heatmap balancing, center loss, and synthetic actor/object knobs.
+Current clean training has action CE, actor-object relation CE, actor-object engagement CE, binding-state margin, class-aware missing-object view supervision, object prompt grounding, pose heatmap, and interaction heatmap. Removed paths include motion auxiliary, objectless suppression loss, synthetic actor/object generation, detector-success frame forcing, and final-action object corrections.
 
 The issue is not that auxiliaries are bad. The issue is that every head should answer one clear question.
 
@@ -560,19 +549,8 @@ remove double useful_mass gating
 return non-detached object_context from relation update
 add actor-object engagement head/loss
 put semantic auxiliary losses in the main task group
-disable motion_aux action head
+remove the extra motion action head
 ```
-
-### Disable For The Object-State Diagnostic
-
-```text
---motion_aux_loss_weight 0.0
-```
-
-Reason: the motion auxiliary adds another action head while debugging
-object-state semantics. Synthetic actor composition and object-class
-dropout/wrong-class prompt corruption are no longer exposed as training knobs;
-keep the clip sampling and object prompts faithful.
 
 ### Keep Lightly
 
@@ -580,10 +558,11 @@ keep the clip sampling and object prompts faithful.
 --object_prompt_grounding_loss_weight 0.20-0.30
 --actor_object_relation_loss_weight 0.50
 --actor_object_relation_null_loss_weight 0.50
---objectless_object_action_suppression_loss_weight 0.30-0.50
 ```
 
-Objectless safeguards are useful, but they should not dominate the run. Their job is only:
+Objectless safeguards should come from relation NULL supervision and normal
+action CE, not a separate action-probability suppression rule. The suppression
+loss was removed; keep the objectless-with-visible-object metrics as diagnostics.
 
 ```text
 visible irrelevant objects should not hijack objectless actions
@@ -634,15 +613,12 @@ Use:
 --actor_object_relation_null_loss_weight 0.50
 --actor_object_engagement_loss_weight 0.50
 --actor_object_binding_state_loss_weight 0.75
---actor_object_binding_action_loss_weight 0.35
 --actor_object_binding_margin 0.50
 --actor_object_missing_view_action_loss_weight 0.25
 --actor_object_missing_view_engagement_loss_weight 0.25
 --actor_object_missing_view_relation_null_loss_weight 0.25
 --actor_object_missing_view_target_rate 0.25
 --object_prompt_grounding_loss_weight 0.35
---objectless_object_action_suppression_loss_weight 0.40
---motion_aux_loss_weight 0.0
 --class_balanced_sampler 1
 --max_epochs 10
 --t_max_scheduler 10

@@ -445,6 +445,10 @@ cmd = [
     "--toyota_frame_count_cache", FRAME_COUNT_CACHE,
     "--toyota_object_cache_dir", f"{DATA_DIR}/toyota_preprocessed_cache/objects",
     "--toyota_landmark_cache_dir", f"{DATA_DIR}/toyota_preprocessed_cache/landmarks",
+    "--toyota_actor_box_jitter_prob", "0.8",
+    "--toyota_actor_box_center_jitter", "0.08",
+    "--toyota_actor_box_scale_min", "0.9",
+    "--toyota_actor_box_scale_max", "1.3",
     "--toyota_split_source", "auto",
     "--toyota_val_fraction", "0.15",
     "--toyota_test_fraction", "0.0",
@@ -508,7 +512,6 @@ cmd = [
     "--actor_object_relation_loss_weight", "0.75",
     "--actor_object_engagement_loss_weight", "0.50",
     "--actor_object_binding_state_loss_weight", "0.75",
-    "--actor_object_binding_action_loss_weight", "0.35",
     "--actor_object_binding_margin", "0.50",
     "--actor_object_missing_view_action_loss_weight", "0.25",
     "--actor_object_missing_view_engagement_loss_weight", "0.25",
@@ -516,8 +519,6 @@ cmd = [
     "--actor_object_missing_view_target_rate", "0.25",
     "--actor_object_relation_null_loss_weight", "0.50",
     "--object_prompt_grounding_loss_weight", "0.35",
-    "--objectless_object_action_suppression_loss_weight", "0.40",
-
     "--batch_size", "32",
     "--accum_grad_batches", "2",
 

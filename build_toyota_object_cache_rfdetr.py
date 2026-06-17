@@ -84,8 +84,7 @@ def build_parser():
         default=None,
         help=(
             "Semicolon-separated class camera allowlist, e.g. "
-            "tv_monitor=c05,c06. Default keeps tv_monitor only in c05/c06. "
-            "Use 'none' to disable view filtering."
+            "tv_monitor=c05,c06. Default disables view filtering."
         ),
     )
     parser.add_argument(
@@ -93,8 +92,7 @@ def build_parser():
         default=None,
         help=(
             "Semicolon-separated normalized camera ignore regions, e.g. "
-            "c03=0,0,0.26,0.42. Default masks static c03 recording hardware. "
-            "Use 'none' to disable region filtering."
+            "c03=0,0,0.26,0.42. Default disables region filtering."
         ),
     )
     parser.add_argument("--batch_size", type=int, default=4)

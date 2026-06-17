@@ -387,7 +387,6 @@ def build_parser():
     parser.add_argument("--mixup", type=int, default=0)
     parser.add_argument("--target_kp_loss_weight", type=int, default=0)
     parser.add_argument("--kp_loss_weight", type=float, default=1000.0)
-    parser.add_argument("--interaction_warmup_freeze_actor_path", type=int, default=0)
     parser.add_argument("--log_kp_loss_weight", type=int, default=0)
     parser.add_argument("--grad_weights", type=int, default=0)
     parser.add_argument("--nash_update_weights_every", type=int, default=20)
@@ -420,16 +419,10 @@ def build_parser():
         type=float,
         default=10.0,
     )
-    parser.add_argument("--motion_aux_loss_weight", type=float, default=0.0)
     parser.add_argument("--actor_object_relation_loss_weight", type=float, default=0.0)
     parser.add_argument("--actor_object_engagement_loss_weight", type=float, default=0.0)
     parser.add_argument(
         "--actor_object_binding_state_loss_weight",
-        type=float,
-        default=0.0,
-    )
-    parser.add_argument(
-        "--actor_object_binding_action_loss_weight",
         type=float,
         default=0.0,
     )
@@ -464,11 +457,6 @@ def build_parser():
         default=0.5,
     )
     parser.add_argument("--object_prompt_grounding_loss_weight", type=float, default=0.0)
-    parser.add_argument(
-        "--objectless_object_action_suppression_loss_weight",
-        type=float,
-        default=0.3,
-    )
     parser.add_argument("--deepspeed_optim", type=int, default=0)
     parser.add_argument("--kp_only", type=int, default=0)
 

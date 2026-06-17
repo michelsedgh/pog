@@ -40,8 +40,7 @@ task 1: loss_grounding_aux
 ```
 
 `loss_main_deploy` includes action CE, presence, relation loss, engagement loss,
-object-action binding, missing-object view supervision, objectless suppression,
-and prompt grounding. Heatmap
+object-action binding, missing-object view supervision, and prompt grounding. Heatmap
 loss is placed in `loss_grounding_aux`. Nash-MTL can rebalance the two tasks, but
 the individual weights still change the gradients inside their task.
 
@@ -50,15 +49,8 @@ the individual weights still change the gradients inside their task.
 Object detections are now used as labels/prompts on the sampled clip, not as a
 reason to replace sampled frames.
 
-Removed dataset-side frame forcing:
-
-```text
-interaction_guided_sampling
-interaction_min_sampled_object_frames
-objectless_hard_negative_sampling
-objectless_hard_negative_min_sampled_object_frames
-interaction_repair_radius_frames
-```
+Removed dataset-side frame forcing includes the old object-success sampler,
+objectless object-visible sampler, and nearby-frame object repair path.
 
 Those knobs selected frames based on detector success. That is the wrong place
 to solve detector-miss robustness, because it changes the temporal distribution
@@ -421,37 +413,15 @@ Ranges:
 >1.00      likely too much unless grounding is the explicit task
 ```
 
-### Objectless Suppression
+### Removed: Objectless Suppression
 
-Code path: `_objectless_object_action_suppression_loss`.
+The old objectless suppression path directly penalized the sum of object-mapped
+action probabilities on objectless samples with visible objects. It was removed
+because it was a final-action guardrail, not PO-GUISE+ style representation
+learning.
 
-Only applies to objectless samples with visible hard objects. It computes:
-
-```text
-p = sum probabilities of object-mapped action classes
-loss = -log(1 - p)
-```
-
-Scale:
-
-```text
-p=0.05 -> 0.051
-p=0.10 -> 0.105
-p=0.30 -> 0.357
-p=0.50 -> 0.693
-p=0.80 -> 1.609
-```
-
-So this loss is small when behavior is already safe, but grows fast when the
-model predicts objectful classes on objectless examples.
-
-Ranges:
-
-```text
-0.20-0.40  mild/moderate
-0.70-1.20  strong
-1.50-2.00  overdrive protection for destructive object sweeps
-```
+Objectless behavior is now trained by normal action CE plus relation NULL
+supervision, and monitored by objectless-with-visible-object diagnostics.
 
 ### Class-Aware Missing-Object View
 
@@ -543,9 +513,9 @@ because laptop-on-lap relation is spatially approximate.
 
 ## Removed Sampling/Object-Token Hacks
 
-The previous `objectful_low_motion_aug_prob` sampler was removed. It changed the
-temporal training geometry by sampling a tight low-motion span instead of the
-normal live-style window. That made it a pressure hack rather than a PO-GUISE+
+The previous low-motion objectful sampler was removed. It changed the temporal
+training geometry by sampling a tight low-motion span instead of the normal
+live-style window. That made it a pressure hack rather than a PO-GUISE+
 object-action architecture mechanism.
 
 Nearby-frame object repair, pose-guided temporal start selection, hard-negative
@@ -622,7 +592,6 @@ If it does not, token selection is not responding as expected.
 
 ```text
 binding_state_loss = 1.25
-binding_action_loss = 0.50
 ```
 
 This is extreme because engagement/binding CE starts around `log(9)=2.20`, so a

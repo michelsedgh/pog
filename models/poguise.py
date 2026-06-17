@@ -219,16 +219,6 @@ class POGUISE(pl.LightningModule):
                 "are now one interacted-object channel per actor; object class "
                 "semantics come from runtime object prompt tokens."
             )
-        if self.hparams.get("interaction_warmup_freeze_actor_path", 0):
-            if not (self.actor_prompt and self.actor_interaction_heatmaps):
-                raise ValueError(
-                    "interaction_warmup_freeze_actor_path requires actor_prompt "
-                    "and actor_interaction_heatmaps"
-                )
-            if not self.hparams.get("freeze_backbone", 0):
-                raise ValueError(
-                    "interaction_warmup_freeze_actor_path requires freeze_backbone"
-                )
         self.use_register_tokens = bool(self.hparams.get("use_register_tokens", 0))
         self._create_network()
         # freeze backbone if specified
@@ -466,11 +456,6 @@ class POGUISE(pl.LightningModule):
                 self.net.num_features,
                 self.hparams.num_classes,
             )
-            self.actor_motion_head = (
-                nn.Linear(self.net.num_features, self.hparams.num_classes)
-                if float(self.hparams.get("motion_aux_loss_weight", 0.0)) > 0.0
-                else None
-            )
             self.presence_head = (
                 nn.Linear(self.net.num_features, 1)
                 if self.hparams.get("actor_presence_head", 0)
@@ -499,93 +484,41 @@ class POGUISE(pl.LightningModule):
         ):
             for param in self.net.heatmap_head.parameters():
                 param.requires_grad = True
-        interaction_warmup_freeze_actor_path = (
-            self.actor_prompt
-            and self.actor_interaction_heatmaps
-            and bool(self.hparams.get("interaction_warmup_freeze_actor_path", 0))
-        )
-        if interaction_warmup_freeze_actor_path:
-            print(
-                "Interaction warmup: freezing base actor path; training interaction "
-                "heatmap/object-token path and optional late transformer blocks only."
-            )
-            for param in self.head.parameters():
-                param.requires_grad = False
-            if self.actor_prompt:
-                if self.actor_head is not None:
-                    for param in self.actor_head.parameters():
-                        param.requires_grad = False
-                if self.actor_motion_head is not None:
-                    for param in self.actor_motion_head.parameters():
-                        param.requires_grad = False
-                if self.presence_head is not None:
-                    for param in self.presence_head.parameters():
-                        param.requires_grad = False
-        interaction_unfreeze_last_blocks = int(
-            self.hparams.get("interaction_unfreeze_last_blocks", 0) or 0
-        )
-        if self.actor_interaction_heatmaps and interaction_unfreeze_last_blocks > 0:
-            blocks = getattr(self.net, "blocks", None)
-            if blocks is None:
-                raise ValueError("interaction_unfreeze_last_blocks requires net.blocks")
-            if interaction_unfreeze_last_blocks > len(blocks):
-                raise ValueError(
-                    "interaction_unfreeze_last_blocks exceeds transformer depth: "
-                    f"{interaction_unfreeze_last_blocks} > {len(blocks)}"
-                )
-            print(
-                "Interaction heatmap path: unfreezing last "
-                f"{interaction_unfreeze_last_blocks} transformer blocks."
-            )
-            for block in blocks[-interaction_unfreeze_last_blocks:]:
-                for param in block.parameters():
-                    param.requires_grad = True
-            if getattr(self.net, "fc_norm", None) is not None:
-                for param in self.net.fc_norm.parameters():
-                    param.requires_grad = True
-            if getattr(self.net, "norm", None) is not None:
-                for param in self.net.norm.parameters():
-                    param.requires_grad = True
         # Unfreeze the head
-        if not interaction_warmup_freeze_actor_path:
-            for param in self.head.parameters():
-                param.requires_grad = True
+        for param in self.head.parameters():
+            param.requires_grad = True
         if self.actor_prompt:
-            if not interaction_warmup_freeze_actor_path:
-                if self.actor_head is not None:
-                    for param in self.actor_head.parameters():
+            if self.actor_head is not None:
+                for param in self.actor_head.parameters():
+                    param.requires_grad = True
+            if hasattr(self.net, "actor_token"):
+                self.net.actor_token.requires_grad = True
+            if hasattr(self.net, "actor_slot_embed"):
+                self.net.actor_slot_embed.requires_grad = True
+            if hasattr(self.net, "valid_embed"):
+                for param in self.net.valid_embed.parameters():
+                    param.requires_grad = True
+            if hasattr(self.net, "bbox_mlp"):
+                for param in self.net.bbox_mlp.parameters():
+                    param.requires_grad = True
+            for attr in (
+                "object_slot_embed",
+                "object_class_embed",
+                "object_box_mlp",
+                "object_conf_mlp",
+                "object_valid_embed",
+            ):
+                module = getattr(self.net, attr, None)
+                if module is None:
+                    continue
+                if isinstance(module, nn.Parameter):
+                    module.requires_grad = True
+                else:
+                    for param in module.parameters():
                         param.requires_grad = True
-                if self.actor_motion_head is not None:
-                    for param in self.actor_motion_head.parameters():
-                        param.requires_grad = True
-                if hasattr(self.net, "actor_token"):
-                    self.net.actor_token.requires_grad = True
-                if hasattr(self.net, "actor_slot_embed"):
-                    self.net.actor_slot_embed.requires_grad = True
-                if hasattr(self.net, "valid_embed"):
-                    for param in self.net.valid_embed.parameters():
-                        param.requires_grad = True
-                if hasattr(self.net, "bbox_mlp"):
-                    for param in self.net.bbox_mlp.parameters():
-                        param.requires_grad = True
-                for attr in (
-                    "object_slot_embed",
-                    "object_class_embed",
-                    "object_box_mlp",
-                    "object_conf_mlp",
-                    "object_valid_embed",
-                ):
-                    module = getattr(self.net, attr, None)
-                    if module is None:
-                        continue
-                    if isinstance(module, nn.Parameter):
-                        module.requires_grad = True
-                    else:
-                        for param in module.parameters():
-                            param.requires_grad = True
-                if self.presence_head is not None:
-                    for param in self.presence_head.parameters():
-                        param.requires_grad = True
+            if self.presence_head is not None:
+                for param in self.presence_head.parameters():
+                    param.requires_grad = True
     def _freeze_stages(self):
         if self.frozen_stages >= 0:
             self.patch_embed.eval()
@@ -657,7 +590,6 @@ class POGUISE(pl.LightningModule):
                 x_heatmap_feat = None
                 x_visual_final = None
                 x_object_prompt = None
-            self.last_actor_motion_logits = None
             self.last_actor_tokens = x_actor
             self.last_actor_object_prompt_classes = None
             self.last_actor_object_prompt_tokens = None
@@ -730,13 +662,9 @@ class POGUISE(pl.LightningModule):
                             dtype=x_actor.dtype,
                         )
                     )
-            if self.actor_motion_head is not None:
-                self.last_actor_motion_logits = self.actor_motion_head(x_actor)
             self.last_actor_action_tokens = x_actor
             action_scores = self.actor_head(x_actor)
             self.last_actor_action_logits = action_scores
-            if self.last_actor_motion_logits is None:
-                self.last_actor_motion_logits = action_scores
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
                 return action_scores, x_heatmap, presence_logits
@@ -839,7 +767,6 @@ class POGUISE(pl.LightningModule):
             default=1.0,
         )
         parser.add_argument("--trt_safe_attention", type=int, default=0)
-        parser.add_argument("--interaction_unfreeze_last_blocks", type=int, default=0)
         parser.add_argument("--ret_feat", type=int, default=0)
         parser.add_argument("--linear_probe", type=int, default=0)
 
