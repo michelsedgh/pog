@@ -33,11 +33,9 @@ FRAMES_PART2_TAR_FILE_ID = "1BGn2PAyNrH2k59snixN5z7eTFFVEmkBW"
 FRAMES_PART2_SQLITE_FILE_ID = "1Qy8wk3_y2dnSKEuNCMsM3tV3LrlgVY1S"
 
 OBJECT_CACHE_FILE_ID = "1kmCdEhfH_LUBNDlC4C1pUXtwz9PEORyp"
-HARD_NEGATIVES_FILE_ID = "13u7AZ5-MRrQMe6k2wwK1HW3S7kmn8_7v"
 
 SKELETON_ZIP = f"{DATA_DIR}/toyota_smarthome_skeleton_v1.2.zip"
 OBJECT_DETECTOR_CACHE = f"{DATA_DIR}/toyota_rfdetr_2xlarge_coco19_full.jsonl"
-HARD_NEGATIVE_MANIFEST = f"{DATA_DIR}/hard_negatives.json"
 
 FRAMES_PART1_TAR = f"{FRAME_ARCHIVE_DIR}/toyota_smarthome_frames_part001.tar"
 FRAMES_PART1_SQLITE = f"{FRAME_ARCHIVE_DIR}/toyota_smarthome_frames_part001.tar.index.sqlite"
@@ -159,7 +157,6 @@ downloads = [
     (FRAMES_PART2_TAR_FILE_ID, FRAMES_PART2_TAR),
     (FRAMES_PART2_SQLITE_FILE_ID, FRAMES_PART2_SQLITE),
     (OBJECT_CACHE_FILE_ID, OBJECT_DETECTOR_CACHE),
-    (HARD_NEGATIVES_FILE_ID, HARD_NEGATIVE_MANIFEST),
 ]
 
 print("\nDownloading Drive files concurrently...", flush=True)
@@ -219,7 +216,7 @@ for sample in sample_dirs:
     sample_frames = sorted(os.listdir(sample_path))[:3]
     print(sample, sample_frames, flush=True)
 
-for path in [SKELETON_ZIP, OBJECT_DETECTOR_CACHE, HARD_NEGATIVE_MANIFEST]:
+for path in [SKELETON_ZIP, OBJECT_DETECTOR_CACHE]:
     if not os.path.exists(path) or os.path.getsize(path) <= 0:
         raise RuntimeError(f"Missing or empty required file: {path}")
     print(f"Verified: {path} ({os.path.getsize(path) / 1e9:.2f} GB)", flush=True)
@@ -229,7 +226,6 @@ with open("/content/poguise_colab_env.sh", "w") as f:
 export DATA_DIR='{DATA_DIR}'
 export SKELETON_ZIP='{SKELETON_ZIP}'
 export OBJECT_DETECTOR_CACHE='{OBJECT_DETECTOR_CACHE}'
-export HARD_NEGATIVE_MANIFEST='{HARD_NEGATIVE_MANIFEST}'
 export FRAME_COUNT_CACHE='{FRAME_COUNT_CACHE}'
 export TOYOTA_FRAME_SOURCE='frames'
 export TOYOTA_FRAMES_DIR='{FRAME_UNION_DIR}'
@@ -247,7 +243,6 @@ print("Frame source: frames", flush=True)
 print("Frame union:", FRAME_UNION_DIR, flush=True)
 print("Skeleton zip:", SKELETON_ZIP, flush=True)
 print("Object cache:", OBJECT_DETECTOR_CACHE, flush=True)
-print("Hard negatives:", HARD_NEGATIVE_MANIFEST, flush=True)
 
 from pathlib import Path
 from datetime import datetime
@@ -389,62 +384,9 @@ def run_training_with_epoch_summaries(cmd, run_name, epoch_dir, poll_secs=20):
     summarize_run(run_dir, verbose=True)
     return str(run_dir)
 
-def parse_object_pressure_preset(argv):
-    argv = list(argv)
-    preset = "clean"
-    if "--object-pressure" in argv:
-        idx = argv.index("--object-pressure")
-        if idx + 1 >= len(argv):
-            raise SystemExit("--object-pressure requires clean or wild")
-        preset = argv[idx + 1].strip().lower()
-        del argv[idx : idx + 2]
-    if len(argv) > 1:
-        raise SystemExit(f"Unknown launcher arguments: {' '.join(argv[1:])}")
-    if preset not in {"clean", "wild"}:
-        raise SystemExit("--object-pressure must be clean or wild")
-    return preset
-
-def set_cmd_arg(cmd, key, value):
-    value = str(value)
-    if key in cmd:
-        idx = cmd.index(key)
-        if idx + 1 >= len(cmd):
-            raise RuntimeError(f"{key} is missing a value")
-        cmd[idx + 1] = value
-    else:
-        cmd.extend([key, value])
-
-def apply_object_pressure_preset(cmd, preset):
-    if preset == "clean":
-        print("OBJECT_PRESSURE_PRESET: clean", flush=True)
-        return
-    changes = {
-        "--actor_object_relation_null_logit_init": "3.5",
-        "--actor_object_relation_geometry_bias_weight": "0.75",
-        "--actor_object_relation_heatmap_bias_weight": "1.50",
-        "--actor_object_relation_max_scale": "1.50",
-        "--token_selection_object_weight": "0.25",
-        "--token_selection_heatmap_weight": "0.30",
-        "--actor_object_prompt_box_prior_weight": "0.15",
-        "--actor_object_prompt_box_prior_expand": "1.50",
-        "--actor_object_relation_loss_weight": "0.75",
-        "--actor_object_engagement_loss_weight": "0.50",
-        "--actor_object_binding_state_loss_weight": "0.75",
-        "--actor_object_binding_action_loss_weight": "0.35",
-        "--actor_object_binding_margin": "0.50",
-        "--object_prompt_grounding_loss_weight": "0.35",
-        "--objectless_prompt_consistency_loss_weight": "0.20",
-        "--objectless_object_action_suppression_loss_weight": "0.70",
-    }
-    print("OBJECT_PRESSURE_PRESET: wild", flush=True)
-    for key, value in changes.items():
-        set_cmd_arg(cmd, key, value)
-        print(f"  {key} {value}", flush=True)
-
-OBJECT_PRESSURE_PRESET = parse_object_pressure_preset(sys.argv)
 TS = datetime.now().strftime("%Y%m%d_%H%M%S")
-RUN_LABEL = "wild3" if OBJECT_PRESSURE_PRESET == "wild" else "diag3"
-RUN_NAME = f"actor_object_engagement_{RUN_LABEL}_{TS}"
+RUN_LABEL = "diag3"
+RUN_NAME = f"actor_object_missing_view_{RUN_LABEL}_{TS}"
 EPOCH_DIR = str(Path(DATA_DIR) / "checkpoints" / RUN_NAME / "epoch_checkpoints")
 
 cmd = [
@@ -500,12 +442,8 @@ cmd = [
     "--object_conf_threshold", "0.25",
 
     "--interaction_heatmap_sigma", "2.5",
-    "--objectless_hard_negative_min_sampled_object_frames", "2",
 
     "--class_balanced_sampler", "1",
-    "--hard_negative_sampler", "1",
-    "--hard_negative_manifest", HARD_NEGATIVE_MANIFEST,
-    "--hard_negative_prob", "0.25",
 
     "--keep_rate", "0.6",
     "--keep_rate_merge", "0.3",
@@ -530,9 +468,12 @@ cmd = [
     "--actor_object_binding_state_loss_weight", "0.50",
     "--actor_object_binding_action_loss_weight", "0.25",
     "--actor_object_binding_margin", "0.50",
+    "--actor_object_missing_view_action_loss_weight", "0.25",
+    "--actor_object_missing_view_engagement_loss_weight", "0.25",
+    "--actor_object_missing_view_relation_null_loss_weight", "0.25",
+    "--actor_object_missing_view_target_rate", "0.25",
     "--actor_object_relation_null_loss_weight", "0.50",
     "--object_prompt_grounding_loss_weight", "0.25",
-    "--objectless_prompt_consistency_loss_weight", "0.15",
     "--objectless_object_action_suppression_loss_weight", "0.40",
 
     "--batch_size", "32",
@@ -575,6 +516,5 @@ cmd = [
     "--model_name", RUN_NAME,
 ]
 
-apply_object_pressure_preset(cmd, OBJECT_PRESSURE_PRESET)
 run_dir = run_training_with_epoch_summaries(cmd, RUN_NAME, EPOCH_DIR, poll_secs=20)
 print("RUN_DIR:", run_dir)

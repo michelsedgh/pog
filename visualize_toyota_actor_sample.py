@@ -36,7 +36,6 @@ def build_parser():
     parser.add_argument("--max_scale", type=int, default=320)
     parser.add_argument("--crop_size", type=int, default=224)
     parser.add_argument("--box_expand", type=float, default=1.15)
-    parser.add_argument("--min_pose_frames", type=int, default=1)
     parser.add_argument("--temporal_start", type=int, default=None)
     parser.add_argument("--no_flip", action="store_true")
     parser.add_argument(
@@ -110,37 +109,6 @@ def load_skeleton(file_id, zip_path, pose_landmarks):
         landmarks.append(np.zeros((pose_landmarks, 2), dtype=np.float32))
     landmarks.append(landmarks[-1].copy())
     return np.stack(landmarks)
-
-
-def pose_available_by_frame(keypoints, n_frames):
-    keypoints = keypoints[:n_frames]
-    finite = np.isfinite(keypoints).all(axis=-1)
-    non_zero = ~np.all(keypoints == 0, axis=-1)
-    return (finite & non_zero).any(axis=1)
-
-
-def sample_pose_guided_start(n_frames, n_out, pose_available, min_pose_frames, seed):
-    if n_frames <= 128:
-        return 0
-
-    start_max = max(0, n_frames - 129)
-    starts = np.arange(0, start_max + 1, dtype=int)
-    hits = np.zeros(starts.shape[0], dtype=int)
-    for i, start in enumerate(starts):
-        end = min(start + 128, len(pose_available) - 1)
-        frame_idx = np.linspace(start, end, n_out, dtype=int)
-        frame_idx = np.clip(frame_idx, 0, len(pose_available) - 1)
-        hits[i] = int(pose_available[frame_idx].sum())
-
-    candidates = starts[hits >= min_pose_frames]
-    if len(candidates) == 0:
-        best_hit = int(hits.max())
-        if best_hit <= 0:
-            return None
-        candidates = starts[hits == best_hit]
-
-    rng = np.random.default_rng(seed)
-    return int(candidates[rng.integers(0, len(candidates))])
 
 
 def actor_box_from_keypoints(keypoints, height, width, expand):
@@ -288,22 +256,11 @@ def render_sample_contact_sheet(args, file_id):
     if video.shape[0] == 0:
         raise RuntimeError(f"No frames decoded from {video_path}")
 
-    keypoints = load_skeleton(
-        file_id, args.toyota_skeleton_zip, args.pose_landmarks
-    )
-    pose_available = pose_available_by_frame(keypoints, video.shape[0])
+    keypoints = load_skeleton(file_id, args.toyota_skeleton_zip, args.pose_landmarks)
 
     start = args.temporal_start
     if start is None:
-        start = sample_pose_guided_start(
-            video.shape[0],
-            args.n_frames,
-            pose_available,
-            args.min_pose_frames,
-            args.seed,
-        )
-    if start is None:
-        raise RuntimeError(f"No pose-guided temporal start found for {file_id}")
+        start = 0 if video.shape[0] <= 128 else video.shape[0] // 2 - 64
 
     end = min(start + 128, video.shape[0] - 1)
     frame_idx = np.linspace(start, end, args.n_frames, dtype=int)

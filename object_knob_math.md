@@ -40,9 +40,46 @@ task 1: loss_grounding_aux
 ```
 
 `loss_main_deploy` includes action CE, presence, relation loss, engagement loss,
-objectless suppression, prompt grounding, and objectless consistency. Heatmap
+object-action binding, missing-object view supervision, objectless suppression,
+and prompt grounding. Heatmap
 loss is placed in `loss_grounding_aux`. Nash-MTL can rebalance the two tasks, but
 the individual weights still change the gradients inside their task.
+
+## Sampling Cleanup
+
+Object detections are now used as labels/prompts on the sampled clip, not as a
+reason to replace sampled frames.
+
+Removed dataset-side frame forcing:
+
+```text
+interaction_guided_sampling
+interaction_min_sampled_object_frames
+objectless_hard_negative_sampling
+objectless_hard_negative_min_sampled_object_frames
+interaction_repair_radius_frames
+```
+
+Those knobs selected frames based on detector success. That is the wrong place
+to solve detector-miss robustness, because it changes the temporal distribution
+seen by the action model. `interaction_repair_radius_frames` did not replace
+video frames, but it still repaired the object stream from neighboring frames,
+which hides sampled-frame detector misses. PO-GUISE+ keeps the normal clip
+sampling and uses detector pseudo-labels to supervise the semantic heatmap/object
+path.
+
+The clean training rule is:
+
+```text
+sample clip normally
+if compatible object is present: train relation/binding to that object
+if compatible object is missing: train relation to NULL, keep action/binding
+                              supervision on the actor/video representation
+```
+
+If live testing still shows collapse when laptop detections are missing, the
+next clean addition should be class-aware missing-object view training for the
+under-missing classes only, not global object dropout.
 
 ## Token Selection
 
@@ -416,20 +453,22 @@ Ranges:
 1.50-2.00  overdrive protection for destructive object sweeps
 ```
 
-### Objectless Prompt Consistency
+### Class-Aware Missing-Object View
 
-Code path: `_objectless_prompt_consistency_loss`.
+Code path: `_actor_object_missing_view_loss`.
 
-It compares predictions with real/distractor object prompts on objectless
-examples, using KL/prediction consistency. The raw KL usually has smaller scale
-than CE.
+For object actions whose teacher object is almost always detected in Toyota, a
+second training forward removes compatible object prompts for a sampled subset of
+exact-teacher examples. The RGB clip, actor box, and action label stay unchanged.
+The model is trained to keep the action and engagement state correct while the
+relation head routes to NULL because the compatible prompt is absent.
 
 Ranges:
 
 ```text
-0.05-0.15  mild
-0.20-0.40  strong
-0.60+      overdrive; may make model too invariant to object prompts
+target missing rate 0.20-0.30  normal robustness
+loss weights        0.20-0.30  mild/moderate second-view pressure
+loss weights        0.50+      strong; can weaken object reliance
 ```
 
 ## Heatmap Losses
@@ -502,12 +541,19 @@ poguiseplus_heatmap_mse_scale:
 For live transfer, a slightly broader target (`2.0-2.5`) can be reasonable
 because laptop-on-lap relation is spatially approximate.
 
-## Removed Sampling Hack
+## Removed Sampling/Object-Token Hacks
 
 The previous `objectful_low_motion_aug_prob` sampler was removed. It changed the
 temporal training geometry by sampling a tight low-motion span instead of the
 normal live-style window. That made it a pressure hack rather than a PO-GUISE+
 object-action architecture mechanism.
+
+Nearby-frame object repair, pose-guided temporal start selection, hard-negative
+oversampling, object-token box jitter, confidence noise, objectless consistency,
+and synthetic actor collages were also removed. For this architecture, runtime
+object prompts should be faithful detector proposals; robustness to detector
+misses should come from natural missing-object windows and the explicit
+class-aware missing-object view, not repaired/corrupted object prompts.
 
 Paused laptop transfer should now be tested through actor-object binding
 metrics and live/saved-video probes, not by changing the sampled temporal span.

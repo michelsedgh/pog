@@ -29,7 +29,6 @@ TRANSFER_SWEEP = [
             "--actor_object_binding_action_loss_weight": "0.35",
             "--actor_object_binding_margin": "0.50",
             "--object_prompt_grounding_loss_weight": "0.50",
-            "--objectless_prompt_consistency_loss_weight": "0.35",
             "--objectless_object_action_suppression_loss_weight": "1.20",
         },
     ),
@@ -53,7 +52,6 @@ TRANSFER_SWEEP = [
             "--actor_object_binding_action_loss_weight": "0.50",
             "--actor_object_binding_margin": "0.50",
             "--object_prompt_grounding_loss_weight": "0.35",
-            "--objectless_prompt_consistency_loss_weight": "0.35",
             "--objectless_object_action_suppression_loss_weight": "1.00",
         },
     ),
@@ -77,7 +75,6 @@ TRANSFER_SWEEP = [
             "--actor_object_binding_action_loss_weight": "0.50",
             "--actor_object_binding_margin": "0.50",
             "--object_prompt_grounding_loss_weight": "0.60",
-            "--objectless_prompt_consistency_loss_weight": "0.40",
             "--objectless_object_action_suppression_loss_weight": "1.50",
         },
     ),
@@ -101,7 +98,6 @@ TRANSFER_SWEEP = [
             "--actor_object_binding_action_loss_weight": "0.75",
             "--actor_object_binding_margin": "0.50",
             "--object_prompt_grounding_loss_weight": "1.00",
-            "--objectless_prompt_consistency_loss_weight": "0.60",
             "--objectless_object_action_suppression_loss_weight": "2.00",
         },
     ),
@@ -315,12 +311,8 @@ def make_base_cmd(run_name, epoch_dir):
         "--object_conf_threshold", "0.25",
 
         "--interaction_heatmap_sigma", "2.5",
-        "--objectless_hard_negative_min_sampled_object_frames", "2",
 
         "--class_balanced_sampler", "1",
-        "--hard_negative_sampler", "1",
-        "--hard_negative_manifest", HARD_NEGATIVE_MANIFEST,
-        "--hard_negative_prob", "0.25",
 
         "--keep_rate", "0.6",
         "--keep_rate_merge", "0.3",
@@ -347,7 +339,6 @@ def make_base_cmd(run_name, epoch_dir):
         "--actor_object_binding_margin", "0.50",
         "--actor_object_relation_null_loss_weight", "0.50",
         "--object_prompt_grounding_loss_weight", "0.50",
-        "--objectless_prompt_consistency_loss_weight", "0.30",
         "--objectless_object_action_suppression_loss_weight", "1.00",
 
 

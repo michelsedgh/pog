@@ -159,22 +159,12 @@ mapped object is visible inside the same clip window. The action target remains
 the objectless class; this teaches `object visible != object action` without
 inventing a fake object-positive label.
 
-## Synthetic Actor Slots
+## Actor Slots
 
-Synthetic side-by-side Toyota samples are optional and off by default. When
-enabled, use a modest two-actor probability and bias some partners toward
-object-confusable actions:
-
-```text
---toyota_synthetic_two_actor_prob 0.20
---toyota_synthetic_three_actor_prob 0.0
---toyota_synthetic_same_class_prob 0.35
---toyota_synthetic_confuser_prob 0.50
-```
-
-This teaches slot separation without making every sample artificial. Confuser
-pairing targets laptop/book/phone, drink cup/bottle/glass, and cooking-object
-boundaries from `ACTION_OBJECT_CONFUSERS`.
+Use real multi-actor clips when they exist. Synthetic side-by-side Toyota actor
+collages were removed from the clean training path because they changed the data
+distribution while debugging object-action semantics. Confuser evaluation should
+come from real validation clips and object-prompt counterfactual diagnostics.
 
 ## Recommended Checkpoint Signals
 

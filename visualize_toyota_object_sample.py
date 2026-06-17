@@ -58,9 +58,6 @@ def build_parser():
     parser.add_argument("--object_camera_allowlist", default=None)
     parser.add_argument("--object_ignore_regions", default=None)
     parser.add_argument("--object_track_iou_threshold", type=float, default=0.2)
-    parser.add_argument("--interaction_guided_sampling", type=int, default=1)
-    parser.add_argument("--interaction_min_sampled_object_frames", type=int, default=1)
-    parser.add_argument("--interaction_repair_radius_frames", type=int, default=8)
     parser.add_argument("--interaction_quality_min_actor_score", type=float, default=1.0)
     parser.add_argument("--interaction_quality_min_track_frames", type=int, default=1)
     parser.add_argument(
@@ -72,7 +69,6 @@ def build_parser():
         help="Comma-separated Toyota action names to visualize, e.g. Uselaptop,Readbook.",
     )
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--synthetic_two_actor", action="store_true")
     parser.add_argument("--contact_sheet", type=int, default=1)
     parser.add_argument("--contact_cols", type=int, default=4)
     parser.add_argument(
@@ -106,9 +102,6 @@ def dataset_kwargs(args):
         "object_ignore_regions": args.object_ignore_regions,
         "object_conf_threshold": args.object_conf_threshold,
         "object_track_iou_threshold": args.object_track_iou_threshold,
-        "interaction_guided_sampling": args.interaction_guided_sampling,
-        "interaction_min_sampled_object_frames": args.interaction_min_sampled_object_frames,
-        "interaction_repair_radius_frames": args.interaction_repair_radius_frames,
         "interaction_quality_min_actor_score": args.interaction_quality_min_actor_score,
         "interaction_quality_min_track_frames": args.interaction_quality_min_track_frames,
         "interaction_quality_min_track_coverage": (
@@ -119,10 +112,6 @@ def dataset_kwargs(args):
         "toyota_frame_count_cache": args.toyota_frame_count_cache,
         "toyota_split_source": "auto",
         "toyota_max_samples": args.toyota_max_samples,
-        "toyota_synthetic_warmup_epochs": 0 if args.synthetic_two_actor else 99,
-        "toyota_synthetic_two_actor_prob": 1.0 if args.synthetic_two_actor else 0.0,
-        "toyota_synthetic_three_actor_prob": 0.0,
-        "toyota_synthetic_same_class_prob": 0.0,
     }
     if args.toyota_frame_source == "mp4_zip":
         kwargs["toyota_mp4_zip"] = args.toyota_mp4_zip

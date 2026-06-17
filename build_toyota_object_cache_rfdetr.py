@@ -200,9 +200,6 @@ def build_sampling_dataset(args, set_type):
         toyota_test_fraction=args.toyota_test_fraction,
         toyota_max_samples=args.toyota_max_samples,
         toyota_seed=args.toyota_seed,
-        toyota_synthetic_warmup_epochs=99,
-        toyota_synthetic_two_actor_prob=0.0,
-        toyota_synthetic_three_actor_prob=0.0,
     )
     ds.setup()
     return ds
@@ -211,15 +208,6 @@ def build_sampling_dataset(args, set_type):
 def sampled_frame_indices(ds, idx):
     file_id = ds.data_df.iloc[idx].file_id
     n_frames = ds._num_frames(file_id)
-    video_height, video_width = ds._video_size(file_id)
-    pose_available = None
-    if ds.actor_prompt and ds.needs_skeleton and ds.toyota_pose_guided_sampling:
-        pose_available = ds._pose_available_by_frame(
-            idx,
-            n_frames,
-            video_height,
-            video_width,
-        )
 
     if ds.set_type == "test":
         start_frame = ds.data_df.iloc[idx].start
@@ -227,40 +215,17 @@ def sampled_frame_indices(ds, idx):
         if end_frame < 0 or end_frame >= n_frames:
             end_frame = n_frames - 1
     elif n_frames > 128:
-        max_start = max(0, n_frames - 129)
         if ds.set_type == "train":
-            start_frame = None
-            if pose_available is not None:
-                start_frame = ds._sample_pose_guided_start(
-                    0,
-                    max_start,
-                    pose_available,
-                )
-            if start_frame is None:
-                start_frame = np.random.randint(0, n_frames - 128)
+            start_frame = np.random.randint(0, n_frames - 128)
             end_frame = min(start_frame + 128, n_frames - 1)
         else:
-            start_frame = None
-            if pose_available is not None:
-                start_frame = ds._sample_pose_guided_start(
-                    0,
-                    max_start,
-                    pose_available,
-                )
-            if start_frame is None:
-                start_frame = n_frames // 2 - 64
-                end_frame = n_frames // 2 + 64
-            else:
-                end_frame = min(start_frame + 128, n_frames - 1)
+            start_frame = n_frames // 2 - 64
+            end_frame = n_frames // 2 + 64
     else:
         start_frame = 0
         end_frame = n_frames - 1
 
-    frames_idx = ds._sample_frame_indices(
-        start_frame,
-        end_frame,
-        pose_available=pose_available,
-    )
+    frames_idx = ds._sample_frame_indices(start_frame, end_frame)
     if len(frames_idx) < ds.n_frames:
         frames_idx = np.pad(frames_idx, (0, ds.n_frames - len(frames_idx)), "edge")
     return sorted(set(int(v) for v in frames_idx.tolist()))

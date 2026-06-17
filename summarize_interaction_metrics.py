@@ -118,6 +118,18 @@ CORE_COLUMNS = [
     "train_nash_weight_heatmap",
     "train_nash_weight_main_deploy",
     "train_nash_weight_grounding_aux",
+    "train_actor_object_missing_view_count",
+    "train_actor_object_missing_view_Uselaptop_count",
+    "train_actor_object_missing_view_Readbook_count",
+    "train_actor_object_missing_view_WatchTV_count",
+    "train_actor_object_missing_view_Drink_count",
+    "train_loss_actor_object_missing_view_action",
+    "train_actor_object_missing_view_action_acc",
+    "train_loss_actor_object_missing_view_engagement",
+    "train_actor_object_missing_view_engagement_acc",
+    "train_loss_actor_object_missing_view_relation_null",
+    "train_actor_object_missing_view_relation_null_prob",
+    "train_actor_object_missing_view_relation_null_acc",
     "val_interaction_teacher_slot_rate",
     "val_interaction_teacher_slot_count",
     "val_interaction_heatmap_missing_object_masked_rate",
@@ -142,11 +154,6 @@ CORE_COLUMNS = [
     "val_objectless_with_phone_visible_acc",
     "val_objectless_with_phone_visible_count",
     "val_watchtv_fp_rate_objectless",
-    "train_loss_objectless_prompt_consistency",
-    "train_objectless_prompt_consistency_pred_match",
-    "train_objectless_prompt_consistency_kl",
-    "train_objectless_prompt_distractor_pred_match",
-    "train_objectless_prompt_distractor_kl",
 ]
 
 GROUPS = [
@@ -352,6 +359,14 @@ def print_compact_epoch_summary(epoch_df):
         "val_actor_object_binding_state_pass_rate",
         "val_actor_object_binding_action_pass_rate",
         "val_actor_object_binding_count",
+        "train_actor_object_missing_view_count",
+        "train_loss_actor_object_missing_view_action",
+        "train_actor_object_missing_view_action_acc",
+        "train_loss_actor_object_missing_view_engagement",
+        "train_actor_object_missing_view_engagement_acc",
+        "train_loss_actor_object_missing_view_relation_null",
+        "train_actor_object_missing_view_relation_null_prob",
+        "train_actor_object_missing_view_relation_null_acc",
         "val_relation_exact_teacher_acc",
         "val_relation_exact_teacher_prob",
         "val_relation_useful_mass_exact",
@@ -1015,6 +1030,35 @@ def print_decision(epoch_df):
         "val_actor_object_binding_action_pass_rate",
     )
     binding_count = metric(latest, "val_actor_object_binding_count")
+    missing_view_count = metric(latest, "train_actor_object_missing_view_count")
+    missing_view_action_loss = metric(
+        latest,
+        "train_loss_actor_object_missing_view_action",
+    )
+    missing_view_action_acc = metric(
+        latest,
+        "train_actor_object_missing_view_action_acc",
+    )
+    missing_view_engagement_loss = metric(
+        latest,
+        "train_loss_actor_object_missing_view_engagement",
+    )
+    missing_view_engagement_acc = metric(
+        latest,
+        "train_actor_object_missing_view_engagement_acc",
+    )
+    missing_view_relation_loss = metric(
+        latest,
+        "train_loss_actor_object_missing_view_relation_null",
+    )
+    missing_view_relation_null_prob = metric(
+        latest,
+        "train_actor_object_missing_view_relation_null_prob",
+    )
+    missing_view_relation_null_acc = metric(
+        latest,
+        "train_actor_object_missing_view_relation_null_acc",
+    )
 
     print("\nDECISION:\n")
     print(f"latest epoch: {latest_epoch}")
@@ -1073,6 +1117,18 @@ def print_decision(epoch_df):
             f"action_loss {fmt(binding_action_loss)}, "
             f"action_margin {fmt(binding_action_margin)}, "
             f"action_pass {fmt(binding_action_pass)}"
+        )
+    if pd.notna(missing_view_count):
+        print(
+            "missing-object view training: "
+            f"count {fmt(missing_view_count, 0)}, "
+            f"action_loss {fmt(missing_view_action_loss)}, "
+            f"action_acc {fmt(missing_view_action_acc)}, "
+            f"engagement_loss {fmt(missing_view_engagement_loss)}, "
+            f"engagement_acc {fmt(missing_view_engagement_acc)}, "
+            f"relation_null_loss {fmt(missing_view_relation_loss)}, "
+            f"null_prob {fmt(missing_view_relation_null_prob)}, "
+            f"null_acc {fmt(missing_view_relation_null_acc)}"
         )
     if pd.notna(prompt_acc) or pd.notna(prompt_loss):
         print(

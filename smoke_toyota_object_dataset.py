@@ -79,9 +79,6 @@ def build_parser():
     parser.add_argument("--object_camera_allowlist", default=None)
     parser.add_argument("--object_ignore_regions", default=None)
     parser.add_argument("--object_track_iou_threshold", type=float, default=0.2)
-    parser.add_argument("--interaction_guided_sampling", type=int, default=1)
-    parser.add_argument("--interaction_min_sampled_object_frames", type=int, default=1)
-    parser.add_argument("--interaction_repair_radius_frames", type=int, default=8)
     parser.add_argument("--interaction_quality_min_actor_score", type=float, default=1.0)
     parser.add_argument("--interaction_quality_min_track_frames", type=int, default=1)
     parser.add_argument(
@@ -96,7 +93,7 @@ def build_parser():
     return parser
 
 
-def dataset_kwargs(args, synthetic_two_actor=False):
+def dataset_kwargs(args):
     kwargs = {
         "data_dir": args.data_dir,
         "set_type": "train",
@@ -119,9 +116,6 @@ def dataset_kwargs(args, synthetic_two_actor=False):
         "object_ignore_regions": args.object_ignore_regions,
         "object_conf_threshold": args.object_conf_threshold,
         "object_track_iou_threshold": args.object_track_iou_threshold,
-        "interaction_guided_sampling": args.interaction_guided_sampling,
-        "interaction_min_sampled_object_frames": args.interaction_min_sampled_object_frames,
-        "interaction_repair_radius_frames": args.interaction_repair_radius_frames,
         "interaction_quality_min_actor_score": args.interaction_quality_min_actor_score,
         "interaction_quality_min_track_frames": args.interaction_quality_min_track_frames,
         "interaction_quality_min_track_coverage": (
@@ -132,10 +126,6 @@ def dataset_kwargs(args, synthetic_two_actor=False):
         "toyota_frame_count_cache": args.toyota_frame_count_cache,
         "toyota_split_source": "auto",
         "toyota_max_samples": args.toyota_max_samples,
-        "toyota_synthetic_warmup_epochs": 0 if synthetic_two_actor else 99,
-        "toyota_synthetic_two_actor_prob": 1.0 if synthetic_two_actor else 0.0,
-        "toyota_synthetic_three_actor_prob": 0.0,
-        "toyota_synthetic_same_class_prob": 0.0,
     }
     if args.toyota_frame_source == "mp4_zip":
         kwargs["toyota_mp4_zip"] = args.toyota_mp4_zip
@@ -143,8 +133,8 @@ def dataset_kwargs(args, synthetic_two_actor=False):
     return kwargs
 
 
-def build_dataset(args, synthetic_two_actor=False):
-    ds = ToyotaSMDataset(**dataset_kwargs(args, synthetic_two_actor))
+def build_dataset(args):
+    ds = ToyotaSMDataset(**dataset_kwargs(args))
     ds.setup()
     return ds
 
@@ -368,22 +358,13 @@ def run_smoke(args):
     if report.failed:
         return report.finish()
 
-    ds = build_dataset(args, synthetic_two_actor=False)
+    ds = build_dataset(args)
     sample = pick_sample(ds, args, report)
     if sample is None:
         return report.finish()
     idx, frames, target = sample
     validate_interaction_target(
         f"interaction_sample_{idx}", frames, target, args, report
-    )
-
-    synthetic_ds = build_dataset(args, synthetic_two_actor=True)
-    sample = pick_sample(synthetic_ds, args, report)
-    if sample is None:
-        return report.finish()
-    idx, frames, target = sample
-    validate_interaction_target(
-        f"synthetic_interaction_sample_{idx}", frames, target, args, report
     )
 
     return report.finish()

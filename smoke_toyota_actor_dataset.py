@@ -54,15 +54,10 @@ def build_parser():
     parser.add_argument("--num_actor_tokens", type=int, default=8)
     parser.add_argument("--num_classes", type=int, default=31)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument(
-        "--skip_single_actor",
-        action="store_true",
-        help="Only run the forced synthetic two-actor dataset check.",
-    )
     return parser
 
 
-def dataset_kwargs(args, synthetic_two_actor):
+def dataset_kwargs(args):
     return {
         "data_dir": args.data_dir,
         "set_type": "train",
@@ -82,15 +77,11 @@ def dataset_kwargs(args, synthetic_two_actor):
         "toyota_frame_count_cache": args.toyota_frame_count_cache,
         "toyota_split_source": "auto",
         "toyota_max_samples": args.toyota_max_samples,
-        "toyota_synthetic_warmup_epochs": 0 if synthetic_two_actor else 99,
-        "toyota_synthetic_two_actor_prob": 1.0 if synthetic_two_actor else 0.0,
-        "toyota_synthetic_three_actor_prob": 0.0,
-        "toyota_synthetic_same_class_prob": 1.0,
     }
 
 
-def build_dataset(args, synthetic_two_actor):
-    ds = ToyotaSMDataset(**dataset_kwargs(args, synthetic_two_actor))
+def build_dataset(args):
+    ds = ToyotaSMDataset(**dataset_kwargs(args))
     ds.setup()
     return ds
 
@@ -220,14 +211,9 @@ def run_smoke(args):
     if report.failed:
         return report.finish()
 
-    if not args.skip_single_actor:
-        single_ds = build_dataset(args, synthetic_two_actor=False)
-        frames, target = single_ds[args.sample_index]
-        validate_sample("single_actor_sample", frames, target, 1, args, report)
-
-    synthetic_ds = build_dataset(args, synthetic_two_actor=True)
-    frames, target = synthetic_ds[args.sample_index]
-    validate_sample("synthetic_two_actor_sample", frames, target, 2, args, report)
+    single_ds = build_dataset(args)
+    frames, target = single_ds[args.sample_index]
+    validate_sample("single_actor_sample", frames, target, 1, args, report)
 
     return report.finish()
 

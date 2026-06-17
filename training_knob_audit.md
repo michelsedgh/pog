@@ -62,6 +62,34 @@ That was a distribution-changing augmentation, so it has been removed from
 data-side augmentation later if it preserves the same temporal geometry used by
 live inference.
 
+### Detector-Success Frame Forcing Was Removed
+
+The old `interaction_guided_sampling` path changed which frames were sampled
+for objectful clips by replacing normally sampled frames with frames where the
+expected object detector succeeded. The old objectless hard-negative sampling
+path did the inverse for objectless clips by forcing object-visible frames. The
+old object repair path could also insert an expected object from nearby frames
+when the sampled frame missed it.
+
+That is not the PO-GUISE+ setup. PO-GUISE+ samples the clip normally and uses
+pose/object pseudo-labels to supervise heatmap tokens. The detector should
+label the sampled evidence; it should not choose an easier or more object-heavy
+temporal view.
+
+This matters for the live failure:
+
+```text
+Toyota Uselaptop: detector almost always sees laptop
+live Uselaptop: detector can miss laptop or see it intermittently
+```
+
+If training forces objectful windows toward detector-success frames, the model
+learns the clean laptop-present case but does not see enough natural
+missing/intermittent evidence. The cleaned dataset now keeps the original frame
+sampling geometry. Relation/grounding/binding losses still use real detected
+objects when they are present; missing detections naturally train NULL relation
+behavior and force the actor/video path to carry the fallback evidence.
+
 ### Corrected Missing Mechanism
 
 The engagement head added so far is post-transformer auxiliary supervision:
@@ -539,14 +567,12 @@ disable motion_aux action head
 
 ```text
 --motion_aux_loss_weight 0.0
---object_class_dropout_prob 0.0
---object_class_wrong_prob 0.0
---toyota_synthetic_two_actor_prob 0.0
---toyota_synthetic_three_actor_prob 0.0
---toyota_synthetic_confuser_prob 0.0
 ```
 
-Reason: these are useful later, but they add noise while debugging object-state semantics.
+Reason: the motion auxiliary adds another action head while debugging
+object-state semantics. Synthetic actor composition and object-class
+dropout/wrong-class prompt corruption are no longer exposed as training knobs;
+keep the clip sampling and object prompts faithful.
 
 ### Keep Lightly
 
@@ -554,7 +580,6 @@ Reason: these are useful later, but they add noise while debugging object-state 
 --object_prompt_grounding_loss_weight 0.20-0.30
 --actor_object_relation_loss_weight 0.50
 --actor_object_relation_null_loss_weight 0.50
---objectless_prompt_consistency_loss_weight 0.10-0.20
 --objectless_object_action_suppression_loss_weight 0.30-0.50
 ```
 
@@ -584,8 +609,16 @@ Only re-enable positive/center losses if interaction heatmaps collapse or center
 
 ### Removed From The Clean Architecture Diagnostic
 
-The low-motion sampler and its CLI flag were removed. The clean diagnostic now
-tests object-action binding without changing the temporal training geometry.
+The low-motion sampler, detector-success frame forcing, objectless frame forcing,
+nearby-frame object repair, object-token box jitter, and object-token confidence
+noise were removed. The clean diagnostic now tests object-action binding without
+changing the temporal training geometry or corrupting runtime object proposals.
+
+Whole-clip hard-negative oversampling is also disabled for the main
+object-binding diagnostic. It is not a frame corruption bug, but it adds a
+distribution pressure in the opposite direction: visible objects should often
+not affect the action. Bring it back only after object-action binding works and
+the remaining problem is objectless false positives.
 
 ## Recommended 10-Epoch Diagnostic Setup
 
@@ -597,18 +630,20 @@ Use:
 --actor_object_prompt_tokens 1
 --actor_object_relation_in_transformer 1
 --actor_object_relation_blocks 6,9
---actor_object_relation_loss_weight 0.50
+--actor_object_relation_loss_weight 0.75
 --actor_object_relation_null_loss_weight 0.50
---actor_object_engagement_loss_weight 0.30
---object_prompt_grounding_loss_weight 0.25
---objectless_prompt_consistency_loss_weight 0.15
+--actor_object_engagement_loss_weight 0.50
+--actor_object_binding_state_loss_weight 0.75
+--actor_object_binding_action_loss_weight 0.35
+--actor_object_binding_margin 0.50
+--actor_object_missing_view_action_loss_weight 0.25
+--actor_object_missing_view_engagement_loss_weight 0.25
+--actor_object_missing_view_relation_null_loss_weight 0.25
+--actor_object_missing_view_target_rate 0.25
+--object_prompt_grounding_loss_weight 0.35
 --objectless_object_action_suppression_loss_weight 0.40
 --motion_aux_loss_weight 0.0
---toyota_synthetic_two_actor_prob 0.0
---toyota_synthetic_three_actor_prob 0.0
---toyota_synthetic_confuser_prob 0.0
---object_class_dropout_prob 0.0
---object_class_wrong_prob 0.0
+--class_balanced_sampler 1
 --max_epochs 10
 --t_max_scheduler 10
 ```
@@ -622,6 +657,83 @@ Keep the PO-GUISE token settings:
 --sim_metric 1
 --grad_weights 1
 ```
+
+## Next Clean Addition: Class-Aware Missing-Object View
+
+Do not add global object dropout. Toyota already has many natural missing-object
+examples for phone/bottle/pour actions:
+
+```text
+Uselaptop      missing ~= 0.03
+Readbook       missing ~= 0.16
+WatchTV        missing ~= 0.22
+Drink.Fromcup  missing ~= 0.22
+Usetelephone   missing ~= 0.65
+Drink bottle   missing ~= 0.56
+Pour bottle    missing ~= 0.68
+```
+
+Global dropout would over-mask classes that already have plenty of missing
+object supervision. Use a target missing exposure and only synthesize the
+shortfall:
+
+```text
+target_missing_rate = 0.25
+mask_prob(action) =
+  max(0, target_missing_rate - natural_missing_rate(action))
+  / max(1e-6, 1 - natural_missing_rate(action))
+```
+
+Approximate probabilities from the current audit:
+
+```text
+Uselaptop      mask_prob ~= 0.23
+Readbook       mask_prob ~= 0.11
+WatchTV        mask_prob ~= 0.04
+Drink.Fromcup  mask_prob ~= 0.04
+others above 0.25 missing: 0.00
+```
+
+Implementation should be a second training view, not a dataset mutation:
+
+```text
+normal view:
+  frames unchanged
+  object prompts unchanged
+  relation target = exact object if present
+  binding/action/engagement losses active
+
+missing-object view:
+  same frames
+  same actor boxes
+  remove only compatible object prompt tokens for selected actions
+  keep unrelated/distractor object tokens
+  relation target = NULL
+  object prompt grounding ignored for removed object
+  action CE still uses the true action
+  engagement state CE still uses the true object state
+  interaction heatmap supervision may stay valid from the original teacher
+```
+
+The missing view teaches the fallback we want:
+
+```text
+if laptop prompt is absent but the video/actor state still looks like laptop use,
+actor_head should still prefer Uselaptop over Readbook/Usetelephone.
+```
+
+Keep the missing-view action/engagement weight mild:
+
+```text
+missing_view_action_ce_weight       0.20-0.30
+missing_view_engagement_weight      0.20-0.30
+missing_view_relation_null_weight   0.20-0.30
+```
+
+Do not apply the binding margin in missing view, because binding margin is about
+the real selected object class. When the compatible object prompt is deliberately
+absent, the correct relation behavior is NULL plus correct action/engagement
+from actor/video evidence.
 
 ## Metrics That Decide If It Worked
 

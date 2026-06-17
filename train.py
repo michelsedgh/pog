@@ -8,7 +8,6 @@ from argparse import ArgumentParser
 
 import torch
 from pytorch_lightning import Trainer, seed_everything
-from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger
 
@@ -57,22 +56,6 @@ class _LegacyCheckpointPickle:
     load = pickle.load
     loads = pickle.loads
     HIGHEST_PROTOCOL = pickle.HIGHEST_PROTOCOL
-
-
-class DatasetEpochCallback(Callback):
-    def _set_epoch(self, trainer, epoch):
-        datamodule = trainer.datamodule
-        if datamodule is None or not hasattr(datamodule, "train_dataset"):
-            return
-        train_dataset = datamodule.train_dataset
-        if hasattr(train_dataset, "set_epoch"):
-            train_dataset.set_epoch(epoch)
-
-    def on_fit_start(self, trainer, pl_module):
-        self._set_epoch(trainer, trainer.current_epoch)
-
-    def on_train_epoch_end(self, trainer, pl_module):
-        self._set_epoch(trainer, trainer.current_epoch + 1)
 
 
 def _explicit_cli_overrides(parser, args):
@@ -359,9 +342,6 @@ def build_parser():
     parser.add_argument("--persistent_workers", type=int, default=1)
     parser.add_argument("--prefetch_factor", type=int, default=None)
     parser.add_argument("--class_balanced_sampler", type=int, default=0)
-    parser.add_argument("--hard_negative_sampler", type=int, default=0)
-    parser.add_argument("--hard_negative_manifest", type=str, default=None)
-    parser.add_argument("--hard_negative_prob", type=float, default=0.15)
     parser.add_argument("--max_epochs", type=int, default=None)
     parser.add_argument("--max_nb_epochs", type=int, default=200)
     parser.add_argument("--accum_grad_batches", type=int, default=2)
@@ -459,16 +439,31 @@ def build_parser():
         default=0.5,
     )
     parser.add_argument(
+        "--actor_object_missing_view_action_loss_weight",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--actor_object_missing_view_engagement_loss_weight",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--actor_object_missing_view_relation_null_loss_weight",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--actor_object_missing_view_target_rate",
+        type=float,
+        default=0.25,
+    )
+    parser.add_argument(
         "--actor_object_relation_null_loss_weight",
         type=float,
         default=0.5,
     )
     parser.add_argument("--object_prompt_grounding_loss_weight", type=float, default=0.0)
-    parser.add_argument(
-        "--objectless_prompt_consistency_loss_weight",
-        type=float,
-        default=0.0,
-    )
     parser.add_argument(
         "--objectless_object_action_suppression_loss_weight",
         type=float,
@@ -596,7 +591,7 @@ def main():
         save_last=True,
         filename=hparams.checkpoint_filename,
     )
-    callbacks = [checkpoint_callback, DatasetEpochCallback()]
+    callbacks = [checkpoint_callback]
     if hparams.save_every_epoch_checkpoints:
         callbacks.append(
             ModelCheckpoint(

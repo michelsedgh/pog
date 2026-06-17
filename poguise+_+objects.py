@@ -35,11 +35,9 @@ FRAMES_PART2_TAR_FILE_ID = "1BGn2PAyNrH2k59snixN5z7eTFFVEmkBW"
 FRAMES_PART2_SQLITE_FILE_ID = "1Qy8wk3_y2dnSKEuNCMsM3tV3LrlgVY1S"
 
 OBJECT_CACHE_FILE_ID = "1kmCdEhfH_LUBNDlC4C1pUXtwz9PEORyp"
-HARD_NEGATIVES_FILE_ID = "13u7AZ5-MRrQMe6k2wwK1HW3S7kmn8_7v"
 
 SKELETON_ZIP = f"{DATA_DIR}/toyota_smarthome_skeleton_v1.2.zip"
 OBJECT_DETECTOR_CACHE = f"{DATA_DIR}/toyota_rfdetr_2xlarge_coco19_full.jsonl"
-HARD_NEGATIVE_MANIFEST = f"{DATA_DIR}/hard_negatives.json"
 
 FRAMES_PART1_TAR = f"{FRAME_ARCHIVE_DIR}/toyota_smarthome_frames_part001.tar"
 FRAMES_PART1_SQLITE = f"{FRAME_ARCHIVE_DIR}/toyota_smarthome_frames_part001.tar.index.sqlite"
@@ -161,7 +159,6 @@ downloads = [
     (FRAMES_PART2_TAR_FILE_ID, FRAMES_PART2_TAR),
     (FRAMES_PART2_SQLITE_FILE_ID, FRAMES_PART2_SQLITE),
     (OBJECT_CACHE_FILE_ID, OBJECT_DETECTOR_CACHE),
-    (HARD_NEGATIVES_FILE_ID, HARD_NEGATIVE_MANIFEST),
 ]
 
 print("\nDownloading Drive files concurrently...", flush=True)
@@ -221,7 +218,7 @@ for sample in sample_dirs:
     sample_frames = sorted(os.listdir(sample_path))[:3]
     print(sample, sample_frames, flush=True)
 
-for path in [SKELETON_ZIP, OBJECT_DETECTOR_CACHE, HARD_NEGATIVE_MANIFEST]:
+for path in [SKELETON_ZIP, OBJECT_DETECTOR_CACHE]:
     if not os.path.exists(path) or os.path.getsize(path) <= 0:
         raise RuntimeError(f"Missing or empty required file: {path}")
     print(f"Verified: {path} ({os.path.getsize(path) / 1e9:.2f} GB)", flush=True)
@@ -231,7 +228,6 @@ with open("/content/poguise_colab_env.sh", "w") as f:
 export DATA_DIR='{DATA_DIR}'
 export SKELETON_ZIP='{SKELETON_ZIP}'
 export OBJECT_DETECTOR_CACHE='{OBJECT_DETECTOR_CACHE}'
-export HARD_NEGATIVE_MANIFEST='{HARD_NEGATIVE_MANIFEST}'
 export FRAME_COUNT_CACHE='{FRAME_COUNT_CACHE}'
 export TOYOTA_FRAME_SOURCE='frames'
 export TOYOTA_FRAMES_DIR='{FRAME_UNION_DIR}'
@@ -249,7 +245,6 @@ print("Frame source: frames", flush=True)
 print("Frame union:", FRAME_UNION_DIR, flush=True)
 print("Skeleton zip:", SKELETON_ZIP, flush=True)
 print("Object cache:", OBJECT_DETECTOR_CACHE, flush=True)
-print("Hard negatives:", HARD_NEGATIVE_MANIFEST, flush=True)
 
 from pathlib import Path
 from datetime import datetime
@@ -432,7 +427,7 @@ def set_cmd_arg(cmd, key, value):
 REQUESTED_EPOCHS = parse_launcher_args(sys.argv)
 TS = datetime.now().strftime("%Y%m%d_%H%M%S")
 RUN_EPOCHS = REQUESTED_EPOCHS or 10
-RUN_NAME = f"actor_object_binding_{RUN_EPOCHS}ep_{TS}"
+RUN_NAME = f"actor_object_missing_view_binding_{RUN_EPOCHS}ep_{TS}"
 EPOCH_DIR = str(Path(DATA_DIR) / "checkpoints" / RUN_NAME / "epoch_checkpoints")
 
 cmd = [
@@ -489,12 +484,8 @@ cmd = [
     "--object_conf_threshold", "0.25",
 
     "--interaction_heatmap_sigma", "2.5",
-    "--objectless_hard_negative_min_sampled_object_frames", "2",
 
     "--class_balanced_sampler", "1",
-    "--hard_negative_sampler", "1",
-    "--hard_negative_manifest", HARD_NEGATIVE_MANIFEST,
-    "--hard_negative_prob", "0.25",
 
     "--keep_rate", "0.6",
     "--keep_rate_merge", "0.3",
@@ -519,10 +510,13 @@ cmd = [
     "--actor_object_binding_state_loss_weight", "0.75",
     "--actor_object_binding_action_loss_weight", "0.35",
     "--actor_object_binding_margin", "0.50",
+    "--actor_object_missing_view_action_loss_weight", "0.25",
+    "--actor_object_missing_view_engagement_loss_weight", "0.25",
+    "--actor_object_missing_view_relation_null_loss_weight", "0.25",
+    "--actor_object_missing_view_target_rate", "0.25",
     "--actor_object_relation_null_loss_weight", "0.50",
     "--object_prompt_grounding_loss_weight", "0.35",
-    "--objectless_prompt_consistency_loss_weight", "0.20",
-    "--objectless_object_action_suppression_loss_weight", "0.70",
+    "--objectless_object_action_suppression_loss_weight", "0.40",
 
     "--batch_size", "32",
     "--accum_grad_batches", "2",
@@ -567,8 +561,8 @@ cmd = [
 print("\nSINGLE OBJECT-BINDING TRAINING RUN", flush=True)
 print(f"epochs: {RUN_EPOCHS}", flush=True)
 print(
-    "object pressure: moderate-to-wild relation-causal settings with "
-    "in-transformer object-action binding",
+    "object binding: clean detector-guided training with class-aware "
+    "missing-object views",
     flush=True,
 )
 run_dir = run_training_with_epoch_summaries(cmd, RUN_NAME, EPOCH_DIR, poll_secs=20)

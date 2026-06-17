@@ -5,7 +5,6 @@ import os
 import pandas as pd
 import numpy as np
 import torchvision
-import torch.nn.functional as F
 from argparse import ArgumentParser
 import hashlib
 import json
@@ -37,10 +36,8 @@ from datasets.toyota_action_taxonomy import (
     normalize_toyota_action_taxonomy,
     toyota_action_names,
     toyota_action_object_map,
-    toyota_confuser_action_names,
     toyota_label_dict,
     toyota_num_classes,
-    toyota_objectless_action_names,
 )
 
 try:
@@ -143,14 +140,6 @@ class ToyotaSMDataset(Dataset):
         self.num_scene_object_tokens = int(kwargs.get("num_scene_object_tokens", 32))
         if self.num_scene_object_tokens <= 0:
             raise ValueError("num_scene_object_tokens must be positive")
-        self.object_token_box_jitter = float(kwargs.get("object_token_box_jitter", 0.0))
-        if self.object_token_box_jitter < 0:
-            raise ValueError("object_token_box_jitter must be >= 0")
-        self.object_token_confidence_noise = float(
-            kwargs.get("object_token_confidence_noise", 0.0)
-        )
-        if self.object_token_confidence_noise < 0:
-            raise ValueError("object_token_confidence_noise must be >= 0")
         self.interaction_teacher_enabled = (
             self.actor_interaction_heatmaps and self.set_type != "test"
         )
@@ -181,45 +170,10 @@ class ToyotaSMDataset(Dataset):
         )
         if self.interaction_heatmap_sigma <= 0:
             raise ValueError("interaction_heatmap_sigma must be positive")
-        self.interaction_guided_sampling = bool(
-            kwargs.get("interaction_guided_sampling", 1)
-        )
-        self.interaction_min_sampled_object_frames = int(
-            kwargs.get("interaction_min_sampled_object_frames", 1)
-        )
-        if self.interaction_min_sampled_object_frames < 0:
-            raise ValueError("interaction_min_sampled_object_frames must be >= 0")
-        self.objectless_hard_negative_sampling = bool(
-            kwargs.get("objectless_hard_negative_sampling", 1)
-        )
-        self.objectless_hard_negative_min_sampled_object_frames = int(
-            kwargs.get("objectless_hard_negative_min_sampled_object_frames", 1)
-        )
-        if self.objectless_hard_negative_min_sampled_object_frames < 0:
-            raise ValueError(
-                "objectless_hard_negative_min_sampled_object_frames must be >= 0"
-            )
         self.action_object_map = toyota_action_object_map(
             self.task_type,
             self.action_taxonomy,
         )
-        self.objectless_action_names = set(
-            toyota_objectless_action_names(
-                self.task_type,
-                self.action_taxonomy,
-            )
-        )
-        self.objectless_hard_negative_object_ids = {
-            int(OBJECT_TO_ID[object_name])
-            for object_names in self.action_object_map.values()
-            for object_name in object_names
-            if object_name in OBJECT_TO_ID
-        }
-        self.interaction_repair_radius_frames = int(
-            kwargs.get("interaction_repair_radius_frames", 8)
-        )
-        if self.interaction_repair_radius_frames < 0:
-            raise ValueError("interaction_repair_radius_frames must be >= 0")
         self.interaction_quality_min_actor_score = float(
             kwargs.get("interaction_quality_min_actor_score", 1.0)
         )
@@ -260,37 +214,6 @@ class ToyotaSMDataset(Dataset):
         )
         if not 0 <= self.toyota_actor_background_box_prob <= 1:
             raise ValueError("toyota_actor_background_box_prob must be in [0, 1]")
-        self.toyota_pose_guided_sampling = bool(
-            kwargs.get("toyota_pose_guided_sampling", 1)
-        )
-        self.toyota_min_pose_frames = int(kwargs.get("toyota_min_pose_frames", 1))
-        if self.toyota_min_pose_frames < 1:
-            raise ValueError("toyota_min_pose_frames must be >= 1")
-        self.current_epoch = int(kwargs.get("toyota_current_epoch", 0))
-        self.synthetic_warmup_epochs = int(
-            kwargs.get("toyota_synthetic_warmup_epochs", 3)
-        )
-        self.synthetic_two_actor_prob = float(
-            kwargs.get("toyota_synthetic_two_actor_prob", 0.0)
-        )
-        self.synthetic_three_actor_prob = float(
-            kwargs.get("toyota_synthetic_three_actor_prob", 0.0)
-        )
-        self.synthetic_same_class_prob = float(
-            kwargs.get("toyota_synthetic_same_class_prob", 0.3)
-        )
-        self.synthetic_confuser_prob = float(
-            kwargs.get("toyota_synthetic_confuser_prob", 0.0)
-        )
-        total_synthetic_prob = (
-            self.synthetic_two_actor_prob + self.synthetic_three_actor_prob
-        )
-        if total_synthetic_prob > 1.0:
-            raise ValueError("Toyota synthetic actor probabilities must sum to <= 1")
-        if not 0 <= self.synthetic_confuser_prob <= 1:
-            raise ValueError("toyota_synthetic_confuser_prob must be in [0, 1]")
-        if self.synthetic_three_actor_prob > 0 and self.num_actor_tokens < 3:
-            raise ValueError("3-person synthetic samples require at least 3 actor slots")
         self.pose_landmarks = int(kwargs.get("toyota_pose_landmarks", 13))
         if self.n_landmarks > 0 and self.pose_landmarks != self.n_landmarks:
             raise ValueError(
@@ -353,11 +276,6 @@ class ToyotaSMDataset(Dataset):
         self._object_cache = {}
         if self.interaction_teacher_enabled or self.requires_object_proposals:
             self._object_cache = self._load_object_cache(set(self.data_df.file_id))
-        self.class_to_indices = {
-            int(label): np.flatnonzero(self.y.numpy() == int(label))
-            for label in torch.unique(self.y).tolist()
-        }
-
         self.length = len(self.data_df)
         print(
             self.length,
@@ -501,34 +419,15 @@ class ToyotaSMDataset(Dataset):
         parser.add_argument("--object_camera_allowlist", type=str, default=None)
         parser.add_argument("--object_ignore_regions", type=str, default=None)
         parser.add_argument("--object_conf_threshold", type=float, default=0.25)
-        parser.add_argument("--object_token_box_jitter", type=float, default=0.0)
-        parser.add_argument("--object_token_confidence_noise", type=float, default=0.0)
         parser.add_argument("--interaction_heatmap_size", type=int, default=56)
         parser.add_argument("--object_track_iou_threshold", type=float, default=0.2)
         parser.add_argument("--interaction_heatmap_sigma", type=float, default=1.5)
-        parser.add_argument("--interaction_guided_sampling", type=int, default=1)
-        parser.add_argument("--interaction_min_sampled_object_frames", type=int, default=1)
-        parser.add_argument("--objectless_hard_negative_sampling", type=int, default=1)
-        parser.add_argument(
-            "--objectless_hard_negative_min_sampled_object_frames",
-            type=int,
-            default=1,
-        )
-        parser.add_argument("--interaction_repair_radius_frames", type=int, default=8)
         parser.add_argument("--interaction_quality_min_actor_score", type=float, default=1.0)
         parser.add_argument("--interaction_quality_min_track_frames", type=int, default=1)
         parser.add_argument(
             "--interaction_quality_min_track_coverage", type=float, default=0.0
         )
-        parser.add_argument("--toyota_pose_guided_sampling", type=int, default=1)
-        parser.add_argument("--toyota_min_pose_frames", type=int, default=1)
         parser.add_argument("--toyota_pose_landmarks", type=int, default=13)
-        parser.add_argument("--toyota_current_epoch", type=int, default=0)
-        parser.add_argument("--toyota_synthetic_warmup_epochs", type=int, default=3)
-        parser.add_argument("--toyota_synthetic_two_actor_prob", type=float, default=0.0)
-        parser.add_argument("--toyota_synthetic_three_actor_prob", type=float, default=0.0)
-        parser.add_argument("--toyota_synthetic_same_class_prob", type=float, default=0.3)
-        parser.add_argument("--toyota_synthetic_confuser_prob", type=float, default=0.0)
 
         return parser
 
@@ -672,22 +571,13 @@ class ToyotaSMDataset(Dataset):
             if end_frame < 0 or end_frame >= n_frames:
                 end_frame = n_frames - 1
         elif n_frames > 128:
-            max_start = max(0, n_frames - 129)
-            start_frame = self._sample_pose_guided_start(0, max_start, pose_available)
-            if start_frame is None:
-                start_frame = n_frames // 2 - 64
-                end_frame = n_frames // 2 + 64
-            else:
-                end_frame = min(start_frame + 128, n_frames - 1)
+            start_frame = n_frames // 2 - 64
+            end_frame = n_frames // 2 + 64
         else:
             start_frame = 0
             end_frame = n_frames - 1
 
-        frames_idx = self._sample_frame_indices(
-            start_frame,
-            end_frame,
-            pose_available=pose_available,
-        )
+        frames_idx = self._sample_frame_indices(start_frame, end_frame)
         frames_idx = np.clip(frames_idx, 0, len(keypoints) - 1)
         return self._sampled_keypoints_survive_eval_crop(
             keypoints[frames_idx], height, width
@@ -758,74 +648,10 @@ class ToyotaSMDataset(Dataset):
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
             idx = idx.tolist()
-        synthetic_actor_count = self._synthetic_actor_count()
-        if synthetic_actor_count > 1:
-            return self._getitem_synthetic(idx, synthetic_actor_count)
         return self._getitem_single(idx)
 
-    def set_epoch(self, epoch):
-        self.current_epoch = int(epoch)
-
-    def _pose_available_by_frame(self, idx, n_frames, height, width):
-        if not self.needs_skeleton or not hasattr(self, "landmark_list"):
-            return None
-        keypoints = torch.stack(self.landmark_list[idx]).numpy()[:n_frames]
-        return self._visible_pose_by_frame(keypoints, n_frames, height, width)
-
-    def _sample_frame_indices(self, start_frame, end_frame, pose_available=None):
-        frames_idx = np.linspace(start_frame, end_frame, self.n_frames, dtype=int)
-        if (
-            self.actor_prompt
-            and self.needs_skeleton
-            and self.toyota_pose_guided_sampling
-            and pose_available is not None
-        ):
-            frames_idx = self._ensure_pose_frame_indices(frames_idx, pose_available)
-        return frames_idx
-
-    def _ensure_pose_frame_indices(self, frames_idx, pose_available):
-        pose_available = np.asarray(pose_available, dtype=bool)
-        if pose_available.size == 0 or not pose_available.any():
-            return frames_idx
-
-        frames_idx = np.asarray(frames_idx, dtype=int).copy()
-        clamped = np.clip(frames_idx, 0, pose_available.size - 1)
-        sampled_pose_count = int(pose_available[clamped].sum())
-        target_pose_count = min(
-            int(self.toyota_min_pose_frames),
-            int(pose_available.sum()),
-        )
-        if sampled_pose_count >= target_pose_count:
-            return frames_idx
-
-        pose_frames = np.flatnonzero(pose_available)
-        sampled = set(int(i) for i in clamped.tolist())
-        missing_pose_frames = np.asarray(
-            [int(i) for i in pose_frames.tolist() if int(i) not in sampled],
-            dtype=int,
-        )
-        if missing_pose_frames.size == 0:
-            return frames_idx
-
-        needed = target_pose_count - sampled_pose_count
-        if self.set_type == "train":
-            replace_frames = np.random.choice(
-                missing_pose_frames,
-                size=min(needed, missing_pose_frames.size),
-                replace=False,
-            )
-        else:
-            center = float((frames_idx[0] + frames_idx[-1]) * 0.5)
-            order = np.argsort(np.abs(missing_pose_frames - center))
-            replace_frames = missing_pose_frames[order[:needed]]
-
-        used_slots = set()
-        for pose_frame in replace_frames:
-            slot_order = np.argsort(np.abs(frames_idx - int(pose_frame)))
-            slot = next(int(i) for i in slot_order if int(i) not in used_slots)
-            used_slots.add(slot)
-            frames_idx[slot] = int(pose_frame)
-        return np.sort(frames_idx)
+    def _sample_frame_indices(self, start_frame, end_frame):
+        return np.linspace(start_frame, end_frame, self.n_frames, dtype=int)
 
     def _expected_interaction_object_ids(self, action_name):
         return {
@@ -858,178 +684,6 @@ class ToyotaSMDataset(Dataset):
         self._expected_object_frame_cache[key] = output
         return output
 
-    def _hard_negative_object_frames(self, file_id):
-        key = (str(file_id), "__objectless_hard_negative__")
-        cached = self._expected_object_frame_cache.get(key)
-        if cached is not None:
-            return cached
-
-        frames = []
-        for frame_idx, objects in self._object_cache.get(file_id, {}).items():
-            if any(
-                int(obj["cls_id"]) in self.objectless_hard_negative_object_ids
-                for obj in objects
-            ):
-                frames.append(int(frame_idx))
-        output = np.asarray(sorted(set(frames)), dtype=int)
-        self._expected_object_frame_cache[key] = output
-        return output
-
-    def _ensure_objectless_hard_negative_frame_indices(
-        self,
-        frames_idx,
-        file_id,
-        action_name,
-    ):
-        if not (
-            self.objectless_hard_negative_sampling
-            and self.requires_object_proposals
-            and action_name in self.objectless_action_names
-            and self.objectless_hard_negative_min_sampled_object_frames > 0
-        ):
-            return frames_idx
-        object_frames = self._hard_negative_object_frames(file_id)
-        if object_frames.size == 0:
-            return frames_idx
-
-        frames_idx = np.asarray(frames_idx, dtype=int).copy()
-        frame_min = int(frames_idx.min())
-        frame_max = int(frames_idx.max())
-        object_frames = object_frames[
-            (object_frames >= frame_min) & (object_frames <= frame_max)
-        ]
-        if object_frames.size == 0:
-            return frames_idx
-
-        sampled = set(int(frame_idx) for frame_idx in frames_idx.tolist())
-        sampled_object = [
-            frame for frame in object_frames.tolist() if int(frame) in sampled
-        ]
-        target_count = min(
-            int(self.objectless_hard_negative_min_sampled_object_frames),
-            int(object_frames.size),
-        )
-        if len(sampled_object) >= target_count:
-            return frames_idx
-
-        missing = np.asarray(
-            [frame for frame in object_frames.tolist() if int(frame) not in sampled],
-            dtype=int,
-        )
-        if missing.size == 0:
-            return frames_idx
-
-        needed = target_count - len(sampled_object)
-        if self.set_type == "train":
-            replace_frames = np.random.choice(
-                missing,
-                size=min(needed, missing.size),
-                replace=False,
-            )
-        else:
-            center = float((frames_idx[0] + frames_idx[-1]) * 0.5)
-            order = np.argsort(np.abs(missing - center))
-            replace_frames = missing[order[:needed]]
-
-        used_slots = set()
-        for object_frame in replace_frames:
-            slot_order = np.argsort(np.abs(frames_idx - int(object_frame)))
-            slot = next(int(i) for i in slot_order if int(i) not in used_slots)
-            used_slots.add(slot)
-            frames_idx[slot] = int(object_frame)
-        return np.sort(frames_idx)
-
-    def _ensure_interaction_frame_indices(self, frames_idx, file_id, action_name):
-        if self.interaction_min_sampled_object_frames <= 0:
-            return frames_idx
-        expected_frames = self._expected_interaction_frames(file_id, action_name)
-        if expected_frames.size == 0:
-            return frames_idx
-
-        frames_idx = np.asarray(frames_idx, dtype=int).copy()
-        sampled = set(int(frame_idx) for frame_idx in frames_idx.tolist())
-        sampled_expected = [frame for frame in expected_frames.tolist() if frame in sampled]
-        target_count = min(
-            int(self.interaction_min_sampled_object_frames),
-            int(expected_frames.size),
-        )
-        if len(sampled_expected) >= target_count:
-            return frames_idx
-
-        missing = np.asarray(
-            [frame for frame in expected_frames.tolist() if frame not in sampled],
-            dtype=int,
-        )
-        if missing.size == 0:
-            return frames_idx
-
-        needed = target_count - len(sampled_expected)
-        if self.set_type == "train":
-            replace_frames = np.random.choice(
-                missing,
-                size=min(needed, missing.size),
-                replace=False,
-            )
-        else:
-            center = float((frames_idx[0] + frames_idx[-1]) * 0.5)
-            order = np.argsort(np.abs(missing - center))
-            replace_frames = missing[order[:needed]]
-
-        used_slots = set()
-        for object_frame in replace_frames:
-            slot_order = np.argsort(np.abs(frames_idx - int(object_frame)))
-            slot = next(int(i) for i in slot_order if int(i) not in used_slots)
-            used_slots.add(slot)
-            frames_idx[slot] = int(object_frame)
-        return np.sort(frames_idx)
-
-    def _sample_pose_guided_start(self, start_min, start_max, pose_available):
-        if pose_available is None or not pose_available.any():
-            return None
-
-        start_min = int(start_min)
-        start_max = int(start_max)
-        if start_max < start_min:
-            start_max = start_min
-
-        starts = np.arange(start_min, start_max + 1, dtype=int)
-        if starts.size == 0:
-            starts = np.array([start_min], dtype=int)
-
-        hits = np.zeros(starts.shape[0], dtype=int)
-        for start_idx, start in enumerate(starts):
-            end = min(start + 128, len(pose_available) - 1)
-            hits[start_idx] = int(pose_available[start : end + 1].sum())
-
-        enough_pose = hits >= self.toyota_min_pose_frames
-        if enough_pose.any():
-            candidates = starts[enough_pose]
-            if self.set_type == "train":
-                return int(candidates[np.random.randint(0, len(candidates))])
-            center = (start_min + start_max) * 0.5
-            return int(candidates[np.argmin(np.abs(candidates - center))])
-
-        best_hit = int(hits.max())
-        if best_hit <= 0:
-            return None
-        best_starts = starts[hits == best_hit]
-        if self.set_type == "train":
-            return int(best_starts[np.random.randint(0, len(best_starts))])
-        center = (start_min + start_max) * 0.5
-        return int(best_starts[np.argmin(np.abs(best_starts - center))])
-
-    def _synthetic_actor_count(self):
-        if not self.actor_prompt or self.set_type != "train":
-            return 1
-        if self.current_epoch < self.synthetic_warmup_epochs:
-            return 1
-        draw = np.random.random()
-        if draw < self.synthetic_three_actor_prob:
-            return 3
-        if draw < self.synthetic_three_actor_prob + self.synthetic_two_actor_prob:
-            return 2
-        return 1
-
     def _getitem_single(self, idx, actor_slot=None):
         if self.set_type in ["train", "val"]:
             # -1 indicates random sampling.
@@ -1059,72 +713,32 @@ class ToyotaSMDataset(Dataset):
 
             file_id = self.data_df.iloc[idx].file_id
             n_frames = self._num_frames(file_id)
-            video_height, video_width = self._video_size(file_id)
             row = self.data_df.iloc[idx]
             label = self.y[idx]
             raw_action_name = str(row.raw_action)
-            pose_available = None
-            if (
-                self.actor_prompt
-                and self.needs_skeleton
-                and self.toyota_pose_guided_sampling
-            ):
-                pose_available = self._pose_available_by_frame(
-                    idx, n_frames, video_height, video_width
-                )
             if self.set_type == "test":
                 start_frame = self.data_df.iloc[idx].start
                 end_frame = self.data_df.iloc[idx].end
                 if end_frame < 0 or end_frame >= n_frames:
                     end_frame = n_frames - 1
             elif n_frames > 128:  # test has 128 frames segments
-                max_start = max(0, n_frames - 129)
                 if self.set_type == "train":
-                    start_frame = None
-                    if pose_available is not None:
-                        start_frame = self._sample_pose_guided_start(
-                            0, max_start, pose_available
-                        )
-                    if start_frame is None:
-                        start_frame = np.random.randint(0, n_frames - 128)
+                    start_frame = np.random.randint(0, n_frames - 128)
                     end_frame = min(start_frame + 128, n_frames - 1)
                 else:
-                    start_frame = None
-                    if pose_available is not None:
-                        start_frame = self._sample_pose_guided_start(
-                            0, max_start, pose_available
-                        )
-                    if start_frame is None:
-                        # get the middle 128 frames
-                        start_frame = n_frames // 2 - 64
-                        end_frame = n_frames // 2 + 64
-                    else:
-                        end_frame = min(start_frame + 128, n_frames - 1)
+                    # get the middle 128 frames
+                    start_frame = n_frames // 2 - 64
+                    end_frame = n_frames // 2 + 64
             else:
                 start_frame = 0
                 end_frame = n_frames - 1
             # evenly sample n frames from a list of frames
 
-            frames_idx = self._sample_frame_indices(
-                start_frame,
-                end_frame,
-                pose_available=pose_available,
-            )
+            frames_idx = self._sample_frame_indices(start_frame, end_frame)
             action_name = (
                 raw_action_name
                 if (self.interaction_teacher_enabled or self.requires_object_proposals)
                 else None
-            )
-            if self.interaction_teacher_enabled and self.interaction_guided_sampling:
-                frames_idx = self._ensure_interaction_frame_indices(
-                    frames_idx,
-                    file_id,
-                    action_name,
-                )
-            frames_idx = self._ensure_objectless_hard_negative_frame_indices(
-                frames_idx,
-                file_id,
-                action_name,
             )
             if len(frames_idx) < self.n_frames:
                 frames_idx = np.pad(
@@ -1297,377 +911,6 @@ class ToyotaSMDataset(Dataset):
                     spatial_sample_index,
             )
             return frames, label
-
-    def _getitem_synthetic(self, idx, actor_count):
-        if actor_count not in (2, 3):
-            raise ValueError(f"Unsupported synthetic actor count: {actor_count}")
-
-        indices = self._sample_synthetic_indices(idx, actor_count)
-        slots = np.random.choice(self.num_actor_tokens, actor_count, replace=False)
-        order = np.random.permutation(actor_count)
-        indices = [indices[int(i)] for i in order]
-        slots = slots[order]
-        samples = [
-            self._getitem_single(int(sample_idx), actor_slot=int(slots[i]))
-            for i, sample_idx in enumerate(indices)
-        ]
-
-        canvas_width = samples[0][0].shape[-1]
-        bounds = self._sample_panel_bounds(actor_count, canvas_width)
-        frames = self._compose_synthetic_frames(
-            [sample[0] for sample in samples], bounds
-        )
-        target = self._compose_synthetic_actor_target(
-            [sample[1] for sample in samples],
-            slots,
-            bounds,
-            canvas_width,
-        )
-        return frames, target
-
-    def _sample_synthetic_indices(self, idx, actor_count):
-        base_label = int(self.y[idx])
-        indices = [int(idx)]
-        if actor_count == 2:
-            if np.random.random() < self.synthetic_confuser_prob:
-                confuser_idx = self._sample_confuser_class_index(
-                    base_label,
-                    exclude=indices,
-                )
-                if confuser_idx is not None:
-                    indices.append(confuser_idx)
-                    return indices
-            if np.random.random() < self.synthetic_same_class_prob:
-                indices.append(self._sample_same_class_index(base_label, exclude=indices))
-            else:
-                indices.append(
-                    self._sample_different_class_index(base_label, exclude=indices)
-                )
-            return indices
-
-        while len(indices) < actor_count:
-            if np.random.random() < self.synthetic_confuser_prob:
-                labels = [int(self.y[i]) for i in indices]
-                source_label = labels[np.random.randint(0, len(labels))]
-                confuser_idx = self._sample_confuser_class_index(
-                    source_label,
-                    exclude=indices,
-                )
-                if confuser_idx is not None:
-                    indices.append(confuser_idx)
-                    continue
-            if np.random.random() < self.synthetic_same_class_prob:
-                labels = [int(self.y[i]) for i in indices]
-                same_label = labels[np.random.randint(0, len(labels))]
-                indices.append(
-                    self._sample_same_class_index(same_label, exclude=indices)
-                )
-            else:
-                labels = {int(self.y[i]) for i in indices}
-                indices.append(self._sample_label_outside(labels, exclude=indices))
-        return indices
-
-    def _sample_confuser_class_index(self, label, exclude):
-        action_name = self._action_name_from_label(int(label))
-        if action_name is None:
-            return None
-        label_dict = self._label_dict()
-        candidate_labels = [
-            int(label_dict[name]) - 1
-            for name in toyota_confuser_action_names(
-                action_name,
-                self.task_type,
-                self.action_taxonomy,
-            )
-            if name in label_dict
-        ]
-        if not candidate_labels:
-            return None
-        excluded = set(int(i) for i in exclude)
-        candidates = []
-        for candidate_label in candidate_labels:
-            candidates.extend(
-                int(i)
-                for i in self.class_to_indices.get(int(candidate_label), [])
-                if int(i) not in excluded
-            )
-        if not candidates:
-            return None
-        return candidates[int(np.random.randint(0, len(candidates)))]
-
-    def _sample_same_class_index(self, label, exclude):
-        candidates = [
-            int(i)
-            for i in self.class_to_indices.get(int(label), [])
-            if int(i) not in set(exclude)
-        ]
-        if not candidates:
-            raise RuntimeError(
-                f"Cannot create same-class synthetic sample for class {label}"
-            )
-        return candidates[int(np.random.randint(0, len(candidates)))]
-
-    def _sample_different_class_index(self, label, exclude):
-        return self._sample_label_outside({int(label)}, exclude)
-
-    def _sample_label_outside(self, labels, exclude):
-        excluded = set(exclude)
-        candidates = [
-            int(i)
-            for i, sample_label in enumerate(self.y.tolist())
-            if int(sample_label) not in labels and i not in excluded
-        ]
-        if not candidates:
-            raise RuntimeError(
-                "Cannot create different-class synthetic Toyota sample from this split"
-            )
-        return candidates[int(np.random.randint(0, len(candidates)))]
-
-    def _sample_panel_bounds(self, actor_count, width):
-        if actor_count == 2:
-            split = int(round(width * np.random.uniform(0.45, 0.55)))
-            split = int(np.clip(split, int(width * 0.42), int(width * 0.58)))
-            return [(0, split), (split, width)]
-        left = int(round(width * np.random.uniform(0.30, 0.36)))
-        middle = int(round(width * np.random.uniform(0.64, 0.70)))
-        left = int(np.clip(left, int(width * 0.28), int(width * 0.38)))
-        middle = int(np.clip(middle, int(width * 0.62), int(width * 0.72)))
-        if middle <= left:
-            left = width // 3
-            middle = (2 * width) // 3
-        return [(0, left), (left, middle), (middle, width)]
-
-    def _scale_panel_bounds(self, bounds, source_width, target_width):
-        scaled = []
-        for x0, x1 in bounds:
-            sx0 = int(round(x0 * target_width / source_width))
-            sx1 = int(round(x1 * target_width / source_width))
-            scaled.append((sx0, sx1))
-        scaled[0] = (0, scaled[0][1])
-        scaled[-1] = (scaled[-1][0], target_width)
-        for idx in range(1, len(scaled)):
-            prev_end = scaled[idx - 1][1]
-            scaled[idx] = (prev_end, scaled[idx][1])
-        return scaled
-
-    def _compose_synthetic_frames(self, frames_list, bounds):
-        _, _, height, width = frames_list[0].shape
-        canvas = torch.zeros_like(frames_list[0])
-        for frames, (x0, x1) in zip(frames_list, bounds):
-            panel = F.interpolate(
-                frames,
-                size=(height, x1 - x0),
-                mode="bilinear",
-                align_corners=False,
-            )
-            canvas[:, :, :, x0:x1] = panel
-        return canvas
-
-    def _compose_synthetic_actor_target(self, targets, slots, bounds, canvas_width):
-        boxes = torch.zeros((self.num_actor_tokens, 4), dtype=torch.float32)
-        valid = torch.zeros(self.num_actor_tokens, dtype=torch.bool)
-        actions = torch.full((self.num_actor_tokens,), -100, dtype=torch.long)
-
-        for target, slot, (x0, x1) in zip(targets, slots, bounds):
-            slot = int(slot)
-            src_box = target["boxes"][slot]
-            panel_x0 = x0 / float(canvas_width)
-            panel_w = (x1 - x0) / float(canvas_width)
-            boxes[slot] = torch.tensor(
-                [
-                    panel_x0 + src_box[0] * panel_w,
-                    src_box[1],
-                    panel_x0 + src_box[2] * panel_w,
-                    src_box[3],
-                ],
-                dtype=torch.float32,
-            ).clamp_(0.0, 1.0)
-            valid[slot] = True
-            actions[slot] = target["actions"][slot]
-
-        self._fill_invalid_actor_boxes(boxes, valid)
-        output = {"actions": actions, "boxes": boxes, "valid": valid}
-        if self.n_landmarks > 0:
-            heatmap_width = targets[0]["heatmap"].shape[-1]
-            heatmap_bounds = self._scale_panel_bounds(
-                bounds, source_width=canvas_width, target_width=heatmap_width
-            )
-            output["heatmap"] = self._compose_synthetic_heatmaps(
-                [target["heatmap"] for target in targets],
-                heatmap_bounds,
-            )
-            output["kp_vis"] = self._compose_synthetic_heatmaps(
-                [target["kp_vis"] for target in targets],
-                heatmap_bounds,
-                nearest=True,
-            ).clamp_(0, 1)
-        if self.interaction_teacher_enabled:
-            output.update(
-                self._compose_synthetic_interaction_target(
-                    targets,
-                    slots,
-                    bounds,
-                    canvas_width,
-                )
-            )
-        if self.requires_object_proposals:
-            output.update(
-                self._compose_synthetic_scene_object_target(
-                    targets,
-                    slots,
-                    bounds,
-                    canvas_width,
-                )
-            )
-        return output
-
-    def _compose_synthetic_heatmaps(self, heatmaps, bounds, nearest=False, combine="sum"):
-        channels, height, width = heatmaps[0].shape
-        canvas = torch.zeros((channels, height, width), dtype=heatmaps[0].dtype)
-        for heatmap, (x0, x1) in zip(heatmaps, bounds):
-            mode = "nearest" if nearest else "bilinear"
-            kwargs = {} if nearest else {"align_corners": False}
-            panel = F.interpolate(
-                heatmap.unsqueeze(0),
-                size=(height, x1 - x0),
-                mode=mode,
-                **kwargs,
-            ).squeeze(0)
-            if combine == "max":
-                canvas[:, :, x0:x1] = torch.maximum(canvas[:, :, x0:x1], panel)
-            elif combine == "sum":
-                canvas[:, :, x0:x1] += panel
-            else:
-                raise ValueError(f"Unsupported heatmap combine mode: {combine}")
-        return canvas
-
-    def _compose_synthetic_interaction_target(self, targets, slots, bounds, canvas_width):
-        heatmap_width = self.heatmap_size[-1]
-        heatmap_bounds = self._scale_panel_bounds(
-            bounds,
-            source_width=canvas_width,
-            target_width=heatmap_width,
-        )
-        interaction_cls = torch.full(
-            (self.num_actor_tokens,), NONE_OBJECT_ID, dtype=torch.long
-        )
-        interaction_valid = torch.zeros(self.num_actor_tokens, dtype=torch.bool)
-        interaction_heatmap = torch.zeros(
-            (self.num_actor_tokens, *self.heatmap_size),
-            dtype=torch.float32,
-        )
-        interaction_heatmap_valid = torch.zeros(
-            self.num_actor_tokens,
-            dtype=torch.bool,
-        )
-        interaction_heatmap_positive_valid = torch.zeros(
-            self.num_actor_tokens,
-            dtype=torch.bool,
-        )
-        for target_idx, (target, slot) in enumerate(zip(targets, slots)):
-            slot = int(slot)
-            interaction_cls[slot] = target["interaction_cls"][slot]
-            interaction_valid[slot] = target["interaction_valid"][slot]
-            if (
-                "interaction_heatmap" in target
-                and "interaction_heatmap_valid" in target
-                and bool(target["interaction_heatmap_valid"][slot])
-            ):
-                source_positive_valid = target.get(
-                    "interaction_heatmap_positive_valid",
-                    target["interaction_heatmap_valid"],
-                )[slot]
-                if bool(source_positive_valid):
-                    heatmap_panel = target["interaction_heatmap"][slot].unsqueeze(0)
-                    heatmap_panel = self._compose_synthetic_heatmaps(
-                        [heatmap_panel],
-                        [heatmap_bounds[target_idx]],
-                        combine="max",
-                    ).squeeze(0)
-                    interaction_heatmap[slot] = heatmap_panel.clamp_(0.0, 1.0)
-                    interaction_heatmap_valid[slot] = bool(
-                        interaction_heatmap[slot].max() > 0
-                    )
-                    interaction_heatmap_positive_valid[slot] = bool(
-                        interaction_heatmap_valid[slot]
-                    )
-                else:
-                    interaction_heatmap_valid[slot] = True
-
-        interaction_heatmap_valid = interaction_heatmap_valid & interaction_valid
-        interaction_heatmap_positive_valid = (
-            interaction_heatmap_positive_valid & interaction_valid
-        )
-
-        return {
-            "interaction_cls": interaction_cls,
-            "interaction_valid": interaction_valid,
-            "interaction_heatmap": interaction_heatmap,
-            "interaction_heatmap_valid": interaction_heatmap_valid,
-            "interaction_heatmap_positive_valid": interaction_heatmap_positive_valid,
-        }
-
-    def _compose_synthetic_scene_object_target(self, targets, slots, bounds, canvas_width):
-        output = self._empty_scene_object_target()
-        interaction_object_index = torch.zeros(
-            self.num_actor_tokens,
-            dtype=torch.long,
-        )
-        interaction_object_index_valid = torch.zeros(
-            self.num_actor_tokens,
-            dtype=torch.bool,
-        )
-
-        dst_slot = 0
-        selection_remap = {}
-        for target_idx, (target, (x0, x1)) in enumerate(zip(targets, bounds)):
-            if "object_valid" not in target:
-                continue
-            src_valid = target["object_valid"].bool()
-            panel_x0 = x0 / float(canvas_width)
-            panel_w = (x1 - x0) / float(canvas_width)
-            for src_slot in torch.nonzero(src_valid, as_tuple=False).flatten():
-                if dst_slot >= self.num_scene_object_tokens:
-                    break
-                src_slot = int(src_slot)
-                src_box = target["object_boxes"][src_slot]
-                output["object_boxes"][dst_slot] = torch.tensor(
-                    [
-                        panel_x0 + src_box[0] * panel_w,
-                        src_box[1],
-                        panel_x0 + src_box[2] * panel_w,
-                        src_box[3],
-                    ],
-                    dtype=torch.float32,
-                ).clamp_(0.0, 1.0)
-                output["object_classes"][dst_slot] = target["object_classes"][src_slot]
-                output["object_confs"][dst_slot] = target["object_confs"][src_slot]
-                output["object_valid"][dst_slot] = True
-                selection_remap[(target_idx, src_slot + 1)] = dst_slot + 1
-                dst_slot += 1
-
-        for target_idx, (target, slot) in enumerate(zip(targets, slots)):
-            if (
-                "interaction_object_index" not in target
-                or "interaction_object_index_valid" not in target
-            ):
-                continue
-            slot = int(slot)
-            src_index = int(target["interaction_object_index"][slot])
-            if not bool(target["interaction_object_index_valid"][slot]):
-                continue
-            if src_index == 0:
-                remapped = 0
-            else:
-                remapped = selection_remap.get((target_idx, src_index))
-                if remapped is None:
-                    continue
-            interaction_object_index[slot] = int(remapped)
-            interaction_object_index_valid[slot] = True
-
-        output["interaction_object_index"] = interaction_object_index
-        output["interaction_object_index_valid"] = interaction_object_index_valid
-        return output
 
     def _box_iou(self, box_a, box_b):
         ax1, ay1, ax2, ay2 = [float(v) for v in box_a]
@@ -1948,30 +1191,6 @@ class ToyotaSMDataset(Dataset):
         weight = weight / weight.sum().clamp_min(1e-6)
         return (box_tensor * weight[:, None]).sum(dim=0).clamp_(0.0, 1.0)
 
-    def _jitter_object_box(self, box):
-        if self.object_token_box_jitter <= 0:
-            return box
-        x1, y1, x2, y2 = [float(v) for v in box.tolist()]
-        width = max(x2 - x1, 1e-4)
-        height = max(y2 - y1, 1e-4)
-        cx = (x1 + x2) * 0.5
-        cy = (y1 + y2) * 0.5
-        jitter = float(self.object_token_box_jitter)
-        cx += np.random.uniform(-jitter, jitter) * width
-        cy += np.random.uniform(-jitter, jitter) * height
-        scale = np.random.uniform(max(0.2, 1.0 - jitter), 1.0 + jitter)
-        width *= scale
-        height *= scale
-        return torch.tensor(
-            [
-                max(0.0, cx - width * 0.5),
-                max(0.0, cy - height * 0.5),
-                min(1.0, cx + width * 0.5),
-                min(1.0, cy + height * 0.5),
-            ],
-            dtype=torch.float32,
-        )
-
     def _build_scene_object_target(self, object_tracks, height, width):
         target = self._empty_scene_object_target()
         track_to_slot = {}
@@ -1988,38 +1207,6 @@ class ToyotaSMDataset(Dataset):
             target["object_valid"][slot] = True
             track_to_slot[id(track)] = int(slot)
         return target, track_to_slot
-
-    def _augment_scene_object_target(self, target):
-        if self.set_type != "train":
-            return target
-        if not target["object_valid"].any():
-            return target
-
-        valid = target["object_valid"].clone()
-
-        if self.object_token_box_jitter > 0:
-            for slot in torch.nonzero(valid, as_tuple=False).flatten():
-                slot = int(slot)
-                jittered = self._jitter_object_box(target["object_boxes"][slot])
-                if jittered[2] > jittered[0] and jittered[3] > jittered[1]:
-                    target["object_boxes"][slot] = jittered
-
-        if self.object_token_confidence_noise > 0:
-            noise = (
-                torch.rand(target["object_confs"].shape, dtype=torch.float32) * 2.0
-                - 1.0
-            ) * float(self.object_token_confidence_noise)
-            target["object_confs"] = (target["object_confs"] + noise).clamp_(0.0, 1.0)
-            target["object_confs"] = target["object_confs"] * valid.float()
-
-        target["object_classes"] = torch.where(
-            valid,
-            target["object_classes"],
-            torch.full_like(target["object_classes"], NONE_OBJECT_ID),
-        )
-        target["object_boxes"] = target["object_boxes"] * valid.float().unsqueeze(-1)
-        target["object_confs"] = target["object_confs"] * valid.float()
-        return target
 
     def _build_interaction_targets(
         self,
@@ -2179,9 +1366,6 @@ class ToyotaSMDataset(Dataset):
             width,
             action_names_by_slot=action_names_by_slot,
         )
-        if self.requires_object_proposals:
-            scene_object_target = self._augment_scene_object_target(scene_object_target)
-
         output = {
             "interaction_cls": interaction_cls,
             "interaction_valid": interaction_valid,
@@ -2725,48 +1909,11 @@ class ToyotaSMDataset(Dataset):
     def _get_frame_objects(self, file_id, frame_idx):
         return self._object_cache.get(file_id, {}).get(int(frame_idx), [])
 
-    def _nearest_expected_objects(self, file_id, frame_idx, expected_ids):
-        if self.interaction_repair_radius_frames <= 0 or not expected_ids:
-            return []
-
-        cache = self._object_cache.get(file_id, {})
-        if not cache:
-            return []
-
-        frame_idx = int(frame_idx)
-        radius = int(self.interaction_repair_radius_frames)
-        best_distance = None
-        best_objects = []
-        for offset in range(-radius, radius + 1):
-            candidate_frame = frame_idx + offset
-            objects = [
-                obj
-                for obj in cache.get(candidate_frame, [])
-                if int(obj["cls_id"]) in expected_ids
-            ]
-            if not objects:
-                continue
-            distance = abs(offset)
-            if best_distance is None or distance < best_distance:
-                best_distance = distance
-                best_objects = objects
-                if distance == 0:
-                    break
-        return best_objects
-
     def _sample_object_entries(self, file_id, frames_idx, action_name=None):
         entries = []
-        expected_ids = self._expected_interaction_object_ids(action_name)
         for sample_pos, frame_idx in enumerate(frames_idx):
             frame_idx = int(frame_idx)
             frame_objects = list(self._get_frame_objects(file_id, frame_idx))
-            has_expected = any(
-                int(obj["cls_id"]) in expected_ids for obj in frame_objects
-            )
-            if expected_ids and not has_expected:
-                frame_objects.extend(
-                    self._nearest_expected_objects(file_id, frame_idx, expected_ids)
-                )
             for obj in frame_objects:
                 entries.append(
                     {
