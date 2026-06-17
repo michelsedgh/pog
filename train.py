@@ -444,6 +444,21 @@ def build_parser():
     parser.add_argument("--actor_object_relation_loss_weight", type=float, default=0.0)
     parser.add_argument("--actor_object_engagement_loss_weight", type=float, default=0.0)
     parser.add_argument(
+        "--actor_object_confuser_engagement_loss_weight",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--actor_object_confuser_action_loss_weight",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--actor_object_confuser_margin",
+        type=float,
+        default=0.5,
+    )
+    parser.add_argument(
         "--actor_object_relation_null_loss_weight",
         type=float,
         default=0.5,

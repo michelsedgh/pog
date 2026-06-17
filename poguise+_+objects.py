@@ -391,20 +391,33 @@ def run_training_with_epoch_summaries(cmd, run_name, epoch_dir, poll_secs=20):
     summarize_run(run_dir, verbose=True)
     return str(run_dir)
 
-def parse_object_pressure_preset(argv):
+def parse_launcher_args(argv):
     argv = list(argv)
-    preset = "clean"
-    if "--object-pressure" in argv:
-        idx = argv.index("--object-pressure")
+    cleaned = argv[:1]
+    idx = 1
+    while idx < len(argv):
+        arg = str(argv[idx])
+        if arg == "-f" and idx + 1 < len(argv):
+            idx += 2
+            continue
+        cleaned.append(argv[idx])
+        idx += 1
+    argv = cleaned
+    epochs = None
+    if "--epochs" in argv:
+        idx = argv.index("--epochs")
         if idx + 1 >= len(argv):
-            raise SystemExit("--object-pressure requires clean or wild")
-        preset = argv[idx + 1].strip().lower()
+            raise SystemExit("--epochs requires an integer")
+        epochs = int(argv[idx + 1])
         del argv[idx : idx + 2]
     if len(argv) > 1:
-        raise SystemExit(f"Unknown launcher arguments: {' '.join(argv[1:])}")
-    if preset not in {"clean", "wild"}:
-        raise SystemExit("--object-pressure must be clean or wild")
-    return preset
+        raise SystemExit(
+            "This launcher now runs one focused training only. "
+            f"Supported argument: --epochs N. Unknown: {' '.join(argv[1:])}"
+        )
+    if epochs is not None and epochs <= 0:
+        raise SystemExit("--epochs must be positive")
+    return epochs
 
 def set_cmd_arg(cmd, key, value):
     value = str(value)
@@ -416,35 +429,10 @@ def set_cmd_arg(cmd, key, value):
     else:
         cmd.extend([key, value])
 
-def apply_object_pressure_preset(cmd, preset):
-    if preset == "clean":
-        print("OBJECT_PRESSURE_PRESET: clean", flush=True)
-        return
-    changes = {
-        "--actor_object_relation_null_logit_init": "3.5",
-        "--actor_object_relation_geometry_bias_weight": "0.75",
-        "--actor_object_relation_heatmap_bias_weight": "1.50",
-        "--actor_object_relation_max_scale": "1.50",
-        "--token_selection_object_weight": "0.25",
-        "--token_selection_heatmap_weight": "0.30",
-        "--actor_object_prompt_box_prior_weight": "0.15",
-        "--actor_object_prompt_box_prior_expand": "1.50",
-        "--actor_object_relation_loss_weight": "0.75",
-        "--actor_object_engagement_loss_weight": "0.50",
-        "--object_prompt_grounding_loss_weight": "0.35",
-        "--objectless_prompt_consistency_loss_weight": "0.20",
-        "--objectless_object_action_suppression_loss_weight": "0.70",
-        "--objectful_low_motion_aug_prob": "0.50",
-    }
-    print("OBJECT_PRESSURE_PRESET: wild", flush=True)
-    for key, value in changes.items():
-        set_cmd_arg(cmd, key, value)
-        print(f"  {key} {value}", flush=True)
-
-OBJECT_PRESSURE_PRESET = parse_object_pressure_preset(sys.argv)
+REQUESTED_EPOCHS = parse_launcher_args(sys.argv)
 TS = datetime.now().strftime("%Y%m%d_%H%M%S")
-RUN_LABEL = "wild10" if OBJECT_PRESSURE_PRESET == "wild" else "diag10"
-RUN_NAME = f"actor_object_engagement_{RUN_LABEL}_{TS}"
+RUN_EPOCHS = REQUESTED_EPOCHS or 10
+RUN_NAME = f"actor_object_confuser_binding_{RUN_EPOCHS}ep_{TS}"
 EPOCH_DIR = str(Path(DATA_DIR) / "checkpoints" / RUN_NAME / "epoch_checkpoints")
 
 cmd = [
@@ -482,15 +470,16 @@ cmd = [
     "--actor_object_prompt_tokens", "1",
     "--actor_object_relation_in_transformer", "1",
     "--actor_object_relation_blocks", "6,9",
-    "--actor_object_relation_null_logit_init", "4.0",
-    "--actor_object_relation_geometry_bias_weight", "0.5",
-    "--actor_object_relation_heatmap_bias_weight", "1.0",
-    "--token_selection_cls_weight", "0.25",
-    "--token_selection_actor_weight", "0.25",
-    "--token_selection_object_weight", "0.10",
-    "--token_selection_heatmap_weight", "0.35",
-    "--actor_object_prompt_box_prior_weight", "0.05",
-    "--actor_object_prompt_box_prior_expand", "1.25",
+    "--actor_object_relation_null_logit_init", "1.75",
+    "--actor_object_relation_geometry_bias_weight", "2.0",
+    "--actor_object_relation_heatmap_bias_weight", "4.0",
+    "--actor_object_relation_max_scale", "4.0",
+    "--token_selection_cls_weight", "0.12",
+    "--token_selection_actor_weight", "0.18",
+    "--token_selection_object_weight", "0.40",
+    "--token_selection_heatmap_weight", "0.30",
+    "--actor_object_prompt_box_prior_weight", "0.30",
+    "--actor_object_prompt_box_prior_expand", "1.85",
     "--num_scene_object_tokens", "32",
     "--num_object_classes", "19",
 
@@ -525,20 +514,23 @@ cmd = [
     "--poguiseplus_normalized_heatmap_loss", "1",
     "--poguiseplus_heatmap_mse_scale", "1000",
 
-    "--actor_object_relation_loss_weight", "0.50",
-    "--actor_object_engagement_loss_weight", "0.30",
+    "--actor_object_relation_loss_weight", "1.50",
+    "--actor_object_engagement_loss_weight", "0.75",
+    "--actor_object_confuser_engagement_loss_weight", "1.50",
+    "--actor_object_confuser_action_loss_weight", "0.30",
+    "--actor_object_confuser_margin", "0.50",
     "--actor_object_relation_null_loss_weight", "0.50",
-    "--object_prompt_grounding_loss_weight", "0.25",
-    "--objectless_prompt_consistency_loss_weight", "0.15",
-    "--objectless_object_action_suppression_loss_weight", "0.40",
+    "--object_prompt_grounding_loss_weight", "0.60",
+    "--objectless_prompt_consistency_loss_weight", "0.40",
+    "--objectless_object_action_suppression_loss_weight", "1.50",
 
-    "--objectful_low_motion_aug_prob", "0.35",
+    "--objectful_low_motion_aug_prob", "0.70",
 
     "--batch_size", "32",
     "--accum_grad_batches", "2",
 
-    "--max_epochs", "10",
-    "--t_max_scheduler", "10",
+    "--max_epochs", str(RUN_EPOCHS),
+    "--t_max_scheduler", str(RUN_EPOCHS),
 
     "--lr", "3e-5",
     "--lr_head", "5e-4",
@@ -574,6 +566,12 @@ cmd = [
     "--model_name", RUN_NAME,
 ]
 
-apply_object_pressure_preset(cmd, OBJECT_PRESSURE_PRESET)
+print("\nSINGLE OBJECT-BINDING TRAINING RUN", flush=True)
+print(f"epochs: {RUN_EPOCHS}", flush=True)
+print(
+    "object pressure: moderate-to-wild relation-causal settings with "
+    "training-only confuser-class binding",
+    flush=True,
+)
 run_dir = run_training_with_epoch_summaries(cmd, RUN_NAME, EPOCH_DIR, poll_secs=20)
 print("RUN_DIR:", run_dir)

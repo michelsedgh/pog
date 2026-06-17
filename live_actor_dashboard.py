@@ -899,6 +899,160 @@ def bbox_iou_xyxy(box_a, box_b):
     return inter_area / denom
 
 
+def _debug_tensor_item(tensor, *indices):
+    if tensor is None or not torch.is_tensor(tensor):
+        return None
+    try:
+        return float(tensor.detach().float().cpu()[indices].item())
+    except (IndexError, RuntimeError, ValueError):
+        return None
+
+
+def _debug_scalar(tensor):
+    if tensor is None or not torch.is_tensor(tensor):
+        return None
+    value = tensor.detach().float().cpu()
+    if value.numel() != 1:
+        return None
+    return float(value.item())
+
+
+def actor_relation_debug_payload(actor, slot, packed_objects, object_inputs):
+    model = getattr(actor, "model", None)
+    if model is None:
+        return None
+    relation_aux = getattr(model, "last_actor_object_relation_aux", None)
+    if not relation_aux:
+        return None
+
+    slot = int(slot)
+    packed_by_slot = {
+        int(item.get("slot", index)): item
+        for index, item in enumerate(packed_objects or [])
+    }
+    object_valid = None
+    if isinstance(object_inputs, dict):
+        object_valid = object_inputs.get("object_valid")
+    valid_slots = set()
+    if torch.is_tensor(object_valid) and object_valid.ndim == 2:
+        valid_slots = {
+            int(index)
+            for index in torch.nonzero(object_valid[0].detach().cpu(), as_tuple=False)
+            .flatten()
+            .tolist()
+        }
+    else:
+        valid_slots = set(packed_by_slot.keys())
+
+    blocks = {}
+    for block_name in sorted(relation_aux.keys(), key=lambda value: int(value)):
+        aux = relation_aux[block_name]
+        attention = aux.get("object_attention")
+        attention_norm = aux.get("object_attention_norm", attention)
+        relation_bias = aux.get("relation_bias")
+        if not torch.is_tensor(attention) or attention.ndim != 3:
+            continue
+        if slot >= attention.shape[1]:
+            continue
+
+        attn_row = attention[0, slot].detach().float().cpu()
+        norm_row = (
+            attention_norm[0, slot].detach().float().cpu()
+            if torch.is_tensor(attention_norm) and attention_norm.ndim == 3
+            else attn_row
+        )
+        top_count = min(5, int(attn_row.numel()))
+        top_indices = torch.argsort(attn_row, descending=True)[:top_count].tolist()
+        top_objects = []
+        for object_slot in top_indices:
+            object_slot = int(object_slot)
+            item = packed_by_slot.get(object_slot, {})
+            top_objects.append(
+                {
+                    "slot": object_slot,
+                    "valid": bool(object_slot in valid_slots),
+                    "label": item.get("label"),
+                    "object_class_id": item.get("object_class_id"),
+                    "conf": item.get("conf"),
+                    "attention": float(attn_row[object_slot].item()),
+                    "attention_norm": float(norm_row[object_slot].item()),
+                    "relation_bias": _debug_tensor_item(
+                        relation_bias,
+                        0,
+                        slot,
+                        object_slot,
+                    ),
+                }
+            )
+
+        block_payload = {
+            "scale": _debug_scalar(aux.get("scale")),
+            "null_prob": _debug_tensor_item(aux.get("null_prob"), 0, slot),
+            "useful_mass": _debug_tensor_item(aux.get("useful_mass"), 0, slot),
+            "gate_mean": None,
+            "object_context_norm": None,
+            "top_objects": top_objects,
+        }
+        gate = aux.get("gate")
+        if torch.is_tensor(gate) and gate.ndim >= 3 and slot < gate.shape[1]:
+            block_payload["gate_mean"] = float(
+                gate[0, slot].detach().float().mean().cpu().item()
+            )
+        object_context = aux.get("object_context")
+        if (
+            torch.is_tensor(object_context)
+            and object_context.ndim == 3
+            and slot < object_context.shape[1]
+        ):
+            block_payload["object_context_norm"] = float(
+                torch.linalg.vector_norm(
+                    object_context[0, slot].detach().float().cpu()
+                ).item()
+            )
+        blocks[str(block_name)] = block_payload
+
+    if not blocks:
+        return None
+    payload = {"blocks": blocks}
+
+    engagement_logits = getattr(model, "last_actor_object_engagement_logits", None)
+    if (
+        torch.is_tensor(engagement_logits)
+        and engagement_logits.ndim == 3
+        and slot < engagement_logits.shape[1]
+    ):
+        state_names = [
+            "none",
+            "laptop",
+            "book",
+            "phone_tablet",
+            "tv_monitor",
+            "drink",
+            "cooking",
+            "eating",
+            "other_object",
+        ]
+        logits = engagement_logits[0, slot].detach().float().cpu()
+        probs = torch.softmax(logits, dim=-1)
+        count = min(int(probs.numel()), len(state_names))
+        order = torch.argsort(probs[:count], descending=True).tolist()
+        payload["engagement"] = {
+            "top_states": [
+                {
+                    "state": state_names[int(index)],
+                    "prob": float(probs[int(index)].item()),
+                    "logit": float(logits[int(index)].item()),
+                }
+                for index in order[:5]
+            ],
+            "probs": {
+                state_names[index]: float(probs[index].item())
+                for index in range(count)
+            },
+        }
+    return payload
+
+
 class ActionTrack:
     def __init__(
         self,

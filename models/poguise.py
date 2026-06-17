@@ -181,6 +181,13 @@ class POGUISE(pl.LightningModule):
         )
         self.actor_object_engagement_enabled = (
             float(self.hparams.get("actor_object_engagement_loss_weight", 0.0)) > 0.0
+            or float(
+                self.hparams.get(
+                    "actor_object_confuser_engagement_loss_weight",
+                    0.0,
+                )
+            )
+            > 0.0
         )
         if bool(self.hparams.get("actor_object_slot_head", 0)):
             raise ValueError(
@@ -220,7 +227,7 @@ class POGUISE(pl.LightningModule):
             )
         if self.actor_object_engagement_enabled and not self.actor_object_relation_in_transformer:
             raise ValueError(
-                "actor_object_engagement_loss_weight requires "
+                "actor-object engagement supervision requires "
                 "actor_object_relation_in_transformer"
             )
         if self.actor_interaction_heatmaps and not self.actor_prompt:

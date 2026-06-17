@@ -185,13 +185,41 @@ class HeatmapModule(pl.LightningModule):
         )
         if self.actor_object_engagement_loss_weight < 0:
             raise ValueError("actor_object_engagement_loss_weight must be >= 0")
+        self.actor_object_confuser_engagement_loss_weight = float(
+            hparams.get("actor_object_confuser_engagement_loss_weight", 0.0)
+        )
+        if self.actor_object_confuser_engagement_loss_weight < 0:
+            raise ValueError(
+                "actor_object_confuser_engagement_loss_weight must be >= 0"
+            )
+        self.actor_object_confuser_action_loss_weight = float(
+            hparams.get("actor_object_confuser_action_loss_weight", 0.0)
+        )
+        if self.actor_object_confuser_action_loss_weight < 0:
+            raise ValueError("actor_object_confuser_action_loss_weight must be >= 0")
+        self.actor_object_confuser_margin = float(
+            hparams.get("actor_object_confuser_margin", 0.5)
+        )
+        if self.actor_object_confuser_margin <= 0:
+            raise ValueError("actor_object_confuser_margin must be > 0")
         if (
-            self.actor_object_engagement_loss_weight > 0
+            (
+                self.actor_object_engagement_loss_weight > 0
+                or self.actor_object_confuser_engagement_loss_weight > 0
+            )
             and not self.actor_object_relation_in_transformer
         ):
             raise ValueError(
-                "actor_object_engagement_loss_weight requires "
+                "actor-object engagement supervision requires "
                 "actor_object_relation_in_transformer"
+            )
+        if (
+            self.actor_object_confuser_action_loss_weight > 0
+            and not self.actor_object_prompt_tokens
+        ):
+            raise ValueError(
+                "actor_object_confuser_action_loss_weight requires "
+                "actor_object_prompt_tokens"
             )
         self.actor_object_relation_null_loss_weight = float(
             hparams.get("actor_object_relation_null_loss_weight", 0.5)
@@ -1702,6 +1730,109 @@ class HeatmapModule(pl.LightningModule):
         preds, _hm_preds, _presence_logits = self._unpack_model_data(data)
         return preds
 
+    def _object_prompt_training_outputs(
+        self,
+        imgs,
+        boxes,
+        valid,
+        object_inputs,
+    ):
+        if not self.uses_object_proposals:
+            raise RuntimeError("Object prompt training outputs require proposals")
+        saved_attrs = {
+            name: getattr(self.model, name, None)
+            for name in (
+                "last_actor_object_prompt_classes",
+                "last_actor_object_prompt_tokens",
+                "last_actor_object_prompt_attention_logits",
+                "last_actor_object_prompt_attention",
+                "last_actor_object_prompt_valid",
+                "last_actor_object_relation_context",
+                "last_actor_object_engagement_logits",
+                "last_actor_tokens",
+                "last_actor_action_tokens",
+                "last_actor_object_relation_aux",
+                "last_actor_action_logits",
+                "last_actor_motion_logits",
+            )
+        }
+        net = getattr(self.model, "net", None)
+        saved_net_attrs = {}
+        if net is not None:
+            saved_net_attrs = {
+                name: getattr(net, name, None)
+                for name in (
+                    "last_actor_object_relation_aux",
+                    "last_actor_object_grounding",
+                    "last_token_selection_diagnostics",
+                )
+            }
+        try:
+            data = self.model(
+                imgs,
+                boxes=boxes,
+                valid=valid,
+                **object_inputs,
+            )
+            preds, _hm_preds, _presence_logits = self._unpack_model_data(data)
+            engagement_logits = getattr(
+                self.model,
+                "last_actor_object_engagement_logits",
+                None,
+            )
+        finally:
+            for name, value in saved_attrs.items():
+                setattr(self.model, name, value)
+            if net is not None:
+                for name, value in saved_net_attrs.items():
+                    setattr(net, name, value)
+        return preds, engagement_logits
+
+    def _teacher_object_confuser_class_inputs(
+        self,
+        object_inputs,
+        actions,
+        selected_mask,
+        selected_indices,
+    ):
+        output = {name: value.clone() for name, value in object_inputs.items()}
+        object_valid = output.get("object_valid")
+        object_classes = output.get("object_classes")
+        if (
+            object_valid is None
+            or object_classes is None
+            or not selected_mask.any()
+        ):
+            return output, torch.zeros_like(selected_mask, dtype=torch.bool)
+
+        actions = actions.to(device=object_classes.device, dtype=torch.long)
+        selected_mask = selected_mask.to(device=object_classes.device, dtype=torch.bool)
+        selected_indices = selected_indices.to(
+            device=object_classes.device,
+            dtype=torch.long,
+        )
+        active = torch.zeros_like(selected_mask, dtype=torch.bool)
+        rows = torch.nonzero(selected_mask, as_tuple=False)
+        num_objects = int(object_classes.shape[1])
+        step = int(getattr(self, "global_step", 0))
+        for row in rows:
+            batch_idx = int(row[0].item())
+            actor_idx = int(row[1].item())
+            action_idx = int(actions[batch_idx, actor_idx].item())
+            wrong_ids = self.action_wrong_object_ids_by_index.get(action_idx)
+            if wrong_ids is None or int(wrong_ids.numel()) == 0:
+                continue
+            object_slot = int(selected_indices[batch_idx, actor_idx].item()) - 1
+            if object_slot < 0 or object_slot >= num_objects:
+                continue
+            if not bool(object_valid[batch_idx, object_slot].item()):
+                continue
+            wrong_ids = wrong_ids.to(device=object_classes.device, dtype=torch.long)
+            choice = (step + batch_idx + actor_idx) % int(wrong_ids.numel())
+            output["object_classes"][batch_idx, object_slot] = wrong_ids[choice]
+            active[batch_idx, actor_idx] = True
+        return output, active
+
     def _teacher_object_removed_inputs(
         self,
         object_inputs,
@@ -2457,6 +2588,179 @@ class HeatmapModule(pl.LightningModule):
                 )
         return loss * self.actor_object_engagement_loss_weight
 
+    def _actor_object_confuser_contrast_loss(
+        self,
+        stage,
+        imgs,
+        boxes,
+        valid,
+        actions,
+        preds,
+        target,
+        object_inputs,
+    ):
+        if stage != "train" or not self.uses_object_proposals:
+            return None
+        if (
+            self.actor_object_confuser_engagement_loss_weight <= 0
+            and self.actor_object_confuser_action_loss_weight <= 0
+        ):
+            return None
+
+        device = preds.device
+        info = self._exact_teacher_object_info(actions, valid, target, device)
+        if info is None:
+            return None
+
+        actions = actions.to(device=device, dtype=torch.long)
+        valid = valid.to(device=device, dtype=torch.bool)
+        exact_compatible = (
+            info["valid"]
+            & info["known_action"]
+            & info["compatible_from_one_based"]
+        )
+        if not exact_compatible.any():
+            return None
+
+        # Object classes are per video, not per actor slot. Restrict the paired
+        # counterfactual to one exact actor-object relation per sample so that
+        # a single object token is not assigned contradictory fake classes.
+        selected = exact_compatible & self._first_actor_per_sample_mask(
+            exact_compatible,
+        )
+        if not selected.any():
+            return None
+
+        confuser_inputs, active = self._teacher_object_confuser_class_inputs(
+            object_inputs,
+            actions,
+            selected,
+            info["selected_indices"],
+        )
+        active = active.to(device=device, dtype=torch.bool)
+        if not active.any():
+            return None
+
+        confuser_preds, confuser_engagement_logits = (
+            self._object_prompt_training_outputs(
+                imgs,
+                boxes,
+                valid,
+                confuser_inputs,
+            )
+        )
+        confuser_preds = confuser_preds.to(device=device)
+        margin = preds.new_tensor(float(self.actor_object_confuser_margin))
+        total_loss = preds.sum() * 0.0
+        count = int(active.sum().item())
+
+        if self.actor_object_confuser_action_loss_weight > 0:
+            labels = actions[active].to(device=device, dtype=torch.long)
+            real_true_logits = preds[active].float().gather(
+                1,
+                labels.unsqueeze(1),
+            ).squeeze(1)
+            fake_true_logits = confuser_preds[active].float().gather(
+                1,
+                labels.unsqueeze(1),
+            ).squeeze(1)
+            action_margin = real_true_logits - fake_true_logits
+            action_loss = F.relu(margin - action_margin).mean()
+            total_loss = (
+                total_loss
+                + action_loss * self.actor_object_confuser_action_loss_weight
+            )
+            self.log(
+                f"{stage}_loss_actor_object_confuser_action",
+                action_loss,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+            self._log_scalar(
+                f"{stage}_actor_object_confuser_action_margin",
+                action_margin.detach().mean(),
+                count,
+            )
+
+        if self.actor_object_confuser_engagement_loss_weight > 0:
+            real_engagement_logits = getattr(
+                self.model,
+                "last_actor_object_engagement_logits",
+                None,
+            )
+            if real_engagement_logits is None or confuser_engagement_logits is None:
+                raise RuntimeError(
+                    "actor_object_confuser_engagement_loss_weight is enabled, "
+                    "but engagement logits were not produced"
+                )
+            targets_by_action = self.engagement_targets_by_action.to(device=device)
+            targets = torch.full_like(actions, -1, dtype=torch.long, device=device)
+            in_range = (actions >= 0) & (actions < int(self.num_classes))
+            targets[in_range] = targets_by_action[actions[in_range]]
+            engagement_active = active & (targets >= 0)
+            if engagement_active.any():
+                state_labels = targets[engagement_active]
+                real_state_logits = real_engagement_logits[engagement_active].float()
+                fake_state_logits = confuser_engagement_logits[
+                    engagement_active
+                ].float()
+                real_true_state = real_state_logits.gather(
+                    1,
+                    state_labels.unsqueeze(1),
+                ).squeeze(1)
+                fake_true_state = fake_state_logits.gather(
+                    1,
+                    state_labels.unsqueeze(1),
+                ).squeeze(1)
+                engagement_margin = real_true_state - fake_true_state
+                engagement_loss = F.relu(margin - engagement_margin).mean()
+                total_loss = (
+                    total_loss
+                    + engagement_loss
+                    * self.actor_object_confuser_engagement_loss_weight
+                )
+                engagement_count = int(engagement_active.sum().item())
+                self.log(
+                    f"{stage}_loss_actor_object_confuser_engagement",
+                    engagement_loss,
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                    sync_dist=True,
+                )
+                self._log_scalar(
+                    f"{stage}_actor_object_confuser_engagement_margin",
+                    engagement_margin.detach().mean(),
+                    engagement_count,
+                )
+                self._log_scalar(
+                    f"{stage}_actor_object_confuser_engagement_pass_rate",
+                    (engagement_margin.detach() >= margin.detach()).float().mean(),
+                    engagement_count,
+                )
+
+        self._log_count(
+            f"{stage}_actor_object_confuser_count",
+            active.float().sum().detach(),
+        )
+        for action_name in ("Uselaptop", "Readbook", "WatchTV", "Usetelephone"):
+            action_idx = self._action_index(action_name)
+            if action_idx is None:
+                continue
+            action_mask = active & (actions == int(action_idx))
+            if not action_mask.any():
+                continue
+            safe_name = action_name.replace(".", "_")
+            self._log_count(
+                f"{stage}_actor_object_confuser_{safe_name}_count",
+                action_mask.float().sum().detach(),
+            )
+        return total_loss
+
     def _log_actor_object_relation_metrics(
         self,
         stage,
@@ -2817,6 +3121,19 @@ class HeatmapModule(pl.LightningModule):
         )
         if loss_actor_object_engagement is not None:
             loss_main_task = loss_main_task + loss_actor_object_engagement
+
+        loss_actor_object_confuser = self._actor_object_confuser_contrast_loss(
+            stage,
+            imgs,
+            boxes,
+            valid,
+            actions,
+            preds,
+            target,
+            object_inputs,
+        )
+        if loss_actor_object_confuser is not None:
+            loss_main_task = loss_main_task + loss_actor_object_confuser
 
         loss_hard_objectless = self._objectless_object_action_suppression_loss(
             stage,

@@ -47,6 +47,12 @@ CORE_COLUMNS = [
     "val_actor_object_engagement_phone_tablet_acc",
     "val_actor_object_engagement_tv_monitor_acc",
     "val_actor_object_engagement_laptop_book_tv_acc",
+    "train_loss_actor_object_confuser_engagement",
+    "train_loss_actor_object_confuser_action",
+    "train_actor_object_confuser_engagement_margin",
+    "train_actor_object_confuser_action_margin",
+    "train_actor_object_confuser_engagement_pass_rate",
+    "train_actor_object_confuser_count",
     "val_relation_exact_teacher_acc",
     "val_relation_exact_teacher_prob",
     "val_relation_null_rate_objectless",
@@ -338,6 +344,12 @@ def print_compact_epoch_summary(epoch_df):
         "val_actor_object_engagement_phone_tablet_acc",
         "val_actor_object_engagement_tv_monitor_acc",
         "val_actor_object_engagement_laptop_book_tv_acc",
+        "train_loss_actor_object_confuser_engagement",
+        "train_loss_actor_object_confuser_action",
+        "train_actor_object_confuser_engagement_margin",
+        "train_actor_object_confuser_action_margin",
+        "train_actor_object_confuser_engagement_pass_rate",
+        "train_actor_object_confuser_count",
         "val_relation_exact_teacher_acc",
         "val_relation_exact_teacher_prob",
         "val_relation_useful_mass_exact",
@@ -420,6 +432,12 @@ def print_compact_best(epoch_df):
         "val_actor_object_engagement_phone_tablet_acc",
         "val_actor_object_engagement_tv_monitor_acc",
         "val_actor_object_engagement_laptop_book_tv_acc",
+        "train_loss_actor_object_confuser_engagement",
+        "train_loss_actor_object_confuser_action",
+        "train_actor_object_confuser_engagement_margin",
+        "train_actor_object_confuser_action_margin",
+        "train_actor_object_confuser_engagement_pass_rate",
+        "train_actor_object_confuser_count",
         "val_relation_exact_teacher_acc",
         "val_relation_exact_teacher_prob",
         "val_relation_useful_mass_exact",
@@ -972,6 +990,24 @@ def print_decision(epoch_df):
     actor_presence = metric(latest, "val_actor_presence_acc")
     cf_logit = metric(latest, "val_object_counterfactual_teacher_logit_drop")
     cf_prob = metric(latest, "val_object_counterfactual_teacher_prob_drop")
+    confuser_eng_loss = metric(
+        latest,
+        "train_loss_actor_object_confuser_engagement",
+    )
+    confuser_action_loss = metric(latest, "train_loss_actor_object_confuser_action")
+    confuser_eng_margin = metric(
+        latest,
+        "train_actor_object_confuser_engagement_margin",
+    )
+    confuser_action_margin = metric(
+        latest,
+        "train_actor_object_confuser_action_margin",
+    )
+    confuser_pass = metric(
+        latest,
+        "train_actor_object_confuser_engagement_pass_rate",
+    )
+    confuser_count = metric(latest, "train_actor_object_confuser_count")
 
     print("\nDECISION:\n")
     print(f"latest epoch: {latest_epoch}")
@@ -1019,6 +1055,16 @@ def print_decision(epoch_df):
             f"phone_tablet {fmt(engagement_phone_acc)}, "
             f"tv_monitor {fmt(engagement_tv_acc)}, "
             f"laptop_book_tv {fmt(engagement_lbt_acc)}"
+        )
+    if pd.notna(confuser_eng_margin) or pd.notna(confuser_action_margin):
+        print(
+            "object-class confuser contrast: "
+            f"count {fmt(confuser_count, 0)}, "
+            f"eng_loss {fmt(confuser_eng_loss)}, "
+            f"eng_margin {fmt(confuser_eng_margin)}, "
+            f"eng_pass {fmt(confuser_pass)}, "
+            f"action_loss {fmt(confuser_action_loss)}, "
+            f"action_margin {fmt(confuser_action_margin)}"
         )
     if pd.notna(prompt_acc) or pd.notna(prompt_loss):
         print(
