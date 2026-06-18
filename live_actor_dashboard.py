@@ -797,6 +797,7 @@ def actor_relation_debug_payload(actor, slot, packed_objects, object_inputs):
             "null_prob": _debug_tensor_item(aux.get("null_prob"), 0, slot),
             "useful_mass": _debug_tensor_item(aux.get("useful_mass"), 0, slot),
             "gate_mean": None,
+            "update_strength_mean": None,
             "object_context_norm": None,
             "top_objects": top_objects,
         }
@@ -804,6 +805,15 @@ def actor_relation_debug_payload(actor, slot, packed_objects, object_inputs):
         if torch.is_tensor(gate) and gate.ndim >= 3 and slot < gate.shape[1]:
             block_payload["gate_mean"] = float(
                 gate[0, slot].detach().float().mean().cpu().item()
+            )
+        update_strength = aux.get("update_strength")
+        if (
+            torch.is_tensor(update_strength)
+            and update_strength.ndim >= 3
+            and slot < update_strength.shape[1]
+        ):
+            block_payload["update_strength_mean"] = float(
+                update_strength[0, slot].detach().float().mean().cpu().item()
             )
         object_context = aux.get("object_context")
         if (

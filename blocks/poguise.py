@@ -1012,9 +1012,12 @@ class ActorObjectRelationUpdate(nn.Module):
         )
         delta = self.out(update_in)
         gate = self.gate(update_in)
+        # Relation NULL means "no interacted object"; in that case the
+        # object-conditioned residual should be a near no-op on actor tokens.
+        update_strength = gate * object_mass
 
         scale = actor_tokens.new_tensor(self.max_scale)
-        actor_tokens = actor_tokens + scale * gate * delta
+        actor_tokens = actor_tokens + scale * update_strength * delta
 
         aux = {
             "logits": logits,
@@ -1025,6 +1028,7 @@ class ActorObjectRelationUpdate(nn.Module):
             "object_context": object_context,
             "scale": scale.detach(),
             "gate": gate.detach(),
+            "update_strength": update_strength.detach(),
         }
         return actor_tokens, aux
 
