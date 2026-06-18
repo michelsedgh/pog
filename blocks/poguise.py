@@ -891,41 +891,13 @@ class Block(nn.Module):
         return x
 
 
-class ActorObjectPromptGrounding(nn.Module):
-    """Auxiliary actor-to-object scorer over transformer prompt tokens."""
-
-    def __init__(self, dim, relation_dim=256):
-        super().__init__()
-        self.actor_norm = nn.LayerNorm(dim)
-        self.object_norm = nn.LayerNorm(dim)
-        self.actor_q = nn.Linear(dim, relation_dim, bias=False)
-        self.object_k = nn.Linear(dim, relation_dim, bias=False)
-
-    def forward(self, actor_tokens, object_tokens, object_valid, object_confs):
-        q = self.actor_q(self.actor_norm(actor_tokens))
-        k = self.object_k(self.object_norm(object_tokens))
-        logits = torch.matmul(q, k.transpose(1, 2)) / (q.shape[-1] ** 0.5)
-        object_valid = object_valid.to(device=logits.device, dtype=torch.bool)
-        object_confs = object_confs.to(device=logits.device, dtype=logits.dtype)
-        logits = logits + torch.log(object_confs.clamp_min(1.0e-4))[:, None, :]
-        logits = logits.masked_fill(~object_valid[:, None, :], -1.0e4)
-        attention = torch.softmax(logits.float(), dim=-1).to(dtype=actor_tokens.dtype)
-        attention = attention * object_valid[:, None, :].to(dtype=attention.dtype)
-        denom = attention.sum(dim=-1, keepdim=True)
-        attention = torch.where(
-            denom > 0,
-            attention / denom.clamp_min(1.0e-6),
-            torch.zeros_like(attention),
-        )
-        return {
-            "logits": logits,
-            "object_attention": attention,
-            "object_valid": object_valid,
-        }
-
-
 class ActorObjectRelationUpdate(nn.Module):
-    """Update actor tokens from runtime object prompts inside the transformer."""
+    """Update actor tokens from selected runtime object prompts.
+
+    The relation logits choose NULL or one object slot for each actor. The same
+    selected object context is then fused into the actor token that ultimately
+    feeds the action head; there is no separate object-action classifier.
+    """
 
     def __init__(
         self,
@@ -934,7 +906,6 @@ class ActorObjectRelationUpdate(nn.Module):
         hidden_dim=512,
         max_scale=1.0,
         null_logit_init=None,
-        binding_num_states=0,
     ):
         super().__init__()
         if null_logit_init is None:
@@ -948,38 +919,21 @@ class ActorObjectRelationUpdate(nn.Module):
 
         self.null_logit = nn.Parameter(torch.tensor(float(null_logit_init)))
 
+        fusion_dim = 3 * dim
         self.out = nn.Sequential(
-            nn.LayerNorm(2 * dim),
-            nn.Linear(2 * dim, hidden_dim),
+            nn.LayerNorm(fusion_dim),
+            nn.Linear(fusion_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, dim),
         )
         gate_hidden = max(hidden_dim // 4, 64)
         self.gate = nn.Sequential(
-            nn.LayerNorm(2 * dim),
-            nn.Linear(2 * dim, gate_hidden),
+            nn.LayerNorm(fusion_dim),
+            nn.Linear(fusion_dim, gate_hidden),
             nn.GELU(),
             nn.Linear(gate_hidden, 1),
             nn.Sigmoid(),
         )
-
-        self.binding_num_states = int(binding_num_states)
-        if self.binding_num_states > 0:
-            self.binding = nn.Sequential(
-                nn.LayerNorm(3 * dim),
-                nn.Linear(3 * dim, hidden_dim),
-                nn.GELU(),
-                nn.Linear(hidden_dim, dim),
-                nn.GELU(),
-            )
-            self.binding_delta = nn.Linear(dim, dim)
-            self.binding_state_head = nn.Linear(dim, self.binding_num_states)
-            nn.init.zeros_(self.binding_delta.weight)
-            nn.init.zeros_(self.binding_delta.bias)
-        else:
-            self.binding = None
-            self.binding_delta = None
-            self.binding_state_head = None
 
         self.max_scale = float(max_scale)
         if self.max_scale < 0:
@@ -1048,17 +1002,15 @@ class ActorObjectRelationUpdate(nn.Module):
         object_context = torch.matmul(object_attn, v)
         object_context = object_context * object_mass
 
-        update_in = torch.cat([actor_tokens, object_context], dim=-1)
+        update_in = torch.cat(
+            [
+                actor_tokens,
+                object_context,
+                actor_tokens * object_context,
+            ],
+            dim=-1,
+        )
         delta = self.out(update_in)
-        binding_state_logits = None
-        if self.binding is not None:
-            binding_in = torch.cat(
-                [actor_tokens, object_context, actor_tokens * object_context],
-                dim=-1,
-            )
-            binding_feat = self.binding(binding_in)
-            delta = delta + self.binding_delta(binding_feat)
-            binding_state_logits = self.binding_state_head(binding_feat)
         gate = self.gate(update_in)
 
         scale = actor_tokens.new_tensor(self.max_scale)
@@ -1074,8 +1026,6 @@ class ActorObjectRelationUpdate(nn.Module):
             "scale": scale.detach(),
             "gate": gate.detach(),
         }
-        if binding_state_logits is not None:
-            aux["binding_state_logits"] = binding_state_logits
         return actor_tokens, aux
 
 
@@ -1193,14 +1143,13 @@ class VisionTransformer(nn.Module):
         token_selection_object_weight=0.10,
         token_selection_heatmap_weight=0.35,
         actor_object_relation_in_transformer=0,
-        actor_object_relation_blocks="6,9",
+        actor_object_relation_blocks="2,5,8",
         actor_object_relation_dim=256,
         actor_object_relation_hidden_dim=512,
         actor_object_relation_max_scale=1.0,
         actor_object_relation_null_logit_init=4.0,
         actor_object_relation_geometry_bias_weight=0.5,
         actor_object_relation_heatmap_bias_weight=1.0,
-        actor_object_binding_num_states=0,
         return_heatmap_features=False,
         **kwargs,
     ):
@@ -1289,9 +1238,6 @@ class VisionTransformer(nn.Module):
         self.actor_object_relation_heatmap_bias_weight = float(
             actor_object_relation_heatmap_bias_weight
         )
-        self.actor_object_binding_num_states = int(actor_object_binding_num_states)
-        if self.actor_object_binding_num_states < 0:
-            raise ValueError("actor_object_binding_num_states must be non-negative")
         if self.actor_object_relation_dim <= 0:
             raise ValueError("actor_object_relation_dim must be positive")
         if self.actor_object_relation_hidden_dim <= 0:
@@ -1415,13 +1361,20 @@ class VisionTransformer(nn.Module):
                         hidden_dim=self.actor_object_relation_hidden_dim,
                         max_scale=self.actor_object_relation_max_scale,
                         null_logit_init=self.actor_object_relation_null_logit_init,
-                        binding_num_states=self.actor_object_binding_num_states,
                     )
                     for block_idx in self.actor_object_relation_blocks
                 }
             )
+            self.actor_object_final_relation_update = ActorObjectRelationUpdate(
+                embed_dim,
+                relation_dim=self.actor_object_relation_dim,
+                hidden_dim=self.actor_object_relation_hidden_dim,
+                max_scale=self.actor_object_relation_max_scale,
+                null_logit_init=self.actor_object_relation_null_logit_init,
+            )
         else:
             self.actor_object_relation_updates = nn.ModuleDict()
+            self.actor_object_final_relation_update = None
         self.norm = nn.Identity() if use_mean_pooling else norm_layer(embed_dim)
         self.fc_norm = norm_layer(embed_dim) if use_mean_pooling else None
         self.head_dropout = nn.Dropout(head_drop_rate)
@@ -1433,12 +1386,12 @@ class VisionTransformer(nn.Module):
             trunc_normal_(self.pos_embed, std=0.02)
 
         self.apply(self._init_weights)
-        for relation_update in self.actor_object_relation_updates.values():
+        relation_modules = list(self.actor_object_relation_updates.values())
+        if self.actor_object_final_relation_update is not None:
+            relation_modules.append(self.actor_object_final_relation_update)
+        for relation_update in relation_modules:
             nn.init.zeros_(relation_update.out[-1].weight)
             nn.init.zeros_(relation_update.out[-1].bias)
-            if relation_update.binding_delta is not None:
-                nn.init.zeros_(relation_update.binding_delta.weight)
-                nn.init.zeros_(relation_update.binding_delta.bias)
 
         self.head.weight.data.mul_(init_scale)
         self.head.bias.data.mul_(init_scale)
@@ -1485,11 +1438,6 @@ class VisionTransformer(nn.Module):
             nn.init.zeros_(self.object_box_mlp[-1].bias)
             trunc_normal_(self.object_conf_mlp[-1].weight, std=0.01)
             nn.init.zeros_(self.object_conf_mlp[-1].bias)
-            self.object_grounding_probe = ActorObjectPromptGrounding(
-                self.num_features,
-                relation_dim=self.actor_object_relation_dim,
-            )
-            self.object_grounding_probe.apply(self._init_weights)
         if self.n_heatmap_out_channels > 0:
             self.heatmap_tokens = nn.Parameter(
                 torch.randn(1, self.HW_OUT_CONV[0] * self.HW_OUT_CONV[1], embed_dim)
@@ -1978,7 +1926,6 @@ class VisionTransformer(nn.Module):
         heatmap_start = self.N_KEY_TOKENS
         heatmap_end = heatmap_start + self.n_heatmap_tokens
         self.last_actor_object_relation_aux = {}
-        self.last_actor_object_grounding = None
         self.last_token_selection_diagnostics = None
         # keep the global indexes of non-keyframe tokens during pruning
         idx = torch.arange(0, N, device=x.device).unsqueeze(0).repeat(B, 1)
@@ -2072,13 +2019,38 @@ class VisionTransformer(nn.Module):
                 x_object = self.norm(x_object)
             if x_visual is not None:
                 x_visual = self.norm(x_visual)
-        if x_object is not None:
-            self.last_actor_object_grounding = self.object_grounding_probe(
+        if (
+            self.actor_object_final_relation_update is not None
+            and self.actor_object_relation_in_transformer
+            and self.n_actor_tokens > 0
+            and x_object is not None
+        ):
+            relation_heatmap = None
+            if self.n_heatmap_tokens > 0:
+                relation_heatmap = self._relation_heatmap_from_tokens(
+                    x_heatmap,
+                    B,
+                )
+            relation_bias = self._actor_object_relation_bias(
+                boxes,
+                object_boxes,
+                valid,
+                object_valid,
+                relation_heatmap,
+                x_actor.device,
+                x_actor.dtype,
+            )
+            x_actor, relation_aux = self.actor_object_final_relation_update(
                 x_actor,
                 x_object,
                 object_valid,
                 object_confs,
+                relation_bias=relation_bias,
             )
+            relation_aux["relation_bias"] = (
+                None if relation_bias is None else relation_bias.detach()
+            )
+            self.last_actor_object_relation_aux[str(self.depth)] = relation_aux
         x_class = self.head_dropout(x_class)
         x_class = self.head(x_class)
         if self.n_actor_tokens > 0:

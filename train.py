@@ -280,8 +280,13 @@ def _validate_no_deprecated_object_path(checkpoint):
                 "object_interaction",
                 "specialist",
                 "object_action_fusion",
+                "object_grounding_probe",
+                "binding_delta",
+                "binding_state_head",
             )
         ):
+            return True
+        if ".binding." in key:
             return True
         return "object_action" in key
 
@@ -294,8 +299,8 @@ def _validate_no_deprecated_object_path(checkpoint):
         preview = ", ".join(deprecated[:12])
         raise ValueError(
             "Deprecated object specialist checkpoint detected. The active "
-            "actor-object path uses object prompt tokens inside the transformer "
-            "plus optional in-transformer actor-object relation updates. "
+            "actor-object path uses one in-transformer relation distribution "
+            "over NULL plus object slots. Removed side heads must not be loaded. "
             f"First deprecated keys: {preview}"
         )
 
@@ -420,13 +425,11 @@ def build_parser():
         default=10.0,
     )
     parser.add_argument("--actor_object_relation_loss_weight", type=float, default=0.0)
-    parser.add_argument("--actor_object_engagement_loss_weight", type=float, default=0.0)
     parser.add_argument(
         "--actor_object_relation_null_loss_weight",
         type=float,
         default=0.5,
     )
-    parser.add_argument("--object_prompt_grounding_loss_weight", type=float, default=0.0)
     parser.add_argument("--deepspeed_optim", type=int, default=0)
     parser.add_argument("--kp_only", type=int, default=0)
 

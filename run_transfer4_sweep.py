@@ -20,8 +20,8 @@ from pathlib import Path
 
 TRANSFER4_SWEEP = [
     (
-        "object_retention_overdrive6",
-        "Range test: if object/interaction patches can matter, this should make retention metrics jump.",
+        "relation_object_retention6",
+        "Sensitivity test: higher object and heatmap token-selection pressure.",
         {
             "--actor_object_relation_null_logit_init": "2.0",
             "--actor_object_relation_geometry_bias_weight": "1.50",
@@ -34,13 +34,11 @@ TRANSFER4_SWEEP = [
             "--actor_object_prompt_box_prior_weight": "0.25",
             "--actor_object_prompt_box_prior_expand": "1.75",
             "--actor_object_relation_loss_weight": "1.25",
-            "--actor_object_engagement_loss_weight": "0.60",
-            "--object_prompt_grounding_loss_weight": "0.50",
         },
     ),
     (
-        "engagement_lowmotion_overdrive6",
-        "Range test: if paused laptop is a state-supervision problem, this should raise laptop engagement and live transfer.",
+        "relation_conservative6",
+        "Range test: weaker relation updates with the same single actor-object relation objective.",
         {
             "--actor_object_relation_null_logit_init": "4.0",
             "--actor_object_relation_geometry_bias_weight": "0.50",
@@ -53,13 +51,11 @@ TRANSFER4_SWEEP = [
             "--actor_object_prompt_box_prior_weight": "0.12",
             "--actor_object_prompt_box_prior_expand": "1.50",
             "--actor_object_relation_loss_weight": "0.80",
-            "--actor_object_engagement_loss_weight": "1.20",
-            "--object_prompt_grounding_loss_weight": "0.35",
         },
     ),
     (
-        "relation_causality_overdrive6",
-        "Range test: if relation updates are too weak, this should make object-drop action deltas jump.",
+        "relation_strong6",
+        "Sensitivity test: stronger in-transformer relation updates without side-head losses.",
         {
             "--actor_object_relation_null_logit_init": "1.75",
             "--actor_object_relation_geometry_bias_weight": "2.00",
@@ -72,13 +68,11 @@ TRANSFER4_SWEEP = [
             "--actor_object_prompt_box_prior_weight": "0.25",
             "--actor_object_prompt_box_prior_expand": "1.75",
             "--actor_object_relation_loss_weight": "1.50",
-            "--actor_object_engagement_loss_weight": "0.60",
-            "--object_prompt_grounding_loss_weight": "0.60",
         },
     ),
     (
-        "full_overdrive6",
-        "Destructive proof: if this wins validation but fails live, object pressure is overriding visual/actor semantics.",
+        "relation_high_pressure6",
+        "High-pressure relation setting for sensitivity checks; do not use as the default run.",
         {
             "--actor_object_relation_null_logit_init": "1.25",
             "--actor_object_relation_geometry_bias_weight": "2.50",
@@ -91,8 +85,6 @@ TRANSFER4_SWEEP = [
             "--actor_object_prompt_box_prior_weight": "0.45",
             "--actor_object_prompt_box_prior_expand": "2.25",
             "--actor_object_relation_loss_weight": "2.00",
-            "--actor_object_engagement_loss_weight": "1.20",
-            "--object_prompt_grounding_loss_weight": "1.00",
         },
     ),
 ]
@@ -259,7 +251,7 @@ def build_working_cell_base_cmd(env: dict[str, str], run_name: str, epoch_dir: P
     """Return the same base training command as the known-good notebook cell.
 
     The sweep mutates this command exactly like the pasted cell did: it changes
-    run name, epoch count, checkpoint policy, and the object-pressure overrides.
+    run name, epoch count, checkpoint policy, and relation-strength overrides.
     """
     data_dir = env["DATA_DIR"]
     return [
@@ -323,7 +315,7 @@ def build_working_cell_base_cmd(env: dict[str, str], run_name: str, epoch_dir: P
         "--actor_object_relation_in_transformer",
         "1",
         "--actor_object_relation_blocks",
-        "6,9",
+        "2,5,8",
         "--actor_object_relation_null_logit_init",
         "2.0",
         "--actor_object_relation_geometry_bias_weight",
@@ -392,11 +384,7 @@ def build_working_cell_base_cmd(env: dict[str, str], run_name: str, epoch_dir: P
         "1000",
         "--actor_object_relation_loss_weight",
         "1.00",
-        "--actor_object_engagement_loss_weight",
-        "0.60",
         "--actor_object_relation_null_loss_weight",
-        "0.50",
-        "--object_prompt_grounding_loss_weight",
         "0.50",
         "--batch_size",
         "32",

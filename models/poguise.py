@@ -10,8 +10,6 @@ import os.path
 import pickle
 from datasets.object_vocab import NUM_OBJECT_CLASSES
 
-ACTOR_OBJECT_ENGAGEMENT_NUM_STATES = 9
-
 
 def load_state_dict(
     model, state_dict, prefix="", ignore_missing="relative_position_index"
@@ -154,9 +152,6 @@ class POGUISE(pl.LightningModule):
         self.actor_object_relation_in_transformer = bool(
             self.hparams.get("actor_object_relation_in_transformer", 0)
         )
-        self.actor_object_engagement_enabled = (
-            float(self.hparams.get("actor_object_engagement_loss_weight", 0.0)) > 0.0
-        )
         if bool(self.hparams.get("actor_object_slot_head", 0)):
             raise ValueError(
                 "actor_object_slot_head was replaced by "
@@ -192,11 +187,6 @@ class POGUISE(pl.LightningModule):
         if self.actor_object_relation_in_transformer and not self.actor_object_prompt_tokens_enabled:
             raise ValueError(
                 "actor_object_relation_in_transformer requires actor_object_prompt_tokens"
-            )
-        if self.actor_object_engagement_enabled and not self.actor_object_relation_in_transformer:
-            raise ValueError(
-                "actor-object engagement supervision requires "
-                "actor_object_relation_in_transformer"
             )
         if self.actor_interaction_heatmaps and not self.actor_prompt:
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
@@ -289,7 +279,7 @@ class POGUISE(pl.LightningModule):
                 actor_object_relation_in_transformer=self.actor_object_relation_in_transformer,
                 actor_object_relation_blocks=self.hparams.get(
                     "actor_object_relation_blocks",
-                    "6,9",
+                    "2,5,8",
                 ),
                 actor_object_relation_dim=self.hparams.get(
                     "actor_object_relation_dim",
@@ -314,11 +304,6 @@ class POGUISE(pl.LightningModule):
                 actor_object_relation_heatmap_bias_weight=self.hparams.get(
                     "actor_object_relation_heatmap_bias_weight",
                     1.0,
-                ),
-                actor_object_binding_num_states=(
-                    ACTOR_OBJECT_ENGAGEMENT_NUM_STATES
-                    if self.actor_object_engagement_enabled
-                    else 0
                 ),
                 return_heatmap_features=return_heatmap_features,
                 trt_safe_attention=self.hparams.get("trt_safe_attention", 0),
@@ -388,7 +373,7 @@ class POGUISE(pl.LightningModule):
                 actor_object_relation_in_transformer=self.actor_object_relation_in_transformer,
                 actor_object_relation_blocks=self.hparams.get(
                     "actor_object_relation_blocks",
-                    "6,9",
+                    "2,5,8",
                 ),
                 actor_object_relation_dim=self.hparams.get(
                     "actor_object_relation_dim",
@@ -413,11 +398,6 @@ class POGUISE(pl.LightningModule):
                 actor_object_relation_heatmap_bias_weight=self.hparams.get(
                     "actor_object_relation_heatmap_bias_weight",
                     1.0,
-                ),
-                actor_object_binding_num_states=(
-                    ACTOR_OBJECT_ENGAGEMENT_NUM_STATES
-                    if self.actor_object_engagement_enabled
-                    else 0
                 ),
                 return_heatmap_features=return_heatmap_features,
                 trt_safe_attention=self.hparams.get("trt_safe_attention", 0),
@@ -586,11 +566,8 @@ class POGUISE(pl.LightningModule):
             self.last_actor_tokens = x_actor
             self.last_actor_object_prompt_classes = None
             self.last_actor_object_prompt_tokens = None
-            self.last_actor_object_prompt_attention_logits = None
-            self.last_actor_object_prompt_attention = None
             self.last_actor_object_prompt_valid = None
             self.last_actor_object_relation_context = None
-            self.last_actor_object_engagement_logits = None
             self.last_actor_action_tokens = None
             self.last_actor_object_relation_aux = getattr(
                 self.net,
@@ -624,12 +601,6 @@ class POGUISE(pl.LightningModule):
                     self.last_actor_object_prompt_classes = prompt_classes
                 self.last_actor_object_prompt_tokens = x_object_prompt
                 self.last_actor_object_prompt_valid = prompt_valid
-                grounding = getattr(self.net, "last_actor_object_grounding", None)
-                if grounding is not None:
-                    self.last_actor_object_prompt_attention_logits = grounding["logits"]
-                    self.last_actor_object_prompt_attention = grounding[
-                        "object_attention"
-                    ]
             relation_context = None
             if self.last_actor_object_relation_aux:
                 last_block = sorted(
@@ -645,16 +616,6 @@ class POGUISE(pl.LightningModule):
                         dtype=x_actor.dtype,
                     )
                     self.last_actor_object_relation_context = relation_context
-                binding_state_logits = self.last_actor_object_relation_aux[
-                    last_block
-                ].get("binding_state_logits")
-                if binding_state_logits is not None:
-                    self.last_actor_object_engagement_logits = (
-                        binding_state_logits.to(
-                            device=x_actor.device,
-                            dtype=x_actor.dtype,
-                        )
-                    )
             self.last_actor_action_tokens = x_actor
             action_scores = self.actor_head(x_actor)
             self.last_actor_action_logits = action_scores
@@ -740,7 +701,7 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--token_selection_object_weight", type=float, default=0.10)
         parser.add_argument("--token_selection_heatmap_weight", type=float, default=0.35)
         parser.add_argument("--actor_object_relation_in_transformer", type=int, default=0)
-        parser.add_argument("--actor_object_relation_blocks", type=str, default="6,9")
+        parser.add_argument("--actor_object_relation_blocks", type=str, default="2,5,8")
         parser.add_argument("--actor_object_relation_dim", type=int, default=256)
         parser.add_argument("--actor_object_relation_hidden_dim", type=int, default=512)
         parser.add_argument("--actor_object_relation_max_scale", type=float, default=1.0)

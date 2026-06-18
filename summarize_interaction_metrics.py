@@ -7,133 +7,6 @@ import pandas as pd
 from datasets.object_vocab import OBJECT_CLASSES
 
 
-CORE_COLUMNS = [
-    "epoch",
-    "val_loss",
-    "val_acc_macro",
-    "val_f1",
-    "val_deploy_score",
-    "val_deploy_key_action_mean",
-    "val_deploy_key_action_min",
-    "val_deploy_objectless_with_object_visible_acc",
-    "val_deploy_objectless_with_object_visible_object_action_pred_rate",
-    "val_actor_all_slot_acc",
-    "val_actor_slot_consistency",
-    "val_actor_pair_acc",
-    "val_actor_pair_swap_acc",
-    "val_actor_pair_same_acc",
-    "val_actor_pair_diff_acc",
-    "val_actor_presence_acc",
-    "val_actor_presence_bg_acc",
-    "val_loss_interaction_heatmap",
-    "val_loss_heatmap_log",
-    "val_loss_heatmap_optimized",
-    "val_loss_heatmap_frobenius",
-    "val_loss_pose_heatmap_frobenius",
-    "val_loss_pose_heatmap_mse_scaled",
-    "val_loss_interaction_heatmap_raw_frobenius",
-    "val_loss_interaction_heatmap_frobenius",
-    "val_loss_interaction_heatmap_mse_scaled",
-    "val_loss_interaction_heatmap_pos_balanced",
-    "val_loss_interaction_heatmap_center",
-    "val_loss_main_deploy",
-    "val_loss_grounding_aux",
-    "val_loss_actor_object_relation",
-    "val_loss_actor_object_engagement",
-    "val_actor_object_engagement_acc",
-    "val_actor_object_engagement_none_acc",
-    "val_actor_object_engagement_laptop_acc",
-    "val_actor_object_engagement_book_acc",
-    "val_actor_object_engagement_phone_tablet_acc",
-    "val_actor_object_engagement_tv_monitor_acc",
-    "val_actor_object_engagement_laptop_book_tv_acc",
-    "val_relation_exact_teacher_acc",
-    "val_relation_exact_teacher_prob",
-    "val_relation_null_rate_objectless",
-    "val_relation_null_rate_missing_objectful",
-    "val_relation_useful_mass_exact",
-    "val_relation_useful_mass_objectless",
-    "val_relation_useful_mass_missing_objectful",
-    "val_relation_null_prob_exact",
-    "val_relation_null_prob_objectless",
-    "val_relation_null_prob_missing_objectful",
-    "val_loss_object_prompt_grounding",
-    "val_object_prompt_grounding_acc",
-    "val_object_prompt_grounding_true_prob",
-    "val_object_prompt_exact_teacher_valid_rate_1based",
-    "val_object_prompt_exact_compatible_rate_1based",
-    "val_object_prompt_any_compatible_proposal_rate",
-    "val_object_prompt_exact_compatible_count",
-    "val_object_prompt_exact_correct_object_rate",
-    "val_object_prompt_exact_correct_object_prob",
-    "val_object_prompt_attention_exact_teacher_mean",
-    "val_object_prompt_attention_objectless_visible_mean",
-    "val_object_prompt_attention_objectless_visible_max",
-    "val_object_prompt_attention_objectless_visible_entropy",
-    "val_object_prompt_drop_objectless_pred_match",
-    "val_object_prompt_drop_objectless_true_prob_delta",
-    "val_object_prompt_drop_objectless_kl",
-    "val_object_prompt_drop_objectless_acc",
-    "val_object_prompt_drop_objectless_object_action_pred_rate",
-    "val_object_prompt_distractor_objectless_pred_match",
-    "val_object_prompt_distractor_objectless_kl",
-    "val_object_prompt_distractor_objectless_acc",
-    "val_object_prompt_distractor_objectless_object_action_pred_rate",
-    "val_object_prompt_drop_exact_true_logit_drop",
-    "val_object_prompt_drop_exact_true_prob_drop",
-    "val_object_prompt_drop_exact_pred_match",
-    "val_object_prompt_drop_exact_acc",
-    "val_object_prompt_drop_Uselaptop_true_logit_drop",
-    "val_object_prompt_drop_Uselaptop_true_prob_drop",
-    "val_object_prompt_drop_Uselaptop_pred_match",
-    "val_object_prompt_drop_Readbook_true_logit_drop",
-    "val_object_prompt_drop_WatchTV_true_logit_drop",
-    "val_object_prompt_drop_Usetelephone_true_logit_drop",
-    "val_actor_object_prompt_token_count",
-    "val_token_selection_visual_keep_rate",
-    "val_token_selection_visual_keep_count",
-    "val_token_selection_actor_box_keep_rate",
-    "val_token_selection_visible_object_box_keep_rate",
-    "val_token_selection_exact_teacher_object_keep_rate",
-    "val_token_selection_interaction_heatmap_keep_rate",
-    "val_token_selection_laptop_box_keep_rate",
-    "val_token_selection_book_box_keep_rate",
-    "val_token_selection_phone_box_keep_rate",
-    "val_token_selection_tv_monitor_box_keep_rate",
-    "val_token_selection_Uselaptop_teacher_object_keep_rate",
-    "val_token_selection_Readbook_teacher_object_keep_rate",
-    "val_token_selection_WatchTV_teacher_object_keep_rate",
-    "val_token_selection_Usetelephone_teacher_object_keep_rate",
-    "train_nash_weight_action",
-    "train_nash_weight_heatmap",
-    "train_nash_weight_main_deploy",
-    "train_nash_weight_grounding_aux",
-    "val_interaction_teacher_slot_rate",
-    "val_interaction_teacher_slot_count",
-    "val_interaction_heatmap_missing_object_masked_rate",
-    "val_interaction_heatmap_missing_object_masked_count",
-    "val_interaction_heatmap_exact_compatible_valid_rate",
-    "val_interaction_heatmap_mismatch_valid_rate",
-    "val_interaction_heatmap_iou",
-    "val_interaction_heatmap_soft_iou",
-    "val_interaction_heatmap_positive_mean",
-    "val_interaction_heatmap_pred_max",
-    "val_interaction_heatmap_target_max",
-    "val_interaction_heatmap_center_l2",
-    "val_object_counterfactual_teacher_logit_drop",
-    "val_object_counterfactual_teacher_prob_drop",
-    "val_objectless_with_object_visible_acc",
-    "val_objectless_with_object_visible_count",
-    "val_objectless_with_object_visible_object_action_pred_rate",
-    "val_objectless_with_laptop_visible_acc",
-    "val_objectless_with_laptop_visible_count",
-    "val_objectless_with_book_visible_acc",
-    "val_objectless_with_book_visible_count",
-    "val_objectless_with_phone_visible_acc",
-    "val_objectless_with_phone_visible_count",
-    "val_watchtv_fp_rate_objectless",
-]
-
 GROUPS = [
     "laptop_book_tv",
     "phone_tablet",
@@ -201,6 +74,71 @@ KEY_ACTIONS = [
 
 OBJECTS = [OBJECT_CLASSES[index] for index in sorted(OBJECT_CLASSES)]
 
+CORE_COLUMNS = [
+    "epoch",
+    "val_loss",
+    "val_acc_macro",
+    "val_f1",
+    "val_deploy_score",
+    "val_deploy_key_action_mean",
+    "val_deploy_key_action_min",
+    "val_actor_all_slot_acc",
+    "val_actor_pair_acc",
+    "val_actor_pair_swap_acc",
+    "val_actor_pair_same_acc",
+    "val_actor_presence_acc",
+    "val_loss_main_deploy",
+    "val_loss_heatmap_aux",
+    "val_loss_actor_object_relation",
+    "val_relation_exact_teacher_acc",
+    "val_relation_exact_teacher_prob",
+    "val_relation_useful_mass_exact",
+    "val_relation_null_prob_exact",
+    "val_relation_null_rate_objectless",
+    "val_relation_null_prob_objectless",
+    "val_relation_useful_mass_objectless",
+    "val_relation_null_rate_missing_objectful",
+    "val_relation_null_prob_missing_objectful",
+    "val_relation_useful_mass_missing_objectful",
+    "val_actor_object_prompt_token_count",
+    "val_token_selection_visual_keep_rate",
+    "val_token_selection_actor_box_keep_rate",
+    "val_token_selection_visible_object_box_keep_rate",
+    "val_token_selection_exact_teacher_object_keep_rate",
+    "val_token_selection_interaction_heatmap_keep_rate",
+    "val_token_selection_laptop_box_keep_rate",
+    "val_token_selection_book_box_keep_rate",
+    "val_token_selection_phone_box_keep_rate",
+    "val_token_selection_tv_monitor_box_keep_rate",
+    "val_token_selection_Uselaptop_teacher_object_keep_rate",
+    "val_interaction_teacher_slot_rate",
+    "val_interaction_teacher_slot_count",
+    "val_interaction_heatmap_missing_object_masked_rate",
+    "val_interaction_heatmap_missing_object_masked_count",
+    "val_interaction_heatmap_exact_compatible_valid_rate",
+    "val_interaction_heatmap_mismatch_valid_rate",
+    "val_interaction_heatmap_iou",
+    "val_interaction_heatmap_soft_iou",
+    "val_interaction_heatmap_positive_mean",
+    "val_interaction_heatmap_pred_max",
+    "val_interaction_heatmap_target_max",
+    "val_interaction_heatmap_center_l2",
+    "val_objectless_with_object_visible_acc",
+    "val_objectless_with_object_visible_count",
+    "val_objectless_with_object_visible_object_action_pred_rate",
+    "val_objectless_with_laptop_visible_acc",
+    "val_objectless_with_laptop_visible_count",
+    "val_objectless_with_book_visible_acc",
+    "val_objectless_with_book_visible_count",
+    "val_objectless_with_phone_visible_acc",
+    "val_objectless_with_phone_visible_count",
+    "val_watchtv_fp_rate_objectless",
+    "train_nash_weight_action",
+    "train_nash_weight_heatmap",
+    "train_nash_weight_main_deploy",
+    "train_nash_weight_heatmap_aux",
+]
+
 
 def fmt(value, digits=4):
     if pd.isna(value):
@@ -210,7 +148,7 @@ def fmt(value, digits=4):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Summarize actor interaction heatmap training metrics."
+        description="Summarize actor-object relation and PO-GUISE+ metrics."
     )
     parser.add_argument(
         "--root",
@@ -219,16 +157,12 @@ def parse_args():
     )
     parser.add_argument(
         "--pattern",
-        default="actor_object_poguiseplus_final_*",
+        default="actor_object_relation_*",
         help="Run glob under --root used when --run is not supplied.",
     )
     parser.add_argument("--run", default=None, help="Specific run directory.")
     parser.add_argument("--metrics", default=None, help="Specific metrics.csv path.")
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Print full heatmap/channel/group diagnostics instead of the compact object-use summary.",
-    )
+    parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
 
 
@@ -309,6 +243,73 @@ def print_table(title, rows, columns=None):
         print(table.to_string(index=False))
 
 
+def load_epoch_metrics(metrics):
+    raw = pd.read_csv(metrics)
+    if "epoch" not in raw.columns:
+        raise SystemExit(f"{metrics} has no epoch column")
+    epoch_df = raw.groupby("epoch", as_index=False).agg(
+        {column: last_nonnull for column in raw.columns if column != "epoch"}
+    )
+    val_cols = [
+        column
+        for column in ("val_loss", "val_f1", "val_acc_macro", "val_deploy_score")
+        if column in epoch_df.columns
+    ]
+    if val_cols:
+        epoch_df = epoch_df.dropna(how="all", subset=val_cols)
+    if epoch_df.empty:
+        raise SystemExit(f"{metrics} has no completed validation epochs")
+    return epoch_df
+
+
+def action_verdict(delta):
+    if pd.isna(delta):
+        return "unknown"
+    if delta <= -0.03:
+        return "hurt badly"
+    if delta < -0.005:
+        return "hurt"
+    if delta >= 0.02:
+        return "improved"
+    return "stable"
+
+
+def action_progress_rows(epoch_df):
+    base = epoch_df.iloc[0]
+    latest = epoch_df.iloc[-1]
+    rows = []
+    for action in ACTIONS:
+        acc_col = f"val_action_{action}_acc"
+        if not df_has_metric(epoch_df, acc_col):
+            continue
+        series = df_metric(epoch_df, acc_col, float("nan"))
+        valid = series.dropna()
+        best_epoch = float("nan")
+        best_acc = float("nan")
+        if len(valid):
+            best_idx = valid.idxmax()
+            best_epoch = epoch_df.loc[best_idx, "epoch"]
+            best_acc = series.loc[best_idx]
+        delta = metric(latest, acc_col) - metric(base, acc_col)
+        rows.append(
+            {
+                "action": action,
+                "count": metric(latest, f"val_action_{action}_count"),
+                "teacher": metric(
+                    latest,
+                    f"val_action_{action}_interaction_teacher_rate",
+                ),
+                "e0_acc": metric(base, acc_col),
+                "latest_acc": metric(latest, acc_col),
+                "delta": delta,
+                "best_epoch": best_epoch,
+                "best_acc": best_acc,
+                "verdict": action_verdict(delta),
+            }
+        )
+    return rows
+
+
 def print_compact_epoch_summary(epoch_df):
     cols = [
         "epoch",
@@ -320,16 +321,7 @@ def print_compact_epoch_summary(epoch_df):
         "val_group_objectless_acc",
         "val_group_laptop_book_tv_acc",
         "val_group_phone_tv_acc",
-        "val_group_drink_cup_bottle_glass_acc",
-        "val_group_drink_acc",
         "val_loss_actor_object_relation",
-        "val_loss_actor_object_engagement",
-        "val_actor_object_engagement_acc",
-        "val_actor_object_engagement_laptop_acc",
-        "val_actor_object_engagement_book_acc",
-        "val_actor_object_engagement_phone_tablet_acc",
-        "val_actor_object_engagement_tv_monitor_acc",
-        "val_actor_object_engagement_laptop_book_tv_acc",
         "val_relation_exact_teacher_acc",
         "val_relation_exact_teacher_prob",
         "val_relation_useful_mass_exact",
@@ -340,19 +332,6 @@ def print_compact_epoch_summary(epoch_df):
         "val_relation_null_rate_missing_objectful",
         "val_relation_null_prob_missing_objectful",
         "val_relation_useful_mass_missing_objectful",
-        "val_object_counterfactual_teacher_logit_drop",
-        "val_object_prompt_grounding_acc",
-        "val_object_prompt_grounding_true_prob",
-        "val_object_prompt_exact_correct_object_rate",
-        "val_object_prompt_exact_correct_object_prob",
-        "val_object_prompt_attention_exact_teacher_mean",
-        "val_object_prompt_attention_objectless_visible_max",
-        "val_object_prompt_drop_objectless_pred_match",
-        "val_object_prompt_drop_objectless_kl",
-        "val_object_prompt_distractor_objectless_object_action_pred_rate",
-        "val_object_prompt_drop_exact_true_logit_drop",
-        "val_object_prompt_drop_Uselaptop_true_logit_drop",
-        "val_object_prompt_drop_Uselaptop_true_prob_drop",
         "val_actor_object_prompt_token_count",
         "val_token_selection_visual_keep_rate",
         "val_token_selection_actor_box_keep_rate",
@@ -374,10 +353,7 @@ def print_compact_epoch_summary(epoch_df):
 
 
 def print_key_action_progress(epoch_df):
-    rows = action_progress_rows(epoch_df)
-    if not rows:
-        return
-    rows = [row for row in rows if row["action"] in KEY_ACTIONS]
+    rows = [row for row in action_progress_rows(epoch_df) if row["action"] in KEY_ACTIONS]
     print_table(
         "KEY ACTION PROGRESS",
         rows,
@@ -395,6 +371,96 @@ def print_key_action_progress(epoch_df):
     )
 
 
+def print_action_progress(epoch_df):
+    print_table(
+        "ALL ACTION PROGRESS",
+        action_progress_rows(epoch_df),
+        [
+            "action",
+            "count",
+            "teacher",
+            "e0_acc",
+            "latest_acc",
+            "delta",
+            "best_epoch",
+            "best_acc",
+            "verdict",
+        ],
+    )
+
+
+def print_group_progress(epoch_df):
+    base = epoch_df.iloc[0]
+    latest = epoch_df.iloc[-1]
+    rows = []
+    for group in GROUPS:
+        col = f"val_group_{group}_acc"
+        if not df_has_metric(epoch_df, col):
+            continue
+        series = df_metric(epoch_df, col, float("nan"))
+        valid = series.dropna()
+        best_epoch = float("nan")
+        best_acc = float("nan")
+        if len(valid):
+            best_idx = valid.idxmax()
+            best_epoch = epoch_df.loc[best_idx, "epoch"]
+            best_acc = series.loc[best_idx]
+        rows.append(
+            {
+                "group": group,
+                "count": metric(latest, f"val_group_{group}_count"),
+                "e0_acc": metric(base, col),
+                "latest_acc": metric(latest, col),
+                "delta": metric(latest, col) - metric(base, col),
+                "best_epoch": best_epoch,
+                "best_acc": best_acc,
+            }
+        )
+    print_table(
+        "GROUP PROGRESS",
+        rows,
+        ["group", "count", "e0_acc", "latest_acc", "delta", "best_epoch", "best_acc"],
+    )
+
+
+def print_object_channel_progress(epoch_df):
+    latest = epoch_df.iloc[-1]
+    rows = []
+    for object_name in OBJECTS:
+        pos_col = f"val_interaction_heatmap_{object_name}_positive_mean"
+        iou_col = f"val_interaction_heatmap_{object_name}_iou"
+        count_col = f"val_interaction_teacher_{object_name}_slot_count"
+        if not (
+            df_has_metric(epoch_df, pos_col)
+            or df_has_metric(epoch_df, iou_col)
+            or df_has_metric(epoch_df, count_col)
+        ):
+            continue
+        series = df_metric(epoch_df, pos_col, float("nan"))
+        valid = series.dropna()
+        best_epoch = float("nan")
+        best_pos = float("nan")
+        if len(valid):
+            best_idx = valid.idxmax()
+            best_epoch = epoch_df.loc[best_idx, "epoch"]
+            best_pos = series.loc[best_idx]
+        rows.append(
+            {
+                "object": object_name,
+                "teachers": metric(latest, count_col),
+                "latest_pos": metric(latest, pos_col),
+                "latest_iou": metric(latest, iou_col),
+                "best_epoch": best_epoch,
+                "best_pos": best_pos,
+            }
+        )
+    print_table(
+        "OBJECT CHANNEL PROGRESS",
+        rows,
+        ["object", "teachers", "latest_pos", "latest_iou", "best_epoch", "best_pos"],
+    )
+
+
 def print_compact_best(epoch_df):
     metrics = [
         "val_deploy_score",
@@ -405,17 +471,6 @@ def print_compact_best(epoch_df):
         "val_group_laptop_book_tv_acc",
         "val_group_phone_tv_acc",
         "val_loss_actor_object_relation",
-        "val_loss_actor_object_engagement",
-        "val_actor_object_engagement_acc",
-        "val_actor_object_engagement_laptop_acc",
-        "val_actor_object_engagement_book_acc",
-        "val_actor_object_engagement_phone_tablet_acc",
-        "val_actor_object_engagement_tv_monitor_acc",
-        "val_actor_object_engagement_laptop_book_tv_acc",
-        "val_loss_actor_object_binding_state",
-        "val_actor_object_binding_state_margin",
-        "val_actor_object_binding_state_pass_rate",
-        "val_actor_object_binding_count",
         "val_relation_exact_teacher_acc",
         "val_relation_exact_teacher_prob",
         "val_relation_useful_mass_exact",
@@ -426,21 +481,6 @@ def print_compact_best(epoch_df):
         "val_relation_null_rate_missing_objectful",
         "val_relation_null_prob_missing_objectful",
         "val_relation_useful_mass_missing_objectful",
-        "val_object_counterfactual_teacher_logit_drop",
-        "val_object_prompt_grounding_acc",
-        "val_object_prompt_grounding_true_prob",
-        "val_object_prompt_exact_correct_object_rate",
-        "val_object_prompt_exact_correct_object_prob",
-        "val_object_prompt_attention_exact_teacher_mean",
-        "val_object_prompt_attention_objectless_visible_max",
-        "val_object_prompt_drop_objectless_pred_match",
-        "val_object_prompt_drop_objectless_kl",
-        "val_object_prompt_distractor_objectless_object_action_pred_rate",
-        "val_object_prompt_drop_exact_true_logit_drop",
-        "val_object_prompt_drop_exact_true_prob_drop",
-        "val_object_prompt_drop_Uselaptop_true_logit_drop",
-        "val_object_prompt_drop_Uselaptop_true_prob_drop",
-        "val_object_prompt_drop_Uselaptop_pred_match",
         "val_token_selection_actor_box_keep_rate",
         "val_token_selection_visible_object_box_keep_rate",
         "val_token_selection_exact_teacher_object_keep_rate",
@@ -448,6 +488,10 @@ def print_compact_best(epoch_df):
         "val_token_selection_laptop_box_keep_rate",
         "val_token_selection_Uselaptop_teacher_object_keep_rate",
         "val_actor_object_prompt_token_count",
+        "val_interaction_heatmap_soft_iou",
+        "val_interaction_heatmap_positive_mean",
+        "val_interaction_heatmap_laptop_positive_mean",
+        "val_interaction_heatmap_laptop_iou",
         "val_action_Uselaptop_acc",
         "val_action_Readbook_acc",
         "val_action_WatchTV_acc",
@@ -472,277 +516,7 @@ def print_compact_best(epoch_df):
     print_table("BEST COMPACT SIGNALS", rows, ["metric", "best_epoch", "best_value"])
 
 
-def print_object_use_epoch_table(epoch_df):
-    object_cols = [
-        "val_interaction_heatmap_positive_mean",
-        "val_interaction_heatmap_pred_max",
-        "val_interaction_heatmap_soft_iou",
-        "val_interaction_heatmap_center_l2",
-        "val_interaction_heatmap_missing_object_masked_rate",
-        "val_object_counterfactual_teacher_logit_drop",
-        "val_object_counterfactual_teacher_prob_drop",
-    ]
-    if not any(df_has_metric(epoch_df, col) for col in object_cols):
-        return
-    cols = [
-        "epoch",
-        "val_acc_macro",
-        "val_f1",
-        "val_interaction_heatmap_positive_mean",
-        "val_interaction_heatmap_pred_max",
-        "val_interaction_heatmap_soft_iou",
-        "val_interaction_heatmap_center_l2",
-        "val_interaction_heatmap_missing_object_masked_rate",
-        "val_interaction_heatmap_exact_compatible_valid_rate",
-        "val_interaction_heatmap_mismatch_valid_rate",
-        "val_object_counterfactual_teacher_logit_drop",
-        "val_object_counterfactual_teacher_prob_drop",
-    ]
-    display_cols = [col for col in cols if col in epoch_df.columns]
-    if len(display_cols) <= 1:
-        return
-    print("\nEPOCH OBJECT-USE QUALITY:\n")
-    with pd.option_context("display.max_columns", None, "display.width", 220):
-        print(epoch_df[display_cols].to_string(index=False))
-
-
-def print_object_channel_progress(epoch_df):
-    if epoch_df.empty:
-        return
-    base = epoch_df.iloc[0]
-    latest = epoch_df.iloc[-1]
-    rows = []
-    for object_name in OBJECTS:
-        pos_col = f"val_interaction_heatmap_{object_name}_positive_mean"
-        iou_col = f"val_interaction_heatmap_{object_name}_iou"
-        count_col = f"val_interaction_teacher_{object_name}_slot_count"
-        if not (
-            df_has_metric(epoch_df, pos_col)
-            or df_has_metric(epoch_df, iou_col)
-            or df_has_metric(epoch_df, count_col)
-        ):
-            continue
-        pos_series = df_metric(epoch_df, pos_col, float("nan"))
-        valid_pos = pos_series.dropna()
-        best_epoch = float("nan")
-        best_pos = float("nan")
-        if len(valid_pos):
-            best_idx = valid_pos.idxmax()
-            best_epoch = epoch_df.loc[best_idx, "epoch"]
-            best_pos = pos_series.loc[best_idx]
-        rows.append(
-            {
-                "object": object_name,
-                "teachers": metric(latest, count_col),
-                "e0_pos": metric(base, pos_col),
-                "latest_pos": metric(latest, pos_col),
-                "delta": metric(latest, pos_col) - metric(base, pos_col),
-                "latest_iou": metric(latest, iou_col),
-                "best_epoch": best_epoch,
-                "best_pos": best_pos,
-            }
-        )
-    print_table(
-        "OBJECT CHANNEL PROGRESS",
-        rows,
-        [
-            "object",
-            "teachers",
-            "e0_pos",
-            "latest_pos",
-            "delta",
-            "latest_iou",
-            "best_epoch",
-            "best_pos",
-        ],
-    )
-
-
-def action_verdict(delta):
-    if pd.isna(delta):
-        return "unknown"
-    if delta <= -0.03:
-        return "hurt badly"
-    if delta < -0.005:
-        return "hurt"
-    if delta >= 0.02:
-        return "improved"
-    return "stable"
-
-
-def action_progress_rows(epoch_df):
-    if epoch_df.empty:
-        return []
-    base = epoch_df.iloc[0]
-    latest = epoch_df.iloc[-1]
-    rows = []
-    for action in ACTIONS:
-        acc_col = f"val_action_{action}_acc"
-        count_col = f"val_action_{action}_count"
-        teacher_col = f"val_action_{action}_interaction_teacher_rate"
-        if not df_has_metric(epoch_df, acc_col):
-            continue
-        acc_series = df_metric(epoch_df, acc_col, float("nan"))
-        valid_acc = acc_series.dropna()
-        best_epoch = float("nan")
-        best_acc = float("nan")
-        if len(valid_acc):
-            best_idx = valid_acc.idxmax()
-            best_epoch = epoch_df.loc[best_idx, "epoch"]
-            best_acc = acc_series.loc[best_idx]
-        delta = metric(latest, acc_col) - metric(base, acc_col)
-        rows.append(
-            {
-                "action": action,
-                "count": metric(latest, count_col),
-                "teacher": metric(latest, teacher_col),
-                "e0_acc": metric(base, acc_col),
-                "latest_acc": metric(latest, acc_col),
-                "delta": delta,
-                "best_epoch": best_epoch,
-                "best_acc": best_acc,
-                "verdict": action_verdict(delta),
-            }
-        )
-    return rows
-
-
-def print_action_progress(epoch_df):
-    rows = action_progress_rows(epoch_df)
-    print_table(
-        "ALL ACTION PROGRESS",
-        rows,
-        [
-            "action",
-            "count",
-            "teacher",
-            "e0_acc",
-            "latest_acc",
-            "delta",
-            "best_epoch",
-            "best_acc",
-            "verdict",
-        ],
-    )
-
-    hurt = [
-        row
-        for row in rows
-        if pd.notna(row["delta"]) and float(row["delta"]) < -0.005
-    ]
-    hurt = sorted(hurt, key=lambda row: float(row["delta"]))
-    improved = [
-        row
-        for row in rows
-        if pd.notna(row["delta"]) and float(row["delta"]) >= 0.02
-    ]
-    improved = sorted(improved, key=lambda row: float(row["delta"]), reverse=True)
-    print_table(
-        "ACTIONS HURT VS EPOCH 0",
-        hurt,
-        [
-            "action",
-            "count",
-            "teacher",
-            "e0_acc",
-            "latest_acc",
-            "delta",
-            "best_epoch",
-            "best_acc",
-            "verdict",
-        ],
-    )
-    print_table(
-        "ACTIONS IMPROVED VS EPOCH 0",
-        improved,
-        [
-            "action",
-            "count",
-            "teacher",
-            "e0_acc",
-            "latest_acc",
-            "delta",
-            "best_epoch",
-            "best_acc",
-            "verdict",
-        ],
-    )
-
-
-def print_group_progress(epoch_df):
-    if epoch_df.empty:
-        return
-    base = epoch_df.iloc[0]
-    latest = epoch_df.iloc[-1]
-    rows = []
-    for group in GROUPS:
-        col = f"val_group_{group}_acc"
-        count_col = f"val_group_{group}_count"
-        if not df_has_metric(epoch_df, col):
-            continue
-        series = df_metric(epoch_df, col, float("nan"))
-        valid = series.dropna()
-        best_epoch = float("nan")
-        best_acc = float("nan")
-        if len(valid):
-            best_idx = valid.idxmax()
-            best_epoch = epoch_df.loc[best_idx, "epoch"]
-            best_acc = series.loc[best_idx]
-        rows.append(
-            {
-                "group": group,
-                "count": metric(latest, count_col),
-                "e0_acc": metric(base, col),
-                "latest_acc": metric(latest, col),
-                "delta": metric(latest, col) - metric(base, col),
-                "best_epoch": best_epoch,
-                "best_acc": best_acc,
-            }
-        )
-    print_table(
-        "GROUP PROGRESS",
-        rows,
-        ["group", "count", "e0_acc", "latest_acc", "delta", "best_epoch", "best_acc"],
-    )
-
-
-def print_best_epochs(epoch_df):
-    metrics = [
-        "val_deploy_score",
-        "val_f1",
-        "val_acc_macro",
-        "val_interaction_heatmap_soft_iou",
-        "val_interaction_heatmap_positive_mean",
-        "val_interaction_heatmap_laptop_positive_mean",
-        "val_interaction_heatmap_laptop_iou",
-        "val_actor_all_slot_acc",
-        "val_actor_pair_acc",
-        "val_objectless_with_object_visible_acc",
-        "val_objectless_with_laptop_visible_acc",
-        "val_object_counterfactual_teacher_logit_drop",
-    ]
-    rows = []
-    for name in metrics:
-        if not df_has_metric(epoch_df, name):
-            continue
-        series = df_metric(epoch_df, name, float("nan"))
-        valid = series.dropna()
-        if not len(valid):
-            continue
-        best_idx = valid.idxmax()
-        rows.append(
-            {
-                "metric": name,
-                "best_epoch": epoch_df.loc[best_idx, "epoch"],
-                "best_value": series.loc[best_idx],
-            }
-        )
-    print_table("BEST EPOCHS", rows, ["metric", "best_epoch", "best_value"])
-
-
 def print_decision(epoch_df):
-    if epoch_df.empty:
-        return
     base = epoch_df.iloc[0]
     latest = epoch_df.iloc[-1]
     f1_base = metric(base, "val_f1")
@@ -772,25 +546,7 @@ def print_decision(epoch_df):
         latest,
         "val_relation_useful_mass_missing_objectful",
     )
-    engagement_loss = metric(latest, "val_loss_actor_object_engagement")
-    engagement_acc = metric(latest, "val_actor_object_engagement_acc")
-    engagement_laptop_acc = metric(
-        latest,
-        "val_actor_object_engagement_laptop_acc",
-    )
-    engagement_book_acc = metric(latest, "val_actor_object_engagement_book_acc")
-    engagement_phone_acc = metric(
-        latest,
-        "val_actor_object_engagement_phone_tablet_acc",
-    )
-    engagement_tv_acc = metric(
-        latest,
-        "val_actor_object_engagement_tv_monitor_acc",
-    )
-    engagement_lbt_acc = metric(
-        latest,
-        "val_actor_object_engagement_laptop_book_tv_acc",
-    )
+
     pos = metric(latest, "val_interaction_heatmap_positive_mean")
     pred_max = metric(latest, "val_interaction_heatmap_pred_max")
     soft_iou = metric(latest, "val_interaction_heatmap_soft_iou")
@@ -798,121 +554,6 @@ def print_decision(epoch_df):
     laptop_pos = metric(latest, "val_interaction_heatmap_laptop_positive_mean")
     laptop_iou = metric(latest, "val_interaction_heatmap_laptop_iou")
 
-    prompt_loss = metric(latest, "val_loss_object_prompt_grounding")
-    prompt_acc = metric(latest, "val_object_prompt_grounding_acc")
-    prompt_true_prob = metric(latest, "val_object_prompt_grounding_true_prob")
-    prompt_teacher_valid = metric(
-        latest,
-        "val_object_prompt_exact_teacher_valid_rate_1based",
-    )
-    prompt_teacher_compat = metric(
-        latest,
-        "val_object_prompt_exact_compatible_rate_1based",
-    )
-    prompt_any_compat = metric(
-        latest,
-        "val_object_prompt_any_compatible_proposal_rate",
-    )
-    prompt_exact_correct = metric(
-        latest,
-        "val_object_prompt_exact_correct_object_rate",
-    )
-    prompt_exact_prob = metric(
-        latest,
-        "val_object_prompt_exact_correct_object_prob",
-    )
-    prompt_exact_teacher_attention = metric(
-        latest,
-        "val_object_prompt_attention_exact_teacher_mean",
-    )
-    prompt_objectless_attention_mean = metric(
-        latest,
-        "val_object_prompt_attention_objectless_visible_mean",
-    )
-    prompt_objectless_attention_max = metric(
-        latest,
-        "val_object_prompt_attention_objectless_visible_max",
-    )
-    prompt_objectless_attention_entropy = metric(
-        latest,
-        "val_object_prompt_attention_objectless_visible_entropy",
-    )
-    prompt_drop_objectless_match = metric(
-        latest,
-        "val_object_prompt_drop_objectless_pred_match",
-    )
-    prompt_drop_objectless_prob_delta = metric(
-        latest,
-        "val_object_prompt_drop_objectless_true_prob_delta",
-    )
-    prompt_drop_objectless_kl = metric(
-        latest,
-        "val_object_prompt_drop_objectless_kl",
-    )
-    prompt_drop_objectless_acc = metric(
-        latest,
-        "val_object_prompt_drop_objectless_acc",
-    )
-    prompt_drop_objectless_object_rate = metric(
-        latest,
-        "val_object_prompt_drop_objectless_object_action_pred_rate",
-    )
-    prompt_distractor_objectless_match = metric(
-        latest,
-        "val_object_prompt_distractor_objectless_pred_match",
-    )
-    prompt_distractor_objectless_kl = metric(
-        latest,
-        "val_object_prompt_distractor_objectless_kl",
-    )
-    prompt_distractor_objectless_acc = metric(
-        latest,
-        "val_object_prompt_distractor_objectless_acc",
-    )
-    prompt_distractor_objectless_object_rate = metric(
-        latest,
-        "val_object_prompt_distractor_objectless_object_action_pred_rate",
-    )
-    prompt_drop_exact_logit = metric(
-        latest,
-        "val_object_prompt_drop_exact_true_logit_drop",
-    )
-    prompt_drop_exact_prob = metric(
-        latest,
-        "val_object_prompt_drop_exact_true_prob_drop",
-    )
-    prompt_drop_exact_match = metric(
-        latest,
-        "val_object_prompt_drop_exact_pred_match",
-    )
-    prompt_drop_exact_acc = metric(
-        latest,
-        "val_object_prompt_drop_exact_acc",
-    )
-    prompt_drop_uselaptop_logit = metric(
-        latest,
-        "val_object_prompt_drop_Uselaptop_true_logit_drop",
-    )
-    prompt_drop_uselaptop_prob = metric(
-        latest,
-        "val_object_prompt_drop_Uselaptop_true_prob_drop",
-    )
-    prompt_drop_uselaptop_match = metric(
-        latest,
-        "val_object_prompt_drop_Uselaptop_pred_match",
-    )
-    prompt_drop_readbook_logit = metric(
-        latest,
-        "val_object_prompt_drop_Readbook_true_logit_drop",
-    )
-    prompt_drop_watchtv_logit = metric(
-        latest,
-        "val_object_prompt_drop_WatchTV_true_logit_drop",
-    )
-    prompt_drop_phone_logit = metric(
-        latest,
-        "val_object_prompt_drop_Usetelephone_true_logit_drop",
-    )
     prompt_tokens = metric(latest, "val_actor_object_prompt_token_count")
     token_keep_visual = metric(latest, "val_token_selection_visual_keep_rate")
     token_keep_actor = metric(latest, "val_token_selection_actor_box_keep_rate")
@@ -964,8 +605,7 @@ def print_decision(epoch_df):
     actor_pair = metric(latest, "val_actor_pair_acc")
     actor_pair_swap = metric(latest, "val_actor_pair_swap_acc")
     actor_presence = metric(latest, "val_actor_presence_acc")
-    cf_logit = metric(latest, "val_object_counterfactual_teacher_logit_drop")
-    cf_prob = metric(latest, "val_object_counterfactual_teacher_prob_drop")
+
     print("\nDECISION:\n")
     print(f"latest epoch: {latest_epoch}")
     if pd.notna(deploy_score):
@@ -1001,74 +641,8 @@ def print_decision(epoch_df):
             f"useful_objectless {fmt(relation_useful_objectless)}, "
             f"null_missing {fmt(relation_null_missing)}, "
             f"null_prob_missing {fmt(relation_null_prob_missing)}, "
-            f"useful_missing {fmt(relation_useful_missing)}"
-        )
-    if pd.notna(engagement_acc) or pd.notna(engagement_loss):
-        print(
-            "actor-object engagement: "
-            f"loss {fmt(engagement_loss)}, acc {fmt(engagement_acc)}, "
-            f"laptop {fmt(engagement_laptop_acc)}, "
-            f"book {fmt(engagement_book_acc)}, "
-            f"phone_tablet {fmt(engagement_phone_acc)}, "
-            f"tv_monitor {fmt(engagement_tv_acc)}, "
-            f"laptop_book_tv {fmt(engagement_lbt_acc)}"
-        )
-    if pd.notna(prompt_acc) or pd.notna(prompt_loss):
-        print(
-            "object prompt grounding: "
-            f"loss {fmt(prompt_loss)}, acc {fmt(prompt_acc)}, "
-            f"true_prob {fmt(prompt_true_prob)}, "
-            f"teacher_valid {fmt(prompt_teacher_valid)}, "
-            f"teacher_compat {fmt(prompt_teacher_compat)}, "
-            f"any_compat {fmt(prompt_any_compat)}, "
-            f"exact_correct {fmt(prompt_exact_correct)}, "
-            f"exact_prob {fmt(prompt_exact_prob)}, "
+            f"useful_missing {fmt(relation_useful_missing)}, "
             f"tokens {fmt(prompt_tokens, 0)}"
-        )
-    if (
-        pd.notna(prompt_exact_teacher_attention)
-        or pd.notna(prompt_objectless_attention_max)
-    ):
-        print(
-            "object prompt attention: "
-            f"exact_teacher {fmt(prompt_exact_teacher_attention)}, "
-            f"objectless_mean {fmt(prompt_objectless_attention_mean)}, "
-            f"objectless_max {fmt(prompt_objectless_attention_max)}, "
-            f"objectless_entropy {fmt(prompt_objectless_attention_entropy)}"
-        )
-    if (
-        pd.notna(prompt_drop_objectless_match)
-        or pd.notna(prompt_drop_exact_logit)
-    ):
-        print(
-            "object-prompt drop: "
-            f"objectless_match {fmt(prompt_drop_objectless_match)}, "
-            f"objectless_kl {fmt(prompt_drop_objectless_kl)}, "
-            f"objectless_prob_delta {fmt(prompt_drop_objectless_prob_delta)}, "
-            f"objectless_acc {fmt(prompt_drop_objectless_acc)}, "
-            f"objectless_obj_rate {fmt(prompt_drop_objectless_object_rate)}, "
-            f"distractor_match {fmt(prompt_distractor_objectless_match)}, "
-            f"distractor_kl {fmt(prompt_distractor_objectless_kl)}, "
-            f"distractor_acc {fmt(prompt_distractor_objectless_acc)}, "
-            f"distractor_obj_rate {fmt(prompt_distractor_objectless_object_rate)}, "
-            f"exact_logit_drop {fmt(prompt_drop_exact_logit)}, "
-            f"exact_prob_drop {fmt(prompt_drop_exact_prob)}, "
-            f"exact_match {fmt(prompt_drop_exact_match)}, "
-            f"exact_acc {fmt(prompt_drop_exact_acc)}"
-        )
-    if (
-        pd.notna(prompt_drop_uselaptop_logit)
-        or pd.notna(prompt_drop_readbook_logit)
-        or pd.notna(prompt_drop_watchtv_logit)
-    ):
-        print(
-            "object-prompt action causality: "
-            f"uselaptop_logit_drop {fmt(prompt_drop_uselaptop_logit)}, "
-            f"uselaptop_prob_drop {fmt(prompt_drop_uselaptop_prob)}, "
-            f"uselaptop_match {fmt(prompt_drop_uselaptop_match)}, "
-            f"readbook_logit_drop {fmt(prompt_drop_readbook_logit)}, "
-            f"watchtv_logit_drop {fmt(prompt_drop_watchtv_logit)}, "
-            f"phone_logit_drop {fmt(prompt_drop_phone_logit)}"
         )
     if pd.notna(token_keep_visual):
         print(
@@ -1117,31 +691,25 @@ def print_decision(epoch_df):
             f"all_slot {fmt(actor_all_slot)}, pair {fmt(actor_pair)}, "
             f"swap {fmt(actor_pair_swap)}, presence {fmt(actor_presence)}"
         )
-    if pd.notna(cf_logit) or pd.notna(cf_prob):
-        print(
-            "teacher-object removal: "
-            f"logit_drop {fmt(cf_logit)}, prob_drop {fmt(cf_prob)}"
-        )
 
     if pd.notna(f1_delta) and f1_delta < -0.01:
         print("STOP/ROLL BACK: action F1 dropped more than 0.01 from epoch 0.")
         return
-    if pd.notna(engagement_lbt_acc) and engagement_lbt_acc >= 0.70:
-        print("GOOD ENGAGEMENT SIGN: object-state semantics are being learned.")
-        return
-    if pd.notna(prompt_exact_correct) and prompt_exact_correct >= 0.70:
-        print("GOOD PROMPT SIGN: exact compatible objects are grounding to prompt tokens.")
-        return
-    if pd.notna(cf_logit) and cf_logit > 0.02:
-        print("GOOD SUPPORTING SIGN: removing the teacher object changes the true action logit.")
+    if (
+        pd.notna(relation_exact_acc)
+        and relation_exact_acc >= 0.65
+        and pd.notna(relation_null_objectless)
+        and relation_null_objectless >= 0.90
+    ):
+        print("GOOD RELATION SIGN: actor-object slot assignment is learning.")
         return
     if pd.notna(pos) and pd.notna(pred_max):
         if pos > 0.05 and pred_max > 0.10:
             print("GOOD HEATMAP SIGN: actor-object heatmaps are responding.")
         else:
-            print("CONTINUE: heatmap/prompt evidence is not strong yet.")
+            print("CONTINUE: relation/heatmap evidence is not strong yet.")
         return
-    print("INSUFFICIENT SIGNAL: no object-prompt or heatmap metrics were found in this run.")
+    print("INSUFFICIENT SIGNAL: no relation or heatmap metrics were found in this run.")
 
 
 def print_row(title, row):
@@ -1159,6 +727,16 @@ def print_row(title, row):
             f"key_min {metric(row, 'val_deploy_key_action_min'):.4f}"
         )
     print(
+        "actor-object relation: "
+        f"loss {metric(row, 'val_loss_actor_object_relation'):.4f}, "
+        f"teacher_acc {metric(row, 'val_relation_exact_teacher_acc'):.4f}, "
+        f"teacher_prob {metric(row, 'val_relation_exact_teacher_prob'):.4f}, "
+        f"useful_exact {metric(row, 'val_relation_useful_mass_exact'):.4f}, "
+        f"null_objectless {metric(row, 'val_relation_null_rate_objectless'):.4f}, "
+        "null_missing "
+        f"{metric(row, 'val_relation_null_rate_missing_objectful'):.4f}"
+    )
+    print(
         "interaction heatmap: "
         f"loss {metric(row, 'val_loss_interaction_heatmap'):.6f}, "
         f"iou {metric(row, 'val_interaction_heatmap_iou'):.4f}, "
@@ -1173,59 +751,6 @@ def print_row(title, row):
         f"rate {metric(row, 'val_interaction_teacher_slot_rate'):.4f}, "
         f"count {metric(row, 'val_interaction_teacher_slot_count'):.1f}"
     )
-    if pd.notna(metric(row, "val_object_counterfactual_teacher_logit_drop")):
-        print(
-            "teacher-object counterfactual: "
-            f"logit_drop {metric(row, 'val_object_counterfactual_teacher_logit_drop'):.4f}, "
-            f"prob_drop {metric(row, 'val_object_counterfactual_teacher_prob_drop'):.4f}"
-        )
-    if pd.notna(metric(row, "val_object_prompt_attention_exact_teacher_mean")):
-        print(
-            "object prompt attention: "
-            f"exact_teacher {metric(row, 'val_object_prompt_attention_exact_teacher_mean'):.4f}, "
-            f"objectless_mean {metric(row, 'val_object_prompt_attention_objectless_visible_mean'):.4f}, "
-            f"objectless_max {metric(row, 'val_object_prompt_attention_objectless_visible_max'):.4f}, "
-            f"objectless_entropy {metric(row, 'val_object_prompt_attention_objectless_visible_entropy'):.4f}"
-        )
-    if pd.notna(metric(row, "val_object_prompt_drop_objectless_pred_match")):
-        print(
-            "object-prompt drop: "
-            f"objectless_match {metric(row, 'val_object_prompt_drop_objectless_pred_match'):.4f}, "
-            f"objectless_kl {metric(row, 'val_object_prompt_drop_objectless_kl'):.4f}, "
-            "objectless_prob_delta "
-            f"{metric(row, 'val_object_prompt_drop_objectless_true_prob_delta'):.4f}, "
-            f"objectless_acc {metric(row, 'val_object_prompt_drop_objectless_acc'):.4f}, "
-            "objectless_obj_rate "
-            f"{metric(row, 'val_object_prompt_drop_objectless_object_action_pred_rate'):.4f}, "
-            "distractor_match "
-            f"{metric(row, 'val_object_prompt_distractor_objectless_pred_match'):.4f}, "
-            "distractor_kl "
-            f"{metric(row, 'val_object_prompt_distractor_objectless_kl'):.4f}, "
-            "distractor_acc "
-            f"{metric(row, 'val_object_prompt_distractor_objectless_acc'):.4f}, "
-            "distractor_obj_rate "
-            f"{metric(row, 'val_object_prompt_distractor_objectless_object_action_pred_rate'):.4f}, "
-            f"exact_logit_drop {metric(row, 'val_object_prompt_drop_exact_true_logit_drop'):.4f}, "
-            f"exact_prob_drop {metric(row, 'val_object_prompt_drop_exact_true_prob_drop'):.4f}, "
-            f"exact_match {metric(row, 'val_object_prompt_drop_exact_pred_match'):.4f}, "
-            f"exact_acc {metric(row, 'val_object_prompt_drop_exact_acc'):.4f}"
-        )
-    if pd.notna(metric(row, "val_object_prompt_drop_Uselaptop_true_logit_drop")):
-        print(
-            "object-prompt action causality: "
-            "uselaptop_logit_drop "
-            f"{metric(row, 'val_object_prompt_drop_Uselaptop_true_logit_drop'):.4f}, "
-            "uselaptop_prob_drop "
-            f"{metric(row, 'val_object_prompt_drop_Uselaptop_true_prob_drop'):.4f}, "
-            "uselaptop_match "
-            f"{metric(row, 'val_object_prompt_drop_Uselaptop_pred_match'):.4f}, "
-            "readbook_logit_drop "
-            f"{metric(row, 'val_object_prompt_drop_Readbook_true_logit_drop'):.4f}, "
-            "watchtv_logit_drop "
-            f"{metric(row, 'val_object_prompt_drop_WatchTV_true_logit_drop'):.4f}, "
-            "phone_logit_drop "
-            f"{metric(row, 'val_object_prompt_drop_Usetelephone_true_logit_drop'):.4f}"
-        )
     if pd.notna(metric(row, "val_token_selection_visual_keep_rate")):
         print(
             "token-selection retention: "
@@ -1252,6 +777,7 @@ def print_row(title, row):
     print(
         "poguise+ heatmap loss: "
         f"log {metric(row, 'val_loss_heatmap_log'):.4f}, "
+        f"aux {metric(row, 'val_loss_heatmap_aux'):.4f}, "
         f"fro {metric(row, 'val_loss_heatmap_frobenius'):.4f}, "
         f"pose_fro {metric(row, 'val_loss_pose_heatmap_frobenius'):.4f}, "
         f"interaction_fro {metric(row, 'val_loss_interaction_heatmap_frobenius'):.4f}"
@@ -1259,105 +785,33 @@ def print_row(title, row):
     nash_main = metric(row, "train_nash_weight_main_deploy")
     if pd.isna(nash_main):
         nash_main = metric(row, "train_nash_weight_action")
-    nash_aux = metric(row, "train_nash_weight_grounding_aux")
+    nash_aux = metric(row, "train_nash_weight_heatmap_aux")
     if pd.isna(nash_aux):
         nash_aux = metric(row, "train_nash_weight_heatmap")
     print(
         "nash weights: "
         f"main_deploy {nash_main:.4f}, "
-        f"grounding_aux {nash_aux:.4f}"
+        f"heatmap_aux {nash_aux:.4f}"
     )
-
-    print("\nACTION GROUPS:")
-    for group in GROUPS:
-        col = f"val_group_{group}_acc"
-        if col in row.index and pd.notna(row[col]):
-            count = metric(row, f"val_group_{group}_count")
-            if pd.notna(count):
-                print(f"{group}: acc {float(row[col]):.4f}, count {count:.0f}")
-            else:
-                print(f"{group}: acc {float(row[col]):.4f}")
-
-    action_lines = []
-    for action in ACTIONS:
-        col = f"val_action_{action}_acc"
-        if col in row.index and pd.notna(row[col]):
-            teacher_col = f"val_action_{action}_interaction_teacher_rate"
-            teacher = metric(row, teacher_col)
-            count = metric(row, f"val_action_{action}_count")
-            count_text = "" if pd.isna(count) else f", count {count:.0f}"
-            if pd.notna(teacher):
-                action_lines.append(
-                    f"{action}: acc {float(row[col]):.4f}, "
-                    f"teacher {teacher:.4f}{count_text}"
-                )
-            else:
-                action_lines.append(f"{action}: acc {float(row[col]):.4f}{count_text}")
-    if action_lines:
-        print("\nALL ACTIONS:")
-        for line in action_lines:
-            print(line)
-
-    object_rows = []
-    for object_name in OBJECTS:
-        pos = metric(row, f"val_interaction_heatmap_{object_name}_positive_mean")
-        iou = metric(row, f"val_interaction_heatmap_{object_name}_iou")
-        count = metric(row, f"val_interaction_teacher_{object_name}_slot_count")
-        if pd.notna(pos) or pd.notna(iou) or pd.notna(count):
-            object_rows.append((object_name, count, pos, iou))
-    if object_rows:
-        print("\nHEATMAP BY SELECTED OBJECT CLASS:")
-        for object_name, count, pos, iou in object_rows:
-            count_text = "nan" if pd.isna(count) else f"{float(count):.0f}"
-            pos_text = "nan" if pd.isna(pos) else f"{float(pos):.4f}"
-            iou_text = "nan" if pd.isna(iou) else f"{float(iou):.4f}"
-            print(
-                f"{object_name}: teacher_count {count_text}, "
-                f"positive {pos_text}, iou {iou_text}"
-            )
 
 
 def main():
     args = parse_args()
     run, metrics = resolve_metrics(args)
-    df = pd.read_csv(metrics)
-    if "epoch" not in df.columns:
-        raise SystemExit(f"{metrics} has no epoch column")
-
-    epoch_df = df.groupby("epoch", as_index=False).agg(
-        {col: last_nonnull for col in df.columns if col != "epoch"}
-    )
-    validation_cols = [
-        col
-        for col in (
-            "val_loss",
-            "val_f1",
-            "val_interaction_heatmap_iou",
-            "val_loss_interaction_heatmap",
-        )
-        if col in epoch_df.columns
-    ]
-    if validation_cols:
-        epoch_df = epoch_df.dropna(how="all", subset=validation_cols).reset_index(
-            drop=True
-        )
-    if epoch_df.empty:
-        raise SystemExit(f"{metrics} has no completed validation epochs")
+    epoch_df = load_epoch_metrics(metrics)
     display_cols = [col for col in CORE_COLUMNS if col in epoch_df.columns]
+
     print("run:", run)
     print("metrics:", metrics)
-
-    latest = epoch_df.iloc[-1]
-
     if args.verbose:
         print("\nEPOCH SUMMARY:\n")
-        print(epoch_df[display_cols].to_string(index=False))
-        print_object_use_epoch_table(epoch_df)
+        with pd.option_context("display.max_columns", None, "display.width", 240):
+            print(epoch_df[display_cols].to_string(index=False))
         print_object_channel_progress(epoch_df)
         print_action_progress(epoch_df)
         print_group_progress(epoch_df)
-        print_best_epochs(epoch_df)
-        print_row("LATEST", latest)
+        print_compact_best(epoch_df)
+        print_row("LATEST", epoch_df.iloc[-1])
     else:
         print_compact_epoch_summary(epoch_df)
         print_key_action_progress(epoch_df)
@@ -1367,14 +821,12 @@ def main():
     print_decision(epoch_df)
 
     print("\nREAD THIS:")
-    print("- Main proof: val_f1/per-action accuracy stay healthy while engagement, relation NULL/useful-mass, prompt grounding, and interaction heatmaps improve.")
-    print("- PO-GUISE+ actor/video tokens make the decision; runtime objects update actor tokens inside the transformer before actor_head.")
-    print("- Exact compatible detections should attend to the teacher object and raise relation useful mass.")
-    print("- Engagement should separate laptop/book/phone/TV state; this is the key low-motion object-use signal.")
-    print("- Missing compatible detections and objectless actions should push relation attention to NULL.")
-    print("- Objectless classes should route relation attention to NULL; hard-negative object-action pred rate remains the protection check.")
-    print("- Heatmap/object-channel metrics are secondary; use --verbose when debugging teacher quality.")
-    print("- Runtime objects should affect token selection and actor tokens inside the transformer, not add late action logits.")
+    print("- Main proof: val_f1/per-action accuracy stay healthy while relation slot learning and interaction heatmaps improve.")
+    print("- For each actor, the object objective is one CE over NULL plus detected object slots.")
+    print("- Runtime objects update actor tokens inside the transformer before actor_head.")
+    print("- The only object objective is relation CE; removed side objectives are not part of this run.")
+    print("- Exact compatible detections should select the teacher object; missing/objectless cases should route relation attention to NULL.")
+    print("- Objectless hard-negative metrics remain a protection check: visible objects must not force object actions.")
 
 
 if __name__ == "__main__":

@@ -427,7 +427,7 @@ def set_cmd_arg(cmd, key, value):
 REQUESTED_EPOCHS = parse_launcher_args(sys.argv)
 TS = datetime.now().strftime("%Y%m%d_%H%M%S")
 RUN_EPOCHS = REQUESTED_EPOCHS or 10
-RUN_NAME = f"actor_object_relation_engagement_{RUN_EPOCHS}ep_{TS}"
+RUN_NAME = f"actor_object_relation_{RUN_EPOCHS}ep_{TS}"
 EPOCH_DIR = str(Path(DATA_DIR) / "checkpoints" / RUN_NAME / "epoch_checkpoints")
 
 cmd = [
@@ -464,11 +464,11 @@ cmd = [
 
     "--actor_interaction_heatmaps", "1",
 
-    # Runtime detections are protected semantic prompt tokens. They guide pruning
-    # and update actor tokens inside the transformer; actor_head stays the action path.
+    # Runtime detections are protected semantic prompt tokens. They guide pruning,
+    # update actor tokens inside the transformer, and fuse again before actor_head.
     "--actor_object_prompt_tokens", "1",
     "--actor_object_relation_in_transformer", "1",
-    "--actor_object_relation_blocks", "6,9",
+    "--actor_object_relation_blocks", "2,5,8",
     "--actor_object_relation_null_logit_init", "3.0",
     "--actor_object_relation_geometry_bias_weight", "1.0",
     "--actor_object_relation_heatmap_bias_weight", "2.0",
@@ -510,9 +510,7 @@ cmd = [
     "--poguiseplus_heatmap_mse_scale", "1000",
 
     "--actor_object_relation_loss_weight", "1.00",
-    "--actor_object_engagement_loss_weight", "0.75",
     "--actor_object_relation_null_loss_weight", "0.50",
-    "--object_prompt_grounding_loss_weight", "0.40",
     "--batch_size", "32",
     "--accum_grad_batches", "2",
 
@@ -553,11 +551,11 @@ cmd = [
     "--model_name", RUN_NAME,
 ]
 
-print("\nSINGLE OBJECT-BINDING TRAINING RUN", flush=True)
+print("\nSINGLE ACTOR-OBJECT RELATION TRAINING RUN", flush=True)
 print(f"epochs: {RUN_EPOCHS}", flush=True)
 print(
-    "object binding: one-forward detector-guided training with relation and "
-    "engagement auxiliaries",
+    "actor-object relation: one CE over NULL plus detected object slots, "
+    "with PO-GUISE+ heatmap auxiliary supervision",
     flush=True,
 )
 run_dir = run_training_with_epoch_summaries(cmd, RUN_NAME, EPOCH_DIR, poll_secs=20)

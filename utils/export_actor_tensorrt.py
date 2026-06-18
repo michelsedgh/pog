@@ -386,7 +386,7 @@ def checkpoint_payload(checkpoint_path, hparam_overrides=None):
             hparams.get("actor_object_relation_in_transformer", 0)
         ),
         "actor_object_relation_blocks": str(
-            hparams.get("actor_object_relation_blocks", "6,9")
+            hparams.get("actor_object_relation_blocks", "2,5,8")
         ),
         "actor_object_relation_max_scale": float(
             hparams.get("actor_object_relation_max_scale", 1.0)
@@ -629,7 +629,7 @@ def main():
                 hparams.get("actor_object_relation_in_transformer", 0)
             ),
             "actor_object_relation_blocks": str(
-                hparams.get("actor_object_relation_blocks", "6,9")
+                hparams.get("actor_object_relation_blocks", "2,5,8")
             ),
             "actor_object_relation_max_scale": float(
                 hparams.get("actor_object_relation_max_scale", 1.0)
