@@ -261,6 +261,7 @@ class ToyotaSMDataset(Dataset):
         self.frame_source = self._resolve_frame_source()
         if self.frame_source in ["mp4", "mp4_zip"]:
             self._load_frame_count_cache()
+        self._actor_train_window_starts = {}
         self.data_df = self._load_split()
         if self.toyota_max_samples > 0:
             self.data_df = self._limit_samples(self.data_df, self.toyota_max_samples)
@@ -288,20 +289,23 @@ class ToyotaSMDataset(Dataset):
         if self.needs_skeleton:
             landmark_cache_path = self._landmark_cache_path()
             if landmark_cache_path and os.path.exists(landmark_cache_path):
-                self.landmark_list = torch.load(
+                cached_landmarks = torch.load(
                     landmark_cache_path,
                     map_location="cpu",
                     weights_only=False,
                 )
-                if len(self.landmark_list) != self.length:
-                    raise RuntimeError(
-                        "Toyota landmark cache length mismatch: "
-                        f"{len(self.landmark_list)} != {self.length}"
+                if len(cached_landmarks) == self.length:
+                    self.landmark_list = cached_landmarks
+                    print(
+                        f"Loaded preprocessed Toyota landmark cache: "
+                        f"{landmark_cache_path}"
                     )
+                    return
                 print(
-                    f"Loaded preprocessed Toyota landmark cache: {landmark_cache_path}"
+                    "Ignoring stale Toyota landmark cache with length "
+                    f"{len(cached_landmarks)}; current split has {self.length} "
+                    f"samples. Rebuilding {landmark_cache_path}."
                 )
-                return
 
             self.landmark_list = []
             # read landmarks into memory
@@ -495,7 +499,15 @@ class ToyotaSMDataset(Dataset):
                 data = self._read_skeleton_json(file_folder, file_name, skeleton_zip)
                 height, width = self._video_size(row.file_id)
                 if self.set_type == "train":
-                    keep.append(self._skeleton_has_pose(data, row.file_id, height, width))
+                    starts = self._skeleton_train_actor_window_starts(
+                        data,
+                        row.file_id,
+                        self._num_frames(row.file_id),
+                        height,
+                        width,
+                    )
+                    self._actor_train_window_starts[str(row.file_id)] = starts
+                    keep.append(len(starts) > 0)
                 else:
                     keep.append(
                         self._skeleton_has_sampled_actor_pose(
@@ -552,6 +564,36 @@ class ToyotaSMDataset(Dataset):
             keypoints, len(keypoints), height, width
         )
         return pose_available is not None and bool(pose_available.any())
+
+    def _skeleton_train_actor_window_starts(
+        self,
+        data,
+        file_id,
+        n_frames,
+        height,
+        width,
+    ):
+        keypoints = self._skeleton_keypoints_array(data, file_id)
+        pose_available = self._visible_pose_by_frame(keypoints, n_frames, height, width)
+        if pose_available is None or not pose_available.any():
+            return []
+
+        if n_frames > 128:
+            start_candidates = range(max(1, int(n_frames) - 128))
+        else:
+            start_candidates = (0,)
+
+        valid_starts = []
+        for start_frame in start_candidates:
+            if n_frames > 128:
+                end_frame = min(int(start_frame) + 128, int(n_frames) - 1)
+            else:
+                end_frame = int(n_frames) - 1
+            frames_idx = self._sample_frame_indices(start_frame, end_frame)
+            frames_idx = np.clip(frames_idx, 0, len(keypoints) - 1)
+            if bool(pose_available[frames_idx].any()):
+                valid_starts.append(int(start_frame))
+        return valid_starts
 
     def _skeleton_has_sampled_actor_pose(self, data, row, n_frames, height, width):
         keypoints = self._skeleton_keypoints_array(data, row.file_id)
@@ -717,7 +759,22 @@ class ToyotaSMDataset(Dataset):
                     end_frame = n_frames - 1
             elif n_frames > 128:  # test has 128 frames segments
                 if self.set_type == "train":
-                    start_frame = np.random.randint(0, n_frames - 128)
+                    actor_window_starts = self._actor_train_window_starts.get(
+                        str(file_id),
+                        None,
+                    )
+                    if self.actor_prompt and self.needs_skeleton:
+                        if not actor_window_starts:
+                            raise ValueError(
+                                f"No actor-visible training window found for {file_id}"
+                            )
+                        start_frame = int(
+                            actor_window_starts[
+                                np.random.randint(0, len(actor_window_starts))
+                            ]
+                        )
+                    else:
+                        start_frame = np.random.randint(0, n_frames - 128)
                     end_frame = min(start_frame + 128, n_frames - 1)
                 else:
                     # get the middle 128 frames

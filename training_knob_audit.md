@@ -529,18 +529,21 @@ Everything else should be removed or disabled until the above works.
 These should not be active experiment knobs for the next run:
 
 ```text
-token_selection_cls_weight      0.25
+token_selection_cls_weight      0.15
 token_selection_actor_weight    0.25
-token_selection_object_weight   0.10
-token_selection_heatmap_weight  0.35
-actor_object_prompt_box_prior_weight 0.05
-actor_object_prompt_box_prior_expand 1.25
-actor_object_relation_geometry_bias_weight 0.5
-actor_object_relation_heatmap_bias_weight 1.0
-actor_object_relation_null_logit_init 3.5-4.0
+token_selection_object_weight   0.30
+token_selection_heatmap_weight  0.30
+actor_object_prompt_box_prior_weight 0.20
+actor_object_prompt_box_prior_expand 1.50
+actor_object_relation_geometry_bias_weight 1.00
+actor_object_relation_heatmap_bias_weight 2.00
+actor_object_relation_null_logit_init 3.0
+actor_object_relation_max_scale 2.0
 ```
 
-Reason: these are architecture constants. Tuning them now hides the actual question.
+Reason: these are architecture constants for the next real run. They are stronger
+than the original conservative recipe, but below the destructive overdrive sweep
+that made object attention high without improving action behavior.
 
 ### Fix Before Next Real Run
 
@@ -609,16 +612,16 @@ Use:
 --actor_object_prompt_tokens 1
 --actor_object_relation_in_transformer 1
 --actor_object_relation_blocks 6,9
---actor_object_relation_loss_weight 0.75
+--actor_object_relation_loss_weight 1.00
 --actor_object_relation_null_loss_weight 0.50
---actor_object_engagement_loss_weight 0.50
---actor_object_binding_state_loss_weight 0.75
+--actor_object_engagement_loss_weight 0.75
+--actor_object_binding_state_loss_weight 1.00
 --actor_object_binding_margin 0.50
 --actor_object_missing_view_action_loss_weight 0.25
 --actor_object_missing_view_engagement_loss_weight 0.25
 --actor_object_missing_view_relation_null_loss_weight 0.25
 --actor_object_missing_view_target_rate 0.25
---object_prompt_grounding_loss_weight 0.35
+--object_prompt_grounding_loss_weight 0.40
 --class_balanced_sampler 1
 --max_epochs 10
 --t_max_scheduler 10
