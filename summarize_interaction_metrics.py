@@ -47,10 +47,6 @@ CORE_COLUMNS = [
     "val_actor_object_engagement_phone_tablet_acc",
     "val_actor_object_engagement_tv_monitor_acc",
     "val_actor_object_engagement_laptop_book_tv_acc",
-    "val_loss_actor_object_binding_state",
-    "val_actor_object_binding_state_margin",
-    "val_actor_object_binding_state_pass_rate",
-    "val_actor_object_binding_count",
     "val_relation_exact_teacher_acc",
     "val_relation_exact_teacher_prob",
     "val_relation_null_rate_objectless",
@@ -112,18 +108,6 @@ CORE_COLUMNS = [
     "train_nash_weight_heatmap",
     "train_nash_weight_main_deploy",
     "train_nash_weight_grounding_aux",
-    "train_actor_object_missing_view_count",
-    "train_actor_object_missing_view_Uselaptop_count",
-    "train_actor_object_missing_view_Readbook_count",
-    "train_actor_object_missing_view_WatchTV_count",
-    "train_actor_object_missing_view_Drink_count",
-    "train_loss_actor_object_missing_view_action",
-    "train_actor_object_missing_view_action_acc",
-    "train_loss_actor_object_missing_view_engagement",
-    "train_actor_object_missing_view_engagement_acc",
-    "train_loss_actor_object_missing_view_relation_null",
-    "train_actor_object_missing_view_relation_null_prob",
-    "train_actor_object_missing_view_relation_null_acc",
     "val_interaction_teacher_slot_rate",
     "val_interaction_teacher_slot_count",
     "val_interaction_heatmap_missing_object_masked_rate",
@@ -346,18 +330,6 @@ def print_compact_epoch_summary(epoch_df):
         "val_actor_object_engagement_phone_tablet_acc",
         "val_actor_object_engagement_tv_monitor_acc",
         "val_actor_object_engagement_laptop_book_tv_acc",
-        "val_loss_actor_object_binding_state",
-        "val_actor_object_binding_state_margin",
-        "val_actor_object_binding_state_pass_rate",
-        "val_actor_object_binding_count",
-        "train_actor_object_missing_view_count",
-        "train_loss_actor_object_missing_view_action",
-        "train_actor_object_missing_view_action_acc",
-        "train_loss_actor_object_missing_view_engagement",
-        "train_actor_object_missing_view_engagement_acc",
-        "train_loss_actor_object_missing_view_relation_null",
-        "train_actor_object_missing_view_relation_null_prob",
-        "train_actor_object_missing_view_relation_null_acc",
         "val_relation_exact_teacher_acc",
         "val_relation_exact_teacher_prob",
         "val_relation_useful_mass_exact",
@@ -994,49 +966,6 @@ def print_decision(epoch_df):
     actor_presence = metric(latest, "val_actor_presence_acc")
     cf_logit = metric(latest, "val_object_counterfactual_teacher_logit_drop")
     cf_prob = metric(latest, "val_object_counterfactual_teacher_prob_drop")
-    binding_state_loss = metric(
-        latest,
-        "val_loss_actor_object_binding_state",
-    )
-    binding_state_margin = metric(
-        latest,
-        "val_actor_object_binding_state_margin",
-    )
-    binding_state_pass = metric(
-        latest,
-        "val_actor_object_binding_state_pass_rate",
-    )
-    binding_count = metric(latest, "val_actor_object_binding_count")
-    missing_view_count = metric(latest, "train_actor_object_missing_view_count")
-    missing_view_action_loss = metric(
-        latest,
-        "train_loss_actor_object_missing_view_action",
-    )
-    missing_view_action_acc = metric(
-        latest,
-        "train_actor_object_missing_view_action_acc",
-    )
-    missing_view_engagement_loss = metric(
-        latest,
-        "train_loss_actor_object_missing_view_engagement",
-    )
-    missing_view_engagement_acc = metric(
-        latest,
-        "train_actor_object_missing_view_engagement_acc",
-    )
-    missing_view_relation_loss = metric(
-        latest,
-        "train_loss_actor_object_missing_view_relation_null",
-    )
-    missing_view_relation_null_prob = metric(
-        latest,
-        "train_actor_object_missing_view_relation_null_prob",
-    )
-    missing_view_relation_null_acc = metric(
-        latest,
-        "train_actor_object_missing_view_relation_null_acc",
-    )
-
     print("\nDECISION:\n")
     print(f"latest epoch: {latest_epoch}")
     if pd.notna(deploy_score):
@@ -1083,26 +1012,6 @@ def print_decision(epoch_df):
             f"phone_tablet {fmt(engagement_phone_acc)}, "
             f"tv_monitor {fmt(engagement_tv_acc)}, "
             f"laptop_book_tv {fmt(engagement_lbt_acc)}"
-        )
-    if pd.notna(binding_state_margin):
-        print(
-            "object-action binding state margin: "
-            f"count {fmt(binding_count, 0)}, "
-            f"state_loss {fmt(binding_state_loss)}, "
-            f"state_margin {fmt(binding_state_margin)}, "
-            f"state_pass {fmt(binding_state_pass)}"
-        )
-    if pd.notna(missing_view_count):
-        print(
-            "missing-object view training: "
-            f"count {fmt(missing_view_count, 0)}, "
-            f"action_loss {fmt(missing_view_action_loss)}, "
-            f"action_acc {fmt(missing_view_action_acc)}, "
-            f"engagement_loss {fmt(missing_view_engagement_loss)}, "
-            f"engagement_acc {fmt(missing_view_engagement_acc)}, "
-            f"relation_null_loss {fmt(missing_view_relation_loss)}, "
-            f"null_prob {fmt(missing_view_relation_null_prob)}, "
-            f"null_acc {fmt(missing_view_relation_null_acc)}"
         )
     if pd.notna(prompt_acc) or pd.notna(prompt_loss):
         print(

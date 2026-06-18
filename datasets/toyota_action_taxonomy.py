@@ -1,7 +1,6 @@
 from collections import OrderedDict
 
 from datasets.object_vocab import (
-    ACTION_OBJECT_CONFUSERS,
     GROUPS,
     OBJECTLESS_ACTIONS,
     STRONG_ACTION_OBJECTS,
@@ -269,33 +268,3 @@ def toyota_objectless_action_names(task_type="CS", action_taxonomy="toyota_31"):
         action_taxonomy,
     )
 
-
-def toyota_confuser_action_names(action_name, task_type="CS", action_taxonomy="toyota_31"):
-    task_type = _normalize_task_type(task_type)
-    action_taxonomy = normalize_toyota_action_taxonomy(action_taxonomy)
-    action_names = set(toyota_action_names(task_type, action_taxonomy))
-
-    if action_taxonomy == "toyota_31":
-        raw_sources = (action_name,)
-    else:
-        raw_sources = tuple(
-            raw_action
-            for raw_action, canonical_action in PRODUCT_V1_RAW_TO_ACTION.items()
-            if canonical_action == action_name
-        )
-
-    candidates = []
-    for raw_source in raw_sources:
-        for raw_candidate in ACTION_OBJECT_CONFUSERS.get(raw_source, ()):
-            canonical_candidate = toyota_canonical_action(
-                raw_candidate,
-                task_type,
-                action_taxonomy,
-            )
-            if (
-                canonical_candidate is not None
-                and canonical_candidate in action_names
-                and canonical_candidate != action_name
-            ):
-                candidates.append(canonical_candidate)
-    return _unique_in_action_order(candidates, task_type, action_taxonomy)

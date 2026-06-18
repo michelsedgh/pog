@@ -275,25 +275,6 @@ if _overlapping_target_actions:
         f"{sorted(_overlapping_target_actions)}"
     )
 
-# These pairs are not object-presence rules. They are used only when the Toyota
-# action label and actor-associated object teacher already say the actor is
-# interacting with the expected object. The loss then teaches the fused
-# actor/object representation to separate visually similar actions.
-ACTION_OBJECT_CONFUSERS = {
-    "Uselaptop": ("Readbook", "Usetelephone", "WatchTV"),
-    "Readbook": ("Uselaptop", "Usetelephone", "WatchTV"),
-    "Usetelephone": ("Uselaptop", "Readbook", "WatchTV"),
-    "WatchTV": ("Uselaptop", "Readbook", "Usetelephone"),
-    "Drink.Fromcup": ("Drink.Frombottle", "Drink.Fromglass", "Drink.Fromcan"),
-    "Drink.Frombottle": ("Drink.Fromcup", "Drink.Fromglass", "Drink.Fromcan"),
-    "Pour.Frombottle": ("Drink.Frombottle", "Drink.Fromcup", "Drink.Fromglass"),
-    "Cutbread": ("Cook.Cut", "Cook.Stir"),
-    "Cook.Cut": ("Cutbread", "Cook.Stir", "Cook.Usestove"),
-    "Cook.Stir": ("Cook.Cut", "Cutbread", "Cook.Usestove"),
-    "Cook.Cleandishes": ("Cook.Cut", "Cook.Stir", "Cook.Usestove"),
-    "Cook.Usestove": ("Cook.Cut", "Cook.Stir", "Cook.Cleandishes"),
-}
-
 GROUPS = {
     "laptop_book_tv": ["Uselaptop", "Readbook", "WatchTV"],
     "phone_tablet": ["Usetelephone", "Usetablet"],
