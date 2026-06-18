@@ -156,13 +156,6 @@ class POGUISE(pl.LightningModule):
         )
         self.actor_object_engagement_enabled = (
             float(self.hparams.get("actor_object_engagement_loss_weight", 0.0)) > 0.0
-            or float(
-                self.hparams.get(
-                    "actor_object_binding_state_loss_weight",
-                    0.0,
-                )
-            )
-            > 0.0
         )
         if bool(self.hparams.get("actor_object_slot_head", 0)):
             raise ValueError(

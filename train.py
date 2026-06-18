@@ -422,36 +422,6 @@ def build_parser():
     parser.add_argument("--actor_object_relation_loss_weight", type=float, default=0.0)
     parser.add_argument("--actor_object_engagement_loss_weight", type=float, default=0.0)
     parser.add_argument(
-        "--actor_object_binding_state_loss_weight",
-        type=float,
-        default=0.0,
-    )
-    parser.add_argument(
-        "--actor_object_binding_margin",
-        type=float,
-        default=0.5,
-    )
-    parser.add_argument(
-        "--actor_object_missing_view_action_loss_weight",
-        type=float,
-        default=0.0,
-    )
-    parser.add_argument(
-        "--actor_object_missing_view_engagement_loss_weight",
-        type=float,
-        default=0.0,
-    )
-    parser.add_argument(
-        "--actor_object_missing_view_relation_null_loss_weight",
-        type=float,
-        default=0.0,
-    )
-    parser.add_argument(
-        "--actor_object_missing_view_target_rate",
-        type=float,
-        default=0.25,
-    )
-    parser.add_argument(
         "--actor_object_relation_null_loss_weight",
         type=float,
         default=0.5,

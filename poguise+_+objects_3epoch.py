@@ -386,7 +386,7 @@ def run_training_with_epoch_summaries(cmd, run_name, epoch_dir, poll_secs=20):
 
 TS = datetime.now().strftime("%Y%m%d_%H%M%S")
 RUN_LABEL = "diag3"
-RUN_NAME = f"actor_object_missing_view_{RUN_LABEL}_{TS}"
+RUN_NAME = f"actor_object_relation_engagement_{RUN_LABEL}_{TS}"
 EPOCH_DIR = str(Path(DATA_DIR) / "checkpoints" / RUN_NAME / "epoch_checkpoints")
 
 cmd = [
@@ -470,12 +470,6 @@ cmd = [
 
     "--actor_object_relation_loss_weight", "1.00",
     "--actor_object_engagement_loss_weight", "0.75",
-    "--actor_object_binding_state_loss_weight", "1.00",
-    "--actor_object_binding_margin", "0.50",
-    "--actor_object_missing_view_action_loss_weight", "0.25",
-    "--actor_object_missing_view_engagement_loss_weight", "0.25",
-    "--actor_object_missing_view_relation_null_loss_weight", "0.25",
-    "--actor_object_missing_view_target_rate", "0.25",
     "--actor_object_relation_null_loss_weight", "0.50",
     "--object_prompt_grounding_loss_weight", "0.40",
     "--batch_size", "32",

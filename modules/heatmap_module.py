@@ -22,7 +22,6 @@ from datasets.object_vocab import (
 from datasets.toyota_action_taxonomy import (
     toyota_action_names,
     toyota_action_object_map,
-    toyota_confuser_action_names,
     toyota_action_to_index,
     toyota_group_action_names,
     toyota_label_dict,
@@ -59,12 +58,6 @@ ENGAGEMENT_STATE_NAMES = (
 )
 ENGAGEMENT_STATE_TO_INDEX = {
     name: index for index, name in enumerate(ENGAGEMENT_STATE_NAMES)
-}
-MISSING_VIEW_NATURAL_MISSING_RATES = {
-    "Uselaptop": 0.0303030303030303,
-    "Readbook": 0.1602972399150743,
-    "WatchTV": 0.2191011235955056,
-    "Drink": 0.22266845158411425,
 }
 
 
@@ -184,65 +177,13 @@ class HeatmapModule(pl.LightningModule):
         )
         if self.actor_object_engagement_loss_weight < 0:
             raise ValueError("actor_object_engagement_loss_weight must be >= 0")
-        self.actor_object_binding_state_loss_weight = float(
-            hparams.get("actor_object_binding_state_loss_weight", 0.0)
-        )
-        if self.actor_object_binding_state_loss_weight < 0:
-            raise ValueError("actor_object_binding_state_loss_weight must be >= 0")
-        self.actor_object_binding_margin = float(
-            hparams.get("actor_object_binding_margin", 0.5)
-        )
-        if self.actor_object_binding_margin <= 0:
-            raise ValueError("actor_object_binding_margin must be > 0")
-        self.actor_object_missing_view_action_loss_weight = float(
-            hparams.get("actor_object_missing_view_action_loss_weight", 0.0)
-        )
-        if self.actor_object_missing_view_action_loss_weight < 0:
-            raise ValueError(
-                "actor_object_missing_view_action_loss_weight must be >= 0"
-            )
-        self.actor_object_missing_view_engagement_loss_weight = float(
-            hparams.get("actor_object_missing_view_engagement_loss_weight", 0.0)
-        )
-        if self.actor_object_missing_view_engagement_loss_weight < 0:
-            raise ValueError(
-                "actor_object_missing_view_engagement_loss_weight must be >= 0"
-            )
-        self.actor_object_missing_view_relation_null_loss_weight = float(
-            hparams.get("actor_object_missing_view_relation_null_loss_weight", 0.0)
-        )
-        if self.actor_object_missing_view_relation_null_loss_weight < 0:
-            raise ValueError(
-                "actor_object_missing_view_relation_null_loss_weight must be >= 0"
-            )
-        self.actor_object_missing_view_target_rate = float(
-            hparams.get("actor_object_missing_view_target_rate", 0.25)
-        )
-        if not 0 <= self.actor_object_missing_view_target_rate < 1:
-            raise ValueError("actor_object_missing_view_target_rate must be in [0, 1)")
-        missing_view_enabled = (
-            self.actor_object_missing_view_action_loss_weight > 0
-            or self.actor_object_missing_view_engagement_loss_weight > 0
-            or self.actor_object_missing_view_relation_null_loss_weight > 0
-        )
         if (
-            (
-                self.actor_object_engagement_loss_weight > 0
-                or self.actor_object_binding_state_loss_weight > 0
-                or self.actor_object_missing_view_engagement_loss_weight > 0
-            )
+            self.actor_object_engagement_loss_weight > 0
             and not self.actor_object_relation_in_transformer
         ):
             raise ValueError(
                 "actor-object engagement supervision requires "
                 "actor_object_relation_in_transformer"
-            )
-        if missing_view_enabled and not (
-            self.actor_object_relation_in_transformer and self.uses_object_proposals
-        ):
-            raise ValueError(
-                "actor-object missing-view supervision requires in-transformer "
-                "relation updates and actor object prompt tokens"
             )
         self.actor_object_relation_null_loss_weight = float(
             hparams.get("actor_object_relation_null_loss_weight", 0.5)
@@ -279,15 +220,11 @@ class HeatmapModule(pl.LightningModule):
                 self.action_taxonomy,
             )
             self.action_object_ids_by_index = self._build_action_object_ids_by_index()
-            self.action_confuser_indices_by_index = (
-                self._build_action_confuser_indices_by_index()
-            )
         else:
             self.action_names = [str(index) for index in range(self.num_classes)]
             self.action_to_index = {}
             self.action_object_map = {}
             self.action_object_ids_by_index = {}
-            self.action_confuser_indices_by_index = {}
 
         # Create model
         self.lr = hparams.lr
@@ -369,7 +306,6 @@ class HeatmapModule(pl.LightningModule):
         )
         self.engagement_state_names = ENGAGEMENT_STATE_NAMES
         self.engagement_targets_by_action = self._build_engagement_targets_by_action()
-        self.missing_view_prob_by_action = self._build_missing_view_prob_by_action()
         self.hard_negative_object_ids = {
             int(OBJECT_TO_ID[object_name]): object_name
             for object_names in self.action_object_map.values()
@@ -545,25 +481,6 @@ class HeatmapModule(pl.LightningModule):
                 )
         return action_object_ids
 
-    def _build_action_confuser_indices_by_index(self):
-        action_confusers = {}
-        for action_name, action_idx in self.action_to_index.items():
-            confuser_indices = [
-                int(self.action_to_index[confuser_name])
-                for confuser_name in toyota_confuser_action_names(
-                    action_name,
-                    self.task_type,
-                    self.action_taxonomy,
-                )
-                if confuser_name in self.action_to_index
-            ]
-            if confuser_indices:
-                action_confusers[int(action_idx)] = torch.tensor(
-                    confuser_indices,
-                    dtype=torch.long,
-                )
-        return action_confusers
-
     def _build_group_indices(self):
         if not self.is_toyota:
             return {}
@@ -645,22 +562,6 @@ class HeatmapModule(pl.LightningModule):
                 continue
             targets[int(action_idx)] = int(ENGAGEMENT_STATE_TO_INDEX[state_name])
         return targets
-
-    def _build_missing_view_prob_by_action(self):
-        probs = torch.zeros((int(self.num_classes),), dtype=torch.float32)
-        if not self.is_toyota:
-            return probs
-        target_rate = float(self.actor_object_missing_view_target_rate)
-        for action_name, natural_missing in MISSING_VIEW_NATURAL_MISSING_RATES.items():
-            action_idx = self.action_to_index.get(action_name)
-            if action_idx is None:
-                continue
-            natural_missing = float(natural_missing)
-            if natural_missing >= target_rate:
-                continue
-            available_rate = max(1.0 - natural_missing, 1e-6)
-            probs[int(action_idx)] = (target_rate - natural_missing) / available_rate
-        return probs.clamp_(0.0, 1.0)
 
     def _interaction_audit_action_indices(self):
         if not self.is_toyota:
@@ -1549,71 +1450,6 @@ class HeatmapModule(pl.LightningModule):
         preds, _hm_preds, _presence_logits = self._unpack_model_data(data)
         return preds
 
-    def _object_prompt_training_outputs(
-        self,
-        imgs,
-        boxes,
-        valid,
-        object_inputs,
-        return_relation_aux=False,
-    ):
-        if not self.uses_object_proposals:
-            raise RuntimeError("Object prompt training outputs require proposals")
-        saved_attrs = {
-            name: getattr(self.model, name, None)
-            for name in (
-                "last_actor_object_prompt_classes",
-                "last_actor_object_prompt_tokens",
-                "last_actor_object_prompt_attention_logits",
-                "last_actor_object_prompt_attention",
-                "last_actor_object_prompt_valid",
-                "last_actor_object_relation_context",
-                "last_actor_object_engagement_logits",
-                "last_actor_tokens",
-                "last_actor_action_tokens",
-                "last_actor_object_relation_aux",
-                "last_actor_action_logits",
-            )
-        }
-        net = getattr(self.model, "net", None)
-        saved_net_attrs = {}
-        if net is not None:
-            saved_net_attrs = {
-                name: getattr(net, name, None)
-                for name in (
-                    "last_actor_object_relation_aux",
-                    "last_actor_object_grounding",
-                    "last_token_selection_diagnostics",
-                )
-            }
-        try:
-            data = self.model(
-                imgs,
-                boxes=boxes,
-                valid=valid,
-                **object_inputs,
-            )
-            preds, _hm_preds, _presence_logits = self._unpack_model_data(data)
-            engagement_logits = getattr(
-                self.model,
-                "last_actor_object_engagement_logits",
-                None,
-            )
-            relation_aux = getattr(
-                self.model,
-                "last_actor_object_relation_aux",
-                None,
-            )
-        finally:
-            for name, value in saved_attrs.items():
-                setattr(self.model, name, value)
-            if net is not None:
-                for name, value in saved_net_attrs.items():
-                    setattr(net, name, value)
-        if return_relation_aux:
-            return preds, engagement_logits, relation_aux
-        return preds, engagement_logits
-
     def _teacher_object_removed_inputs(
         self,
         object_inputs,
@@ -1636,38 +1472,6 @@ class HeatmapModule(pl.LightningModule):
         output["object_boxes"][batch_idx, object_slots] = 0
         output["object_confs"][batch_idx, object_slots] = 0
         output["object_classes"][batch_idx, object_slots] = none_id
-        return output
-
-    def _compatible_objects_removed_inputs(self, object_inputs, actions, selected_mask):
-        output = {name: value.clone() for name, value in object_inputs.items()}
-        object_valid = output.get("object_valid")
-        object_classes = output.get("object_classes")
-        if object_valid is None or object_classes is None:
-            return output
-        if not selected_mask.any():
-            return output
-
-        actions = actions.to(device=object_classes.device, dtype=torch.long)
-        selected_mask = selected_mask.to(device=object_classes.device, dtype=torch.bool)
-        remove = torch.zeros_like(object_valid, dtype=torch.bool)
-        for action_idx, object_ids in self.action_object_ids_by_index.items():
-            action_mask = selected_mask & (actions == int(action_idx))
-            if not action_mask.any():
-                continue
-            object_ids = object_ids.to(device=object_classes.device, dtype=torch.long)
-            class_match = (
-                object_classes.unsqueeze(-1) == object_ids.view(1, 1, -1)
-            ).any(dim=-1)
-            remove |= action_mask.any(dim=1, keepdim=True) & object_valid & class_match
-
-        if not remove.any():
-            return output
-
-        none_id = int(self.model.hparams.get("num_object_classes", NUM_OBJECT_CLASSES))
-        output["object_valid"][remove] = False
-        output["object_boxes"][remove] = 0
-        output["object_confs"][remove] = 0
-        output["object_classes"][remove] = none_id
         return output
 
     @staticmethod
@@ -2373,326 +2177,6 @@ class HeatmapModule(pl.LightningModule):
                 )
         return loss * self.actor_object_engagement_loss_weight
 
-    def _actor_object_binding_margin_loss(
-        self,
-        stage,
-        valid,
-        actions,
-        target,
-    ):
-        if self.actor_object_binding_state_loss_weight <= 0:
-            return None
-
-        engagement_logits = getattr(
-            self.model,
-            "last_actor_object_engagement_logits",
-            None,
-        )
-        if engagement_logits is None:
-            raise RuntimeError(
-                "actor_object_binding_state_loss_weight is enabled, but the "
-                "model did not produce binding state logits"
-            )
-        device = engagement_logits.device
-        info = self._exact_teacher_object_info(actions, valid, target, device)
-        if info is None:
-            return None
-
-        actions = actions.to(device=device, dtype=torch.long)
-        valid = valid.to(device=device, dtype=torch.bool)
-        exact_compatible = (
-            info["valid"]
-            & info["known_action"]
-            & info["compatible_from_one_based"]
-        )
-        if not exact_compatible.any():
-            return None
-
-        margin = engagement_logits.new_tensor(float(self.actor_object_binding_margin))
-        state_margins = []
-        targets_by_action = self.engagement_targets_by_action.to(device=device)
-        for action_idx, confuser_indices in self.action_confuser_indices_by_index.items():
-            if int(action_idx) >= int(targets_by_action.numel()):
-                continue
-            true_state_idx = int(targets_by_action[int(action_idx)].item())
-            if true_state_idx < 0:
-                continue
-            confuser_state_ids = []
-            for confuser_idx in confuser_indices.tolist():
-                if int(confuser_idx) >= int(targets_by_action.numel()):
-                    continue
-                state_idx = int(targets_by_action[int(confuser_idx)].item())
-                if state_idx >= 0 and state_idx != true_state_idx:
-                    confuser_state_ids.append(state_idx)
-            confuser_state_ids = sorted(set(confuser_state_ids))
-            if not confuser_state_ids:
-                continue
-            action_mask = exact_compatible & (actions == int(action_idx))
-            if not action_mask.any():
-                continue
-            state_index = torch.tensor(
-                confuser_state_ids,
-                device=device,
-                dtype=torch.long,
-            )
-            state_logits = engagement_logits[action_mask].float()
-            true_state = state_logits[:, true_state_idx]
-            confuser_state = state_logits.index_select(1, state_index).max(
-                dim=1
-            ).values
-            state_margin = true_state - confuser_state
-            state_margins.append(state_margin)
-            action_name = self.action_names[int(action_idx)]
-            safe_name = action_name.replace(".", "_")
-            self._log_scalar(
-                f"{stage}_actor_object_binding_state_{safe_name}_margin",
-                state_margin.detach().mean(),
-                int(action_mask.sum().item()),
-            )
-
-        if not state_margins:
-            return None
-
-        state_margin_all = torch.cat(state_margins)
-        state_loss = F.relu(margin - state_margin_all).mean()
-        total_loss = state_loss * self.actor_object_binding_state_loss_weight
-        count = int(state_margin_all.numel())
-        self.log(
-            f"{stage}_loss_actor_object_binding_state",
-            state_loss,
-            on_step=stage == "train",
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-            sync_dist=True,
-        )
-        self._log_scalar(
-            f"{stage}_actor_object_binding_state_margin",
-            state_margin_all.detach().mean(),
-            count,
-        )
-        self._log_scalar(
-            f"{stage}_actor_object_binding_state_pass_rate",
-            (state_margin_all.detach() >= margin.detach()).float().mean(),
-            count,
-        )
-
-        self._log_count(
-            f"{stage}_actor_object_binding_count",
-            exact_compatible.float().sum().detach(),
-        )
-        return total_loss
-
-    def _actor_object_missing_view_loss(
-        self,
-        stage,
-        imgs,
-        boxes,
-        valid,
-        actions,
-        target,
-        object_inputs,
-    ):
-        if stage != "train":
-            return None
-        if (
-            self.actor_object_missing_view_action_loss_weight <= 0
-            and self.actor_object_missing_view_engagement_loss_weight <= 0
-            and self.actor_object_missing_view_relation_null_loss_weight <= 0
-        ):
-            return None
-        if not self.uses_object_proposals:
-            return None
-
-        device = imgs.device
-        info = self._exact_teacher_object_info(actions, valid, target, device)
-        if info is None:
-            return None
-
-        actions = actions.to(device=device, dtype=torch.long)
-        valid = valid.to(device=device, dtype=torch.bool)
-        exact_compatible = (
-            info["valid"]
-            & info["known_action"]
-            & info["compatible_from_one_based"]
-        )
-        if not exact_compatible.any():
-            return None
-
-        missing_probs = self.missing_view_prob_by_action.to(device=device)
-        in_range = valid & (actions >= 0) & (actions < int(missing_probs.numel()))
-        action_probs = torch.zeros_like(actions, dtype=torch.float32, device=device)
-        action_probs[in_range] = missing_probs[actions[in_range]]
-        candidate = exact_compatible & (action_probs > 0)
-        if not candidate.any():
-            return None
-
-        selected_mask = candidate & (torch.rand_like(action_probs) < action_probs)
-        if not selected_mask.any():
-            return None
-
-        missing_inputs = self._compatible_objects_removed_inputs(
-            object_inputs,
-            actions,
-            selected_mask,
-        )
-        missing_preds, missing_engagement_logits, relation_aux = (
-            self._object_prompt_training_outputs(
-                imgs,
-                boxes,
-                valid,
-                missing_inputs,
-                return_relation_aux=True,
-            )
-        )
-
-        total_loss = missing_preds.sum() * 0.0
-        count = int(selected_mask.sum().item())
-        self._log_count(
-            "train_actor_object_missing_view_count",
-            selected_mask.float().sum().detach(),
-        )
-        for action_name in MISSING_VIEW_NATURAL_MISSING_RATES:
-            action_idx = self.action_to_index.get(action_name)
-            if action_idx is None:
-                continue
-            action_mask = selected_mask & (actions == int(action_idx))
-            if action_mask.any():
-                self._log_count(
-                    f"train_actor_object_missing_view_{action_name.replace('.', '_')}_count",
-                    action_mask.float().sum().detach(),
-                )
-
-        if self.actor_object_missing_view_action_loss_weight > 0:
-            action_loss = F.cross_entropy(
-                missing_preds[selected_mask].float(),
-                actions[selected_mask],
-            )
-            total_loss = (
-                total_loss
-                + action_loss * self.actor_object_missing_view_action_loss_weight
-            )
-            self.log(
-                "train_loss_actor_object_missing_view_action",
-                action_loss,
-                on_step=True,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-                sync_dist=True,
-            )
-            with torch.no_grad():
-                pred = missing_preds[selected_mask].argmax(dim=-1)
-                self._log_scalar(
-                    "train_actor_object_missing_view_action_acc",
-                    (pred == actions[selected_mask]).float().mean(),
-                    count,
-                )
-
-        if (
-            self.actor_object_missing_view_engagement_loss_weight > 0
-            and missing_engagement_logits is not None
-        ):
-            targets_by_action = self.engagement_targets_by_action.to(device=device)
-            targets = torch.full_like(actions, -1, dtype=torch.long, device=device)
-            targets[in_range] = targets_by_action[actions[in_range]]
-            state_mask = selected_mask & (targets >= 0)
-            if state_mask.any():
-                engagement_loss = F.cross_entropy(
-                    missing_engagement_logits[state_mask].float(),
-                    targets[state_mask],
-                )
-                total_loss = (
-                    total_loss
-                    + engagement_loss
-                    * self.actor_object_missing_view_engagement_loss_weight
-                )
-                state_count = int(state_mask.sum().item())
-                self.log(
-                    "train_loss_actor_object_missing_view_engagement",
-                    engagement_loss,
-                    on_step=True,
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                    sync_dist=True,
-                )
-                with torch.no_grad():
-                    state_pred = missing_engagement_logits[state_mask].argmax(dim=-1)
-                    self._log_scalar(
-                        "train_actor_object_missing_view_engagement_acc",
-                        (state_pred == targets[state_mask]).float().mean(),
-                        state_count,
-                    )
-
-        if (
-            self.actor_object_missing_view_relation_null_loss_weight > 0
-            and relation_aux
-        ):
-            relation_losses = []
-            relation_null_probs = []
-            relation_null_accs = []
-            null_targets = torch.zeros(
-                int(selected_mask.sum().item()),
-                dtype=torch.long,
-                device=device,
-            )
-            for block_name, aux in relation_aux.items():
-                logits = aux.get("logits")
-                if logits is None:
-                    continue
-                if logits.shape[:2] != selected_mask.shape:
-                    raise RuntimeError(
-                        "missing-view relation logits shape mismatch: "
-                        f"{tuple(logits.shape[:2])} vs {tuple(selected_mask.shape)}"
-                    )
-                selected_logits = logits[selected_mask].float()
-                block_loss = F.cross_entropy(selected_logits, null_targets)
-                relation_losses.append(block_loss)
-                self.log(
-                    f"train_loss_actor_object_missing_view_relation_null_block_{block_name}",
-                    block_loss,
-                    on_step=True,
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                    sync_dist=True,
-                )
-                with torch.no_grad():
-                    probs = torch.softmax(selected_logits, dim=-1)
-                    relation_null_probs.append(probs[:, 0].mean())
-                    relation_null_accs.append(
-                        (selected_logits.argmax(dim=-1) == 0).float().mean()
-                    )
-            if relation_losses:
-                relation_loss = torch.stack(relation_losses).mean()
-                total_loss = (
-                    total_loss
-                    + relation_loss
-                    * self.actor_object_missing_view_relation_null_loss_weight
-                )
-                self.log(
-                    "train_loss_actor_object_missing_view_relation_null",
-                    relation_loss,
-                    on_step=True,
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                    sync_dist=True,
-                )
-                self._log_scalar(
-                    "train_actor_object_missing_view_relation_null_prob",
-                    torch.stack(relation_null_probs).mean(),
-                    count,
-                )
-                self._log_scalar(
-                    "train_actor_object_missing_view_relation_null_acc",
-                    torch.stack(relation_null_accs).mean(),
-                    count,
-                )
-
-        return total_loss
-
     def _log_actor_object_relation_metrics(
         self,
         stage,
@@ -3038,27 +2522,6 @@ class HeatmapModule(pl.LightningModule):
         )
         if loss_actor_object_engagement is not None:
             loss_main_task = loss_main_task + loss_actor_object_engagement
-
-        loss_actor_object_binding = self._actor_object_binding_margin_loss(
-            stage,
-            valid,
-            actions,
-            target,
-        )
-        if loss_actor_object_binding is not None:
-            loss_main_task = loss_main_task + loss_actor_object_binding
-
-        loss_actor_object_missing_view = self._actor_object_missing_view_loss(
-            stage,
-            imgs,
-            boxes,
-            valid,
-            actions,
-            target,
-            object_inputs,
-        )
-        if loss_actor_object_missing_view is not None:
-            loss_main_task = loss_main_task + loss_actor_object_missing_view
 
         grounding_aux_terms = []
         loss_object_prompt_grounding = self._object_prompt_grounding_loss(

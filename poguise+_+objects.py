@@ -427,7 +427,7 @@ def set_cmd_arg(cmd, key, value):
 REQUESTED_EPOCHS = parse_launcher_args(sys.argv)
 TS = datetime.now().strftime("%Y%m%d_%H%M%S")
 RUN_EPOCHS = REQUESTED_EPOCHS or 10
-RUN_NAME = f"actor_object_missing_view_binding_{RUN_EPOCHS}ep_{TS}"
+RUN_NAME = f"actor_object_relation_engagement_{RUN_EPOCHS}ep_{TS}"
 EPOCH_DIR = str(Path(DATA_DIR) / "checkpoints" / RUN_NAME / "epoch_checkpoints")
 
 cmd = [
@@ -511,12 +511,6 @@ cmd = [
 
     "--actor_object_relation_loss_weight", "1.00",
     "--actor_object_engagement_loss_weight", "0.75",
-    "--actor_object_binding_state_loss_weight", "1.00",
-    "--actor_object_binding_margin", "0.50",
-    "--actor_object_missing_view_action_loss_weight", "0.25",
-    "--actor_object_missing_view_engagement_loss_weight", "0.25",
-    "--actor_object_missing_view_relation_null_loss_weight", "0.25",
-    "--actor_object_missing_view_target_rate", "0.25",
     "--actor_object_relation_null_loss_weight", "0.50",
     "--object_prompt_grounding_loss_weight", "0.40",
     "--batch_size", "32",
@@ -562,8 +556,8 @@ cmd = [
 print("\nSINGLE OBJECT-BINDING TRAINING RUN", flush=True)
 print(f"epochs: {RUN_EPOCHS}", flush=True)
 print(
-    "object binding: clean detector-guided training with class-aware "
-    "missing-object views",
+    "object binding: one-forward detector-guided training with relation and "
+    "engagement auxiliaries",
     flush=True,
 )
 run_dir = run_training_with_epoch_summaries(cmd, RUN_NAME, EPOCH_DIR, poll_secs=20)
