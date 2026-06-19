@@ -221,6 +221,21 @@ class POGUISE(pl.LightningModule):
         if self.hparams.freeze_backbone:
             self._freeze_backbone()
 
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        result = super().load_state_dict(state_dict, strict=strict, assign=assign)
+        stale_object_conf = [
+            key for key in result.unexpected_keys if "object_conf_mlp" in key
+        ]
+        if stale_object_conf:
+            preview = ", ".join(stale_object_conf[:12])
+            raise RuntimeError(
+                "Checkpoint contains removed object-confidence weights. "
+                "The actor-object model now receives only object boxes, classes, "
+                "and valid masks; retrain from a clean base checkpoint. "
+                f"First stale keys: {preview}"
+            )
+        return result
+
     def _create_network(self):
         n_registers = (
             int(self.hparams.get("n_registers", 0) or 0)
@@ -521,7 +536,6 @@ class POGUISE(pl.LightningModule):
                 "object_slot_embed",
                 "object_class_embed",
                 "object_box_mlp",
-                "object_conf_mlp",
                 "object_valid_embed",
             ):
                 module = getattr(self.net, attr, None)
@@ -557,7 +571,6 @@ class POGUISE(pl.LightningModule):
         action_labels=None,
         object_boxes=None,
         object_classes=None,
-        object_confs=None,
         object_valid=None,
     ):
         # convert to b c t h w
@@ -570,7 +583,6 @@ class POGUISE(pl.LightningModule):
                     valid=valid,
                     object_boxes=object_boxes,
                     object_classes=object_classes,
-                    object_confs=object_confs,
                     object_valid=object_valid,
                 )
                 x_heatmap_feat = None
@@ -598,7 +610,6 @@ class POGUISE(pl.LightningModule):
                     valid=valid,
                     object_boxes=object_boxes,
                     object_classes=object_classes,
-                    object_confs=object_confs,
                     object_valid=object_valid,
                 )
                 _, x_actor = data[:2]

@@ -155,11 +155,12 @@ class ToyotaSMDataset(Dataset):
         self.object_conf_threshold = float(kwargs.get("object_conf_threshold", 0.25))
         if not 0 <= self.object_conf_threshold <= 1:
             raise ValueError("object_conf_threshold must be in [0, 1]")
-        self.object_temporal_conf_power = float(
-            kwargs.get("object_temporal_conf_power", 0.0)
-        )
-        if self.object_temporal_conf_power < 0:
-            raise ValueError("object_temporal_conf_power must be >= 0")
+        if float(kwargs.get("object_temporal_conf_power", 0.0)) != 0.0:
+            raise ValueError(
+                "object_temporal_conf_power was removed. Detector confidence is "
+                "used only before the model for filtering/sorting; actor inputs "
+                "are object boxes, classes, and valid masks."
+            )
         self.interaction_heatmap_size = int(
             kwargs.get("interaction_heatmap_size", 56)
         )
@@ -422,7 +423,6 @@ class ToyotaSMDataset(Dataset):
         parser.add_argument("--object_camera_allowlist", type=str, default=None)
         parser.add_argument("--object_ignore_regions", type=str, default=None)
         parser.add_argument("--object_conf_threshold", type=float, default=0.25)
-        parser.add_argument("--object_temporal_conf_power", type=float, default=0.0)
         parser.add_argument("--interaction_heatmap_size", type=int, default=56)
         parser.add_argument("--object_track_iou_threshold", type=float, default=0.2)
         parser.add_argument("--interaction_heatmap_sigma", type=float, default=1.5)
@@ -1212,10 +1212,6 @@ class ToyotaSMDataset(Dataset):
                 NONE_OBJECT_ID,
                 dtype=torch.long,
             ),
-            "object_confs": torch.zeros(
-                self.num_scene_object_tokens,
-                dtype=torch.float32,
-            ),
             "object_valid": torch.zeros(
                 self.num_scene_object_tokens,
                 dtype=torch.bool,
@@ -1258,11 +1254,6 @@ class ToyotaSMDataset(Dataset):
                 continue
             target["object_boxes"][slot] = box
             target["object_classes"][slot] = int(track["cls_id"])
-            mean_conf = float(np.mean([float(conf) for conf in track["confs"]]))
-            if self.object_temporal_conf_power > 0.0:
-                coverage = len(track["frames"]) / float(max(self.n_frames, 1))
-                mean_conf *= float(coverage) ** self.object_temporal_conf_power
-            target["object_confs"][slot] = mean_conf
             target["object_valid"][slot] = True
             track_to_slot[id(track)] = int(slot)
         return target, track_to_slot
@@ -1761,7 +1752,7 @@ class ToyotaSMDataset(Dataset):
 
     def _object_cache_path(self, file_ids):
         payload = {
-            "kind": "toyota_object_cache_v3_actor_object_heatmap",
+            "kind": "toyota_object_cache_v4_actor_object_heatmap_no_model_conf",
             "set_type": self.set_type,
             "source": self._path_signature(self.object_detector_cache),
             "file_ids": sorted(str(file_id) for file_id in file_ids),

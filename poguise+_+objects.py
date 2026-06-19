@@ -282,7 +282,12 @@ run_checked([
     "losses/poguiseplus_losses.py",
     "train.py",
     "summarize_interaction_metrics.py",
+    "live_actor_dashboard.py",
+    "object_actor_live/probe_saved_video.py",
+    "object_actor_live/analyze_live_checkpoint_sweep.py",
+    "utils/actor_tensorrt.py",
     "utils/bisect_actor_tensorrt.py",
+    "utils/check_actor_tensorrt.py",
     "utils/export_actor_tensorrt.py",
     "utils/actor_model.py",
 ], "Compile check")
@@ -427,7 +432,7 @@ def set_cmd_arg(cmd, key, value):
 REQUESTED_EPOCHS = parse_launcher_args(sys.argv)
 TS = datetime.now().strftime("%Y%m%d_%H%M%S")
 RUN_EPOCHS = REQUESTED_EPOCHS or 10
-RUN_NAME = f"actor_object_relation_pair_memory_guarded_{RUN_EPOCHS}ep_{TS}"
+RUN_NAME = f"actor_object_relation_noconf_dropout_aug_{RUN_EPOCHS}ep_{TS}"
 EPOCH_DIR = str(Path(DATA_DIR) / "checkpoints" / RUN_NAME / "epoch_checkpoints")
 
 cmd = [
@@ -470,7 +475,7 @@ cmd = [
     "--actor_object_prompt_tokens", "1",
     "--actor_object_relation_in_transformer", "1",
     "--actor_object_relation_blocks", "2,5,8",
-    "--actor_object_relation_null_logit_init", "3.5",
+    "--actor_object_relation_null_logit_init", "3.0",
     "--actor_object_relation_geometry_bias_weight", "1.0",
     "--actor_object_relation_heatmap_bias_weight", "2.0",
     "--actor_object_relation_max_scale", "1.5",
@@ -489,7 +494,7 @@ cmd = [
     "--object_detector_cache", OBJECT_DETECTOR_CACHE,
     "--object_camera_allowlist", "tv_monitor=c05,c06",
     "--object_ignore_regions", "c03=0,0,0.26,0.42",
-    "--object_conf_threshold", "0.25",
+    "--object_conf_threshold", "0.20",
 
     "--interaction_heatmap_sigma", "2.5",
 
@@ -515,6 +520,14 @@ cmd = [
 
     "--actor_object_relation_loss_weight", "1.00",
     "--actor_object_relation_null_loss_weight", "0.75",
+    "--actor_object_detector_dropout_prob", "1.0",
+    "--actor_object_detector_dropout_action_loss_weight", "0.40",
+    "--actor_object_detector_dropout_relation_loss_weight", "0.20",
+    "--actor_object_detector_dropout_eval", "1",
+    "--actor_object_proposal_aug_prob", "0.70",
+    "--actor_object_proposal_box_jitter", "0.08",
+    "--actor_object_proposal_scale_jitter", "0.15",
+    "--actor_object_proposal_distractor_drop_prob", "0.08",
     "--batch_size", "32",
     "--accum_grad_batches", "2",
 
@@ -559,6 +572,7 @@ print("\nSINGLE ACTOR-OBJECT RELATION TRAINING RUN", flush=True)
 print(f"epochs: {RUN_EPOCHS}", flush=True)
 print(
     "actor-object relation: one CE over NULL plus detected object slots, "
+    "no detector-confidence model input, detector-miss auxiliary action training, "
     "relation-only object memory, and PO-GUISE+ heatmap auxiliary supervision",
     flush=True,
 )

@@ -83,7 +83,6 @@ class ActorExport(torch.nn.Module):
         valid,
         object_boxes=None,
         object_classes=None,
-        object_confs=None,
         object_valid=None,
     ):
         kwargs = {"boxes": boxes, "valid": valid}
@@ -92,7 +91,6 @@ class ActorExport(torch.nn.Module):
                 {
                     "object_boxes": object_boxes,
                     "object_classes": object_classes.to(dtype=torch.long),
-                    "object_confs": object_confs,
                     "object_valid": object_valid,
                 }
             )
@@ -263,7 +261,6 @@ def main():
         object_inputs = {
             "object_boxes": inputs["object_boxes"],
             "object_classes": inputs["object_classes"],
-            "object_confs": inputs["object_confs"],
             "object_valid": inputs["object_valid"],
         }
     trt_logits, trt_presence = engine(

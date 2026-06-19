@@ -72,7 +72,6 @@ class TensorRTActorEngine:
         object_inputs = {
             "object_boxes",
             "object_classes",
-            "object_confs",
             "object_valid",
         }
         input_set = set(self.input_names)
@@ -167,20 +166,17 @@ class TensorRTActorEngine:
         if self.uses_object_proposals:
             object_boxes_shape = self.shapes["object_boxes"]
             object_classes_shape = self.shapes["object_classes"]
-            object_confs_shape = self.shapes["object_confs"]
             object_valid_shape = self.shapes["object_valid"]
             if object_boxes_shape[0] != self.batch_size or object_boxes_shape[-1] != 4:
                 raise RuntimeError(f"Unsupported object_boxes shape: {object_boxes_shape}")
             if (
                 object_classes_shape != object_boxes_shape[:2]
-                or object_confs_shape != object_boxes_shape[:2]
                 or object_valid_shape != object_boxes_shape[:2]
             ):
                 raise RuntimeError(
                     "Inconsistent object input shapes: "
                     f"object_boxes={object_boxes_shape}, "
                     f"object_classes={object_classes_shape}, "
-                    f"object_confs={object_confs_shape}, "
                     f"object_valid={object_valid_shape}"
                 )
             self.num_scene_object_tokens = object_boxes_shape[1]
@@ -205,13 +201,12 @@ class TensorRTActorEngine:
             if object_inputs is None:
                 raise RuntimeError(
                     "This TensorRT actor engine requires object inputs: "
-                    "object_boxes, object_classes, object_confs, object_valid."
+                    "object_boxes, object_classes, object_valid."
                 )
             missing = sorted(
                 {
                     "object_boxes",
                     "object_classes",
-                    "object_confs",
                     "object_valid",
                 }
                 - set(object_inputs)
@@ -223,7 +218,6 @@ class TensorRTActorEngine:
                 object_inputs["object_classes"],
                 "object_classes",
             )
-            object_confs = self._prepare_input(object_inputs["object_confs"], "object_confs")
             object_valid = self._prepare_input(object_inputs["object_valid"], "object_valid")
         elif object_inputs is not None:
             raise RuntimeError("Object inputs were passed to an actor-only TensorRT engine.")
@@ -250,7 +244,6 @@ class TensorRTActorEngine:
                 {
                     "object_boxes": object_boxes,
                     "object_classes": object_classes,
-                    "object_confs": object_confs,
                     "object_valid": object_valid,
                 }
             )

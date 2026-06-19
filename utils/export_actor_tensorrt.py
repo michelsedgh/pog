@@ -168,11 +168,6 @@ def make_dummy_inputs(
         dtype=torch.int32,
         device=device,
     )
-    object_confs = torch.zeros(
-        (batch_size, max_objects),
-        dtype=torch.float32,
-        device=device,
-    )
     object_valid = torch.zeros(
         (batch_size, max_objects),
         dtype=mask_dtype,
@@ -185,7 +180,6 @@ def make_dummy_inputs(
             device=device,
         )
         object_classes[:, 0] = 1
-        object_confs[:, 0] = 0.95
         object_valid[:, 0] = 1
     return (
         video,
@@ -193,7 +187,6 @@ def make_dummy_inputs(
         valid,
         object_boxes,
         object_classes,
-        object_confs,
         object_valid,
     ), [
         "video",
@@ -201,7 +194,6 @@ def make_dummy_inputs(
         "valid",
         "object_boxes",
         "object_classes",
-        "object_confs",
         "object_valid",
     ]
 
@@ -234,7 +226,6 @@ def export_onnx(model, onnx_out, args, clip_frames, max_actors, max_objects, hpa
             valid,
             object_boxes=None,
             object_classes=None,
-            object_confs=None,
             object_valid=None,
         ):
             kwargs = {
@@ -246,7 +237,6 @@ def export_onnx(model, onnx_out, args, clip_frames, max_actors, max_objects, hpa
                     {
                         "object_boxes": object_boxes,
                         "object_classes": object_classes.to(dtype=torch.long),
-                        "object_confs": object_confs,
                         "object_valid": object_valid,
                     }
                 )
@@ -676,7 +666,6 @@ def main():
             {
                 "object_boxes": [args.batch_size, max_objects, 4],
                 "object_classes": [args.batch_size, max_objects],
-                "object_confs": [args.batch_size, max_objects],
                 "object_valid": [args.batch_size, max_objects],
             }
         )

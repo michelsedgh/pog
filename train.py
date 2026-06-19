@@ -277,6 +277,7 @@ def _validate_no_deprecated_object_path(checkpoint):
         if any(
             needle in key
             for needle in (
+                "object_conf_mlp",
                 "object_interaction",
                 "specialist",
                 "object_action_fusion",
@@ -466,11 +467,6 @@ def build_parser():
         default=0.0,
     )
     parser.add_argument(
-        "--actor_object_proposal_conf_jitter",
-        type=float,
-        default=0.0,
-    )
-    parser.add_argument(
         "--actor_object_proposal_distractor_drop_prob",
         type=float,
         default=0.0,
@@ -524,6 +520,18 @@ def main():
             "actor_object_residual_head was removed. Use "
             "--actor_object_relation_in_transformer 1 for the clean PO-GUISE+ "
             "runtime-object architecture."
+        )
+    if float(getattr(hparams, "actor_object_proposal_conf_jitter", 0.0)) != 0.0:
+        raise ValueError(
+            "actor_object_proposal_conf_jitter was removed. The actor model "
+            "does not receive detector confidence; use box jitter and "
+            "distractor dropping for object-proposal robustness."
+        )
+    if float(getattr(hparams, "object_temporal_conf_power", 0.0)) != 0.0:
+        raise ValueError(
+            "object_temporal_conf_power was removed. Detector confidence is "
+            "used only before the model for filtering/sorting; actor inputs "
+            "are object boxes, classes, and valid masks."
         )
     if getattr(hparams, "actor_object_relation_in_transformer", 0):
         if not hparams.actor_object_prompt_tokens:

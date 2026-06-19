@@ -207,11 +207,12 @@ class HeatmapModule(pl.LightningModule):
         )
         if self.actor_object_proposal_scale_jitter < 0:
             raise ValueError("actor_object_proposal_scale_jitter must be >= 0")
-        self.actor_object_proposal_conf_jitter = float(
-            hparams.get("actor_object_proposal_conf_jitter", 0.0)
-        )
-        if self.actor_object_proposal_conf_jitter < 0:
-            raise ValueError("actor_object_proposal_conf_jitter must be >= 0")
+        if float(hparams.get("actor_object_proposal_conf_jitter", 0.0)) != 0.0:
+            raise ValueError(
+                "actor_object_proposal_conf_jitter was removed. The actor model "
+                "does not receive detector confidence; use box jitter and "
+                "distractor dropping for object-proposal robustness."
+            )
         self.actor_object_proposal_distractor_drop_prob = float(
             hparams.get("actor_object_proposal_distractor_drop_prob", 0.0)
         )
@@ -362,6 +363,19 @@ class HeatmapModule(pl.LightningModule):
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
         result = super().load_state_dict(state_dict, strict=strict, assign=assign)
+        stale_object_conf = [
+            key
+            for key in result.unexpected_keys
+            if "object_conf_mlp" in key
+        ]
+        if stale_object_conf:
+            preview = ", ".join(stale_object_conf[:12])
+            raise RuntimeError(
+                "Checkpoint contains removed object-confidence weights. "
+                "The actor-object model now receives only object boxes, classes, "
+                "and valid masks; retrain from a clean base checkpoint. "
+                f"First stale keys: {preview}"
+            )
         if self.actor_prompt and not strict:
             allowed_missing = [
                 "model.net.actor_token",
@@ -371,7 +385,6 @@ class HeatmapModule(pl.LightningModule):
                 "model.net.object_slot_embed",
                 "model.net.object_class_embed",
                 "model.net.object_box_mlp",
-                "model.net.object_conf_mlp",
                 "model.net.object_valid_embed",
                 "model.net.actor_object_relation_updates",
                 "model.net.actor_object_final_relation_update",
@@ -417,7 +430,6 @@ class HeatmapModule(pl.LightningModule):
         action_labels=None,
         object_boxes=None,
         object_classes=None,
-        object_confs=None,
         object_valid=None,
     ):
         # Forward function that is run when visualizing the graph
@@ -428,7 +440,6 @@ class HeatmapModule(pl.LightningModule):
             action_labels=action_labels,
             object_boxes=object_boxes,
             object_classes=object_classes,
-            object_confs=object_confs,
             object_valid=object_valid,
         )
 
@@ -442,7 +453,6 @@ class HeatmapModule(pl.LightningModule):
                 "object_slot_embed",
                 "object_class_embed",
                 "object_box_mlp",
-                "object_conf_mlp",
                 "object_valid_embed",
                 "actor_object_relation_updates",
                 "actor_object_final_relation_update",
@@ -966,12 +976,6 @@ class HeatmapModule(pl.LightningModule):
                 device=device,
                 dtype=torch.long,
             ),
-            "object_confs": torch.zeros(
-                batch_size,
-                n_objects,
-                device=device,
-                dtype=dtype,
-            ),
             "object_valid": torch.zeros(
                 batch_size,
                 n_objects,
@@ -986,7 +990,6 @@ class HeatmapModule(pl.LightningModule):
         required = (
             "object_boxes",
             "object_classes",
-            "object_confs",
             "object_valid",
         )
         missing = [key for key in required if key not in target]
@@ -1003,10 +1006,6 @@ class HeatmapModule(pl.LightningModule):
             "object_classes": target["object_classes"].to(
                 device=device,
                 dtype=torch.long,
-            ),
-            "object_confs": target["object_confs"].to(
-                device=device,
-                dtype=torch.float32,
             ),
             "object_valid": target["object_valid"].to(
                 device=device,
@@ -1080,13 +1079,10 @@ class HeatmapModule(pl.LightningModule):
             return None
 
         masked_object_valid = object_valid & ~dropped_object_mask
-        masked_object_confs = object_inputs["object_confs"].clone()
-        masked_object_confs = masked_object_confs.masked_fill(dropped_object_mask, 0.0)
 
         masked_object_inputs = {
             "object_boxes": object_inputs["object_boxes"],
             "object_classes": object_classes,
-            "object_confs": masked_object_confs,
             "object_valid": masked_object_valid,
         }
         masked_target = dict(target)
@@ -1099,7 +1095,6 @@ class HeatmapModule(pl.LightningModule):
             if key in target:
                 masked_target[key] = target[key].to(device=device)
         masked_target["object_valid"] = masked_object_valid
-        masked_target["object_confs"] = masked_object_confs
 
         return {
             "object_inputs": masked_object_inputs,
@@ -1153,7 +1148,6 @@ class HeatmapModule(pl.LightningModule):
 
         boxes = object_inputs["object_boxes"].clone()
         original_boxes = boxes.clone()
-        confs = object_inputs["object_confs"].clone()
         if self.actor_object_proposal_box_jitter > 0.0:
             center = (boxes[..., :2] + boxes[..., 2:]) * 0.5
             size = (boxes[..., 2:] - boxes[..., :2]).clamp_min(1.0e-4)
@@ -1185,13 +1179,6 @@ class HeatmapModule(pl.LightningModule):
                 original_boxes,
             )
 
-        if self.actor_object_proposal_conf_jitter > 0.0:
-            conf_noise = (
-                torch.rand_like(confs) * 2.0 - 1.0
-            ) * self.actor_object_proposal_conf_jitter
-            confs = torch.where(aug_mask, confs * (1.0 + conf_noise), confs)
-            confs = confs.clamp(0.0, 1.0)
-
         output_valid = object_valid.clone()
         if self.actor_object_proposal_distractor_drop_prob > 0.0:
             teacher_mask = self._teacher_object_slot_mask(
@@ -1205,7 +1192,6 @@ class HeatmapModule(pl.LightningModule):
                 < self.actor_object_proposal_distractor_drop_prob
             )
             output_valid = output_valid & ~drop_mask
-            confs = confs.masked_fill(drop_mask, 0.0)
         else:
             drop_mask = torch.zeros_like(object_valid, dtype=torch.bool)
 
@@ -1224,7 +1210,6 @@ class HeatmapModule(pl.LightningModule):
         return {
             "object_boxes": boxes,
             "object_classes": object_inputs["object_classes"],
-            "object_confs": confs,
             "object_valid": output_valid,
         }
 
@@ -3293,7 +3278,6 @@ class HeatmapModule(pl.LightningModule):
         object_valid = source["object_valid"]
         object_boxes = source["object_boxes"]
         object_classes = source["object_classes"]
-        object_confs = source["object_confs"]
         num_objects = int(object_valid.shape[1])
         if object_capacity <= 0 or num_objects <= 0:
             return
@@ -3339,10 +3323,6 @@ class HeatmapModule(pl.LightningModule):
                 )
             )
             pair_target["object_classes"][pair_idx, new_idx] = object_classes[
-                source_idx,
-                old_idx,
-            ]
-            pair_target["object_confs"][pair_idx, new_idx] = object_confs[
                 source_idx,
                 old_idx,
             ]
@@ -3532,7 +3512,6 @@ class HeatmapModule(pl.LightningModule):
             required = (
                 "object_boxes",
                 "object_classes",
-                "object_confs",
                 "object_valid",
                 "interaction_object_index",
                 "interaction_object_index_valid",
@@ -3561,12 +3540,6 @@ class HeatmapModule(pl.LightningModule):
                 none_id,
                 device=imgs.device,
                 dtype=torch.long,
-            )
-            pair_target["object_confs"] = torch.zeros(
-                pair_count,
-                num_objects,
-                device=imgs.device,
-                dtype=torch.float32,
             )
             pair_target["object_valid"] = torch.zeros(
                 pair_count,

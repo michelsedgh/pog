@@ -126,7 +126,6 @@ class ActorStageExport(torch.nn.Module):
         valid,
         object_boxes,
         object_classes,
-        object_confs,
         object_valid,
     ):
         net = self.net
@@ -254,7 +253,6 @@ class ActorStageExport(torch.nn.Module):
         valid,
         object_boxes=None,
         object_classes=None,
-        object_confs=None,
         object_valid=None,
     ):
         video = video.permute(0, 2, 1, 3, 4)
@@ -264,7 +262,6 @@ class ActorStageExport(torch.nn.Module):
             valid,
             object_boxes,
             object_classes,
-            object_confs,
             object_valid,
         )
         if self.stage_name in {"patch", "prefix"}:

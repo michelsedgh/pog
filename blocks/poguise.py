@@ -966,7 +966,6 @@ class ActorObjectRelationUpdate(nn.Module):
         object_tokens,
         actor_valid,
         object_valid,
-        object_confs,
         relation_bias=None,
     ):
         B, A, _ = actor_tokens.shape
@@ -985,9 +984,6 @@ class ActorObjectRelationUpdate(nn.Module):
                 f"{tuple(actor_tokens.shape[:2])}, got {tuple(actor_valid.shape)}"
             )
         object_valid = object_valid.to(device=obj_scores.device, dtype=torch.bool)
-        object_confs = object_confs.to(device=obj_scores.device, dtype=obj_scores.dtype)
-        conf_bias = torch.log(object_confs.clamp_min(1.0e-4))[:, None, :]
-        obj_scores = obj_scores + conf_bias
 
         if relation_bias is not None:
             relation_bias = relation_bias.to(
@@ -1490,19 +1486,12 @@ class VisionTransformer(nn.Module):
                 nn.GELU(),
                 nn.Linear(self.num_features, self.num_features),
             )
-            self.object_conf_mlp = nn.Sequential(
-                nn.Linear(1, self.num_features),
-                nn.GELU(),
-                nn.Linear(self.num_features, self.num_features),
-            )
             self.object_valid_embed = nn.Embedding(2, self.num_features)
             trunc_normal_(self.object_class_embed.weight, std=0.02)
             nn.init.zeros_(self.object_slot_embed)
             nn.init.zeros_(self.object_valid_embed.weight)
             trunc_normal_(self.object_box_mlp[-1].weight, std=0.01)
             nn.init.zeros_(self.object_box_mlp[-1].bias)
-            trunc_normal_(self.object_conf_mlp[-1].weight, std=0.01)
-            nn.init.zeros_(self.object_conf_mlp[-1].bias)
         if self.n_heatmap_out_channels > 0:
             self.heatmap_tokens = nn.Parameter(
                 torch.randn(1, self.HW_OUT_CONV[0] * self.HW_OUT_CONV[1], embed_dim)
@@ -1830,7 +1819,6 @@ class VisionTransformer(nn.Module):
         valid=None,
         object_boxes=None,
         object_classes=None,
-        object_confs=None,
         object_valid=None,
     ):
         # x_list, images_whwh = self.preprocess_image(x_list)
@@ -1903,9 +1891,9 @@ class VisionTransformer(nn.Module):
                     "object_boxes and object_classes are required when "
                     "actor_object_prompt_tokens is enabled"
                 )
-            if object_confs is None or object_valid is None:
+            if object_valid is None:
                 raise ValueError(
-                    "object_confs and object_valid are required when "
+                    "object_valid is required when "
                     "actor_object_prompt_tokens is enabled"
                 )
             if object_boxes.ndim != 3 or object_boxes.shape[1:] != (
@@ -1926,11 +1914,6 @@ class VisionTransformer(nn.Module):
                     "object_classes must have shape "
                     f"{tuple(object_boxes.shape[:2])}, got {tuple(object_classes.shape)}"
                 )
-            if object_confs.shape != object_boxes.shape[:2]:
-                raise ValueError(
-                    "object_confs must have shape "
-                    f"{tuple(object_boxes.shape[:2])}, got {tuple(object_confs.shape)}"
-                )
             if object_valid.shape != object_boxes.shape[:2]:
                 raise ValueError(
                     "object_valid must have shape "
@@ -1938,7 +1921,6 @@ class VisionTransformer(nn.Module):
                 )
             object_boxes = object_boxes.to(device=x.device, dtype=x.dtype).clamp(0.0, 1.0)
             object_classes = object_classes.to(device=x.device, dtype=torch.long)
-            object_confs = object_confs.to(device=x.device, dtype=x.dtype).clamp(0.0, 1.0)
             object_valid = object_valid.to(device=x.device, dtype=torch.bool)
             none_id = self.num_object_classes
             object_classes = torch.where(
@@ -1950,7 +1932,6 @@ class VisionTransformer(nn.Module):
                 self.object_slot_embed.expand(B, -1, -1)
                 + self.object_class_embed(object_classes).to(dtype=x.dtype)
                 + self.object_box_mlp(object_boxes)
-                + self.object_conf_mlp(object_confs.unsqueeze(-1))
                 + self.object_valid_embed(object_valid.long()).to(dtype=x.dtype)
             )
             object_memory_tokens = object_tokens
@@ -2022,7 +2003,6 @@ class VisionTransformer(nn.Module):
                     object_tokens,
                     valid,
                     object_valid,
-                    object_confs,
                     relation_bias=relation_bias,
                 )
                 x = torch.cat(
@@ -2106,7 +2086,6 @@ class VisionTransformer(nn.Module):
                 x_object,
                 valid,
                 object_valid,
-                object_confs,
                 relation_bias=relation_bias,
             )
             relation_aux["relation_bias"] = (

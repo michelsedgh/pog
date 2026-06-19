@@ -27,7 +27,6 @@ MODEL_INPUT_SIZE = 224
 MODEL_SHORT_SIDE = 256
 DETECTION_EVERY_FRAME = 1
 MIN_OBJECT_TRACK_SAMPLE_COUNT = 1
-OBJECT_TEMPORAL_CONF_POWER = 0.0
 DEFAULT_PERSON_CONTAINMENT_THRESHOLD = 0.80
 
 
@@ -519,7 +518,10 @@ def detections_to_people_and_objects(
             )
     object_records.sort(key=lambda item: item[0], reverse=True)
     if object_records:
-        object_conf = np.asarray([item[0] for item in object_records], dtype=np.float32)
+        object_det_conf = np.asarray(
+            [item[0] for item in object_records],
+            dtype=np.float32,
+        )
         object_xyxy = np.stack([item[1] for item in object_records], axis=0).astype(
             np.float32
         )
@@ -528,7 +530,7 @@ def detections_to_people_and_objects(
     else:
         object_xyxy = np.zeros((0, 4), dtype=np.float32)
         object_class_ids = np.zeros((0,), dtype=np.int64)
-        object_conf = np.zeros((0,), dtype=np.float32)
+        object_det_conf = np.zeros((0,), dtype=np.float32)
         object_labels = []
 
     return (
@@ -536,7 +538,7 @@ def detections_to_people_and_objects(
         people_conf,
         object_xyxy,
         object_class_ids,
-        object_conf,
+        object_det_conf,
         object_labels,
     )
 
@@ -580,7 +582,6 @@ def pack_temporal_object_tokens(
     device,
     track_iou_threshold=0.2,
     min_sample_count=MIN_OBJECT_TRACK_SAMPLE_COUNT,
-    temporal_conf_power=OBJECT_TEMPORAL_CONF_POWER,
 ):
     entries = []
     for sample_pos, record in enumerate(detection_records):
@@ -647,7 +648,6 @@ def pack_temporal_object_tokens(
         dtype=torch.long,
         device=device,
     )
-    confs = torch.zeros((1, max_objects), dtype=torch.float32, device=device)
     valid = torch.zeros((1, max_objects), dtype=torch.bool, device=device)
     packed = []
     min_sample_count = max(int(min_sample_count), 1)
@@ -666,25 +666,19 @@ def pack_temporal_object_tokens(
             continue
         track_confs = [float(item["conf"]) for item in track["entries"]]
         coverage = len(track["sample_positions"]) / float(max(len(detection_records), 1))
-        temporal_weight = (
-            float(coverage) ** float(temporal_conf_power)
-            if float(temporal_conf_power) > 0.0
-            else 1.0
-        )
+        max_conf = max(track_confs) if track_confs else 0.0
+        mean_conf = float(np.mean(track_confs)) if track_confs else 0.0
         boxes[0, slot] = torch.from_numpy(box).to(device=device)
         classes[0, slot] = int(track["class_id"])
-        mean_conf = float(np.mean(track_confs)) if track_confs else 0.0
-        confs[0, slot] = mean_conf * temporal_weight
         valid[0, slot] = True
         packed.append(
             {
                 "slot": int(slot),
                 "label": str(track["label"]),
                 "object_class_id": int(track["class_id"]),
-                "conf": float(confs[0, slot].detach().cpu().item()),
-                "mean_conf": float(mean_conf),
+                "detector_max_conf": float(max_conf),
+                "detector_mean_conf": float(mean_conf),
                 "temporal_coverage": float(coverage),
-                "temporal_conf_weight": float(temporal_weight),
                 "box_norm": box.astype(float).tolist(),
                 "sample_count": int(len(track["sample_positions"])),
             }
@@ -694,7 +688,6 @@ def pack_temporal_object_tokens(
         {
             "object_boxes": boxes,
             "object_classes": classes,
-            "object_confs": confs,
             "object_valid": valid,
         },
         packed,
@@ -793,7 +786,7 @@ def actor_relation_debug_payload(actor, slot, packed_objects, object_inputs):
                     "valid": bool(object_slot in valid_slots),
                     "label": item.get("label"),
                     "object_class_id": item.get("object_class_id"),
-                    "conf": item.get("conf"),
+                    "detector_max_conf": item.get("detector_max_conf"),
                     "attention": float(attn_row[object_slot].item()),
                     "attention_norm": float(norm_row[object_slot].item()),
                     "relation_bias": _debug_tensor_item(
@@ -993,12 +986,11 @@ class TorchActorBackend:
             if object_inputs is None:
                 raise RuntimeError(
                     "This checkpoint requires object proposal inputs: "
-                    "object_boxes, object_classes, object_confs, and object_valid."
+                    "object_boxes, object_classes, and object_valid."
                 )
             expected_keys = {
                 "object_boxes",
                 "object_classes",
-                "object_confs",
                 "object_valid",
             }
             missing = sorted(expected_keys - set(object_inputs))
@@ -1013,10 +1005,6 @@ class TorchActorBackend:
                     "object_classes": object_inputs["object_classes"].to(
                         device=self.device,
                         dtype=torch.long,
-                    ),
-                    "object_confs": object_inputs["object_confs"].to(
-                        device=self.device,
-                        dtype=self.dtype,
                     ),
                     "object_valid": object_inputs["object_valid"].to(
                         device=self.device,
@@ -1150,7 +1138,7 @@ def run_actor_smoke(args, actor):
             "span_frames": TRAINING_SPAN_FRAMES,
             "sampling": "linspace",
             "min_object_track_sample_count": MIN_OBJECT_TRACK_SAMPLE_COUNT,
-            "object_temporal_conf_power": OBJECT_TEMPORAL_CONF_POWER,
+            "object_model_inputs": "boxes_classes_valid",
             "valid_slots": int(valid.sum().item()),
             "top_action": ACTION_CLASSES[int(probs.argmax().item())],
             "top_prob": float(probs.max().item()),
@@ -1369,7 +1357,7 @@ class LiveRunner:
         self.last_det_conf = np.zeros((0,), dtype=np.float32)
         self.last_object_boxes_xyxy = np.zeros((0, 4), dtype=np.float32)
         self.last_object_class_ids = np.zeros((0,), dtype=np.int64)
-        self.last_object_conf = np.zeros((0,), dtype=np.float32)
+        self.last_object_det_conf = np.zeros((0,), dtype=np.float32)
         self.last_object_labels = []
         self.last_detection_frame = None
         self.last_detector_ms = None
@@ -1495,7 +1483,7 @@ class LiveRunner:
                     self.last_det_conf,
                     self.last_object_boxes_xyxy,
                     self.last_object_class_ids,
-                    self.last_object_conf,
+                    self.last_object_det_conf,
                     self.last_object_labels,
                 ) = detections_to_people_and_objects(
                     self.detector,
@@ -1516,7 +1504,7 @@ class LiveRunner:
                     "time": float(camera_frames[-1]["time"]),
                     "boxes_xyxy": self.last_object_boxes_xyxy.copy(),
                     "class_ids": self.last_object_class_ids.copy(),
-                    "confs": self.last_object_conf.copy(),
+                    "confs": self.last_object_det_conf.copy(),
                     "labels": list(self.last_object_labels),
                 }
                 people_record = {
@@ -1593,7 +1581,7 @@ class LiveRunner:
                         self.last_object_boxes_xyxy,
                         self.last_object_labels,
                         self.last_object_class_ids,
-                        self.last_object_conf,
+                        self.last_object_det_conf,
                     )
                 ]
 
@@ -1751,7 +1739,7 @@ class LiveRunner:
                                 f"person_contain={float(self.args.person_containment_threshold):.2f} "
                                 f"max_live_actors={int(self.max_live_actors)} "
                                 f"min_obj_samples={MIN_OBJECT_TRACK_SAMPLE_COUNT} "
-                                f"obj_conf_power={OBJECT_TEMPORAL_CONF_POWER:.2f} "
+                                f"obj_inputs=boxes_classes_valid "
                                 f"live_objects={int(self.args.live_object_tokens)} "
                                 f"obj_hist={int(object_history_ready)} "
                                 f"people_hist={int(people_history_ready)} "
@@ -1791,7 +1779,15 @@ class LiveRunner:
                                 "slot": int(item.get("slot", index)),
                                 "label": item.get("label"),
                                 "object_class_id": int(item.get("object_class_id", -1)),
-                                "conf": float(item.get("conf", 0.0)),
+                                "detector_max_conf": float(
+                                    item.get("detector_max_conf", 0.0)
+                                ),
+                                "detector_mean_conf": float(
+                                    item.get("detector_mean_conf", 0.0)
+                                ),
+                                "temporal_coverage": float(
+                                    item.get("temporal_coverage", 0.0)
+                                ),
                                 "sample_count": int(item.get("sample_count", 0)),
                                 "box_norm": item.get("box_norm"),
                             }
