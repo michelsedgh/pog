@@ -73,7 +73,7 @@ class ToyotaSMDataset(Dataset):
             raise ValueError(
                 "interaction_object_classes was removed. Actor-object heatmaps "
                 "are now one interacted-object channel per actor; object class "
-                "semantics come from runtime object prompt tokens."
+                "semantics come from relation-only runtime object memory."
             )
         self.task_type = kwargs["task_type"]
         self.action_taxonomy = normalize_toyota_action_taxonomy(
@@ -111,7 +111,7 @@ class ToyotaSMDataset(Dataset):
         if bool(kwargs.get("scene_object_tokens", 0)):
             raise ValueError(
                 "scene_object_tokens was removed. Use actor_object_prompt_tokens=1 "
-                "for runtime object prompts."
+                "for relation-only runtime object memory."
             )
         self.actor_object_prompt_tokens = bool(
             kwargs.get("actor_object_prompt_tokens", 0)

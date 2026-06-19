@@ -6,7 +6,7 @@ For each actor slot, the model predicts a relation distribution over:
 
 ```text
 0          = NULL, no usable interacted object
-1..K       = detected object prompt slots
+1..K       = detected object memory slots
 ```
 
 The relation target is:
@@ -33,13 +33,17 @@ The active objectives are:
 
 - action CE on the actor action head
 - actor presence BCE when actor prompts are enabled
+- side-by-side actor-pair training when `actor_pair_train_weight > 0`
 - relation CE over NULL plus object slots
 - PO-GUISE+ pose and interaction heatmap losses
 
-The final action still comes from the actor action head. Runtime object prompts
-modify actor tokens inside the transformer and once more immediately before that
-head. There is no late object action residual and no separate object-action
-classifier.
+The final action still comes from one actor action head. Runtime detections are
+encoded as relation-only object memory, not ordinary transformer prefix tokens.
+They modify actor tokens through the actor-object relation update inside the
+transformer and once more immediately before classification. The classifier input
+is then refined by a zero-initialized learned fusion of actor token, selected
+object context, actor/object product, and object mass. There is no late logit
+residual and no separate object-action classifier.
 
 ## Code Evidence
 
@@ -49,12 +53,13 @@ The active relation path is:
   computes relation logits, object attention, object context, and a gated actor
   token update.
 - `blocks/poguise.py::VisionTransformer.forward`
-  applies relation updates at the configured transformer blocks and a final
-  pre-head relation update keyed by the model depth, for example `12` on the
-  base model.
+  keeps runtime detections as relation-only object memory, applies relation
+  updates at the configured transformer blocks, and applies a final pre-head
+  relation update keyed by the model depth, for example `12` on the base model.
 - `models/poguise.py::POGUISE.forward`
-  exposes only `last_actor_object_relation_aux` and the final actor action
-  logits.
+  builds the final actor action input from actor tokens and the last selected
+  relation context, then exposes `last_actor_object_relation_aux` and the final
+  actor action logits.
 - `modules/heatmap_module.py::_actor_object_relation_loss`
   creates the supervised relation target over `NULL + object slots`.
 - `poguise+_+objects.py`
@@ -89,11 +94,52 @@ to make the selected object context part of the actor token that the real action
 head sees, then train the real action head with action CE. Relation CE supplies
 the actor-object assignment; action CE supplies the action label.
 
-This repo now implements the architectural fix directly: the selected object
-context is fused into the actor token that `actor_head` sees. If a future run
-still selects the right object but predicts the wrong action, the next suspect is
-data/domain coverage, detector proposals, or insufficient training, not another
-duplicate classifier for the same supervision.
+This repo now implements the architectural fix directly: runtime object
+detections cannot leak through generic self-attention, the selected object
+context updates actor tokens inside the transformer, and the final action input
+explicitly receives the last selected object context. If a future run still
+selects the right object but predicts the wrong action, the next suspect is
+data/domain coverage, detector proposals, insufficient training, or relation
+capacity, not another duplicate classifier for the same supervision.
+
+Actor-slot learning is trained by composing two real labeled clips side by side
+inside the training step. The composed sample has two valid actor slots, remapped
+actor boxes, remapped object boxes, remapped one-based relation teacher indices,
+and composed pose/interaction heatmaps. The labels remain the original dataset
+action labels for each actor.
+
+With the default object launcher (`batch_size=32`,
+`actor_pair_train_weight=0.50`), a full one-person batch can produce 16
+side-by-side composites in the same training step. That means roughly one third
+of forward video clips are side-by-side composites, half of the actor labels seen
+by the model come from paired clips, and the effective loss pressure from pair
+training is about one third after applying the 0.50 pair-loss weight.
+
+## Learned Relation Strength And Final Fusion
+
+The current relation update already learns per-sample object influence:
+
+```text
+actor_update = object_mass * learned_gate * learned_layer_scale * delta
+```
+
+`object_mass` comes from the NULL/object relation distribution, and
+`learned_gate` is predicted from actor/object context. `learned_layer_scale` is
+a trainable per-relation-block strength initialized small and bounded by
+`max_scale`, which is now a safety cap rather than the primary strength setting.
+
+The final actor classifier consumes the selected object context explicitly:
+
+```text
+final_actor = fuse(actor_token, selected_object_context,
+                   actor_token * selected_object_context, object_mass)
+action_logits = actor_head(final_actor)
+```
+
+This keeps one deploy action head and one action CE target. It removes the weak
+assumption that a residual relation update must store all object identity inside
+the actor token before classification, while still avoiding inference-time logit
+rules or duplicate object-state classifiers.
 
 ## Research Basis
 

@@ -198,6 +198,12 @@ def main():
     actor_object_relation_in_transformer = bool(
         hparams.get("actor_object_relation_in_transformer", 0)
     )
+    actor_object_relation_learned_scale = bool(
+        hparams.get("actor_object_relation_learned_scale", 0)
+    )
+    actor_relation_action_fusion = bool(
+        hparams.get("actor_relation_action_fusion", 0)
+    )
     uses_object_proposals = actor_object_prompt_tokens
     if uses_object_proposals != bool(engine.uses_object_proposals):
         raise RuntimeError(
@@ -211,6 +217,22 @@ def main():
             "Checkpoint/engine actor-object relation mismatch: "
             f"checkpoint={actor_object_relation_in_transformer}, "
             f"engine={engine.actor_object_relation_in_transformer}"
+        )
+    if actor_object_relation_learned_scale != bool(
+        getattr(engine, "actor_object_relation_learned_scale", False)
+    ):
+        raise RuntimeError(
+            "Checkpoint/engine relation learned-scale mismatch: "
+            f"checkpoint={actor_object_relation_learned_scale}, "
+            f"engine={engine.actor_object_relation_learned_scale}"
+        )
+    if actor_relation_action_fusion != bool(
+        getattr(engine, "actor_relation_action_fusion", False)
+    ):
+        raise RuntimeError(
+            "Checkpoint/engine actor relation-action fusion mismatch: "
+            f"checkpoint={actor_relation_action_fusion}, "
+            f"engine={engine.actor_relation_action_fusion}"
         )
     wrapped = ActorExport(model, uses_object_proposals).eval()
 

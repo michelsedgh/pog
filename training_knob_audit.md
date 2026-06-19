@@ -2,9 +2,15 @@
 
 Current objective: one actor-object relation path.
 
-For every actor token, the model learns a single distribution over `NULL` plus
-the detected object prompt slots. That relation update changes the actor token
-inside the transformer, and the normal actor action head predicts the action.
+For every valid actor token, the model learns a single distribution over `NULL`
+plus the detected object slots. Runtime detections are relation-only object
+memory rather than ordinary transformer prefix tokens, so object presence cannot
+bypass the relation update through generic self-attention. The normal actor
+action head predicts the action from the updated actor token.
+
+The default object run now uses two actor tokens because side-by-side actor-slot
+training is active. Slot padding is still masked; the second slot is real in the
+paired training examples and padded in ordinary one-person examples.
 
 ## Active Knobs
 
@@ -15,14 +21,17 @@ Relation:
 --actor_object_relation_in_transformer 1
 --actor_object_relation_blocks 2,5,8
 --actor_object_relation_loss_weight 1.00
---actor_object_relation_null_loss_weight 0.50
---actor_object_relation_null_logit_init 3.0
+--actor_object_relation_null_loss_weight 1.00
+--actor_object_relation_null_logit_init 3.5
 --actor_object_relation_geometry_bias_weight 1.0
 --actor_object_relation_heatmap_bias_weight 2.0
---actor_object_relation_max_scale 2.0
+--actor_object_relation_max_scale 1.5
+--actor_object_relation_learned_scale 1
+--actor_object_relation_layer_scale_init 0.25
+--actor_relation_action_fusion 1
 ```
 
-Object prompts and token selection:
+Object memory and token selection:
 
 ```text
 --num_scene_object_tokens 32
@@ -30,7 +39,7 @@ Object prompts and token selection:
 --object_conf_threshold 0.25
 --token_selection_cls_weight 0.15
 --token_selection_actor_weight 0.25
---token_selection_object_weight 0.30
+--token_selection_object_weight 0.00
 --token_selection_heatmap_weight 0.30
 --actor_object_prompt_box_prior_weight 0.20
 --actor_object_prompt_box_prior_expand 1.50
@@ -50,6 +59,8 @@ PO-GUISE+ heatmaps:
 Regular action training:
 
 ```text
+--num_actor_tokens 2
+--actor_pair_train_weight 0.50
 --class_balanced_sampler 1
 --batch_size 32
 --accum_grad_batches 2
@@ -63,7 +74,14 @@ Regular action training:
 
 Do not add duplicate object-state heads or separate object-action heads. The
 relation path now updates actor tokens before the pruning stages and again right
-before `actor_head`, so action CE trains the real object-conditioned actor token.
+before classification. The final actor classifier also receives a zero-initialized
+learned fusion of actor token, selected object context, actor/object product, and
+object mass, so action CE trains the real object-conditioned action path.
+
+Do not put runtime object detections back into ordinary transformer self-attention.
+Runtime detections should influence action through relation-selected object
+memory and object-box pruning priors, not through global object-presence
+attention shortcuts.
 
 Do not add fake labels based on swapping object names. The dataset label remains
 the action CE target; object supervision is the relation slot target.

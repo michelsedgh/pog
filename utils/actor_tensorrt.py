@@ -85,6 +85,18 @@ class TensorRTActorEngine:
                 self.metadata.get("actor_object_relation_in_transformer", False),
             )
         )
+        self.actor_object_relation_learned_scale = bool(
+            export_hparams.get(
+                "actor_object_relation_learned_scale",
+                self.metadata.get("actor_object_relation_learned_scale", False),
+            )
+        )
+        self.actor_relation_action_fusion = bool(
+            export_hparams.get(
+                "actor_relation_action_fusion",
+                self.metadata.get("actor_relation_action_fusion", False),
+            )
+        )
         if bool(
             export_hparams.get(
                 "actor_object_slot_head",

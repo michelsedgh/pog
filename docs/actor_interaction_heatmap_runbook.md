@@ -9,10 +9,10 @@ object relation update spatial evidence.
 For each actor:
 
 ```text
-actor token + object prompt tokens + interaction heatmap features
+actor token + relation-only object memory + interaction heatmap features
     -> relation logits over NULL plus object slots
     -> object context
-    -> updated actor token before pruning and before the action head
+    -> updated actor token inside the transformer and before the action head
     -> actor_head action logits
 ```
 
@@ -70,6 +70,7 @@ val_interaction_heatmap_center_l2
 ```
 
 Good relation metrics without good action metrics used to mean the selected
-object was not changing the final actor token strongly enough. The current path
-fixes that directly by adding final pre-head relation fusion, not with inference
-overrides.
+object was not changing the final actor token strongly enough, or object tokens
+were leaking through generic self-attention. The current path fixes that by
+keeping detections as relation-only memory and adding final pre-head relation
+fusion, not with inference overrides.

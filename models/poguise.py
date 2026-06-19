@@ -152,6 +152,9 @@ class POGUISE(pl.LightningModule):
         self.actor_object_relation_in_transformer = bool(
             self.hparams.get("actor_object_relation_in_transformer", 0)
         )
+        self.actor_relation_action_fusion_enabled = bool(
+            self.hparams.get("actor_relation_action_fusion", 0)
+        )
         if bool(self.hparams.get("actor_object_slot_head", 0)):
             raise ValueError(
                 "actor_object_slot_head was replaced by "
@@ -161,12 +164,12 @@ class POGUISE(pl.LightningModule):
         if bool(self.hparams.get("scene_object_tokens", 0)):
             raise ValueError(
                 "scene_object_tokens was removed. Use actor_object_prompt_tokens=1 "
-                "for runtime object prompts inside the transformer trunk."
+                "for relation-only runtime object memory."
             )
         if bool(self.hparams.get("actor_object_base_fusion", 0)):
             raise ValueError(
                 "actor_object_base_fusion was removed. Runtime objects now enter "
-                "through prompt tokens, token selection, and optional "
+                "through relation-only memory, token selection priors, and optional "
                 "actor_object_relation_in_transformer."
             )
         if self.actor_object_residual_head_enabled:
@@ -188,6 +191,10 @@ class POGUISE(pl.LightningModule):
             raise ValueError(
                 "actor_object_relation_in_transformer requires actor_object_prompt_tokens"
             )
+        if self.actor_relation_action_fusion_enabled and not self.actor_object_relation_in_transformer:
+            raise ValueError(
+                "actor_relation_action_fusion requires actor_object_relation_in_transformer"
+            )
         if self.actor_interaction_heatmaps and not self.actor_prompt:
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
         if self.actor_object_relation_in_transformer and not self.actor_interaction_heatmaps:
@@ -200,7 +207,7 @@ class POGUISE(pl.LightningModule):
             raise ValueError(
                 "interaction_object_classes was removed. Actor-object heatmaps "
                 "are now one interacted-object channel per actor; object class "
-                "semantics come from runtime object prompt tokens."
+                "semantics come from relation-only runtime object memory."
             )
         self.use_register_tokens = bool(self.hparams.get("use_register_tokens", 0))
         self._create_network()
@@ -270,7 +277,7 @@ class POGUISE(pl.LightningModule):
                 ),
                 token_selection_object_weight=self.hparams.get(
                     "token_selection_object_weight",
-                    0.10,
+                    0.0,
                 ),
                 token_selection_heatmap_weight=self.hparams.get(
                     "token_selection_heatmap_weight",
@@ -304,6 +311,14 @@ class POGUISE(pl.LightningModule):
                 actor_object_relation_heatmap_bias_weight=self.hparams.get(
                     "actor_object_relation_heatmap_bias_weight",
                     1.0,
+                ),
+                actor_object_relation_learned_scale=self.hparams.get(
+                    "actor_object_relation_learned_scale",
+                    0,
+                ),
+                actor_object_relation_layer_scale_init=self.hparams.get(
+                    "actor_object_relation_layer_scale_init",
+                    0.25,
                 ),
                 return_heatmap_features=return_heatmap_features,
                 trt_safe_attention=self.hparams.get("trt_safe_attention", 0),
@@ -364,7 +379,7 @@ class POGUISE(pl.LightningModule):
                 ),
                 token_selection_object_weight=self.hparams.get(
                     "token_selection_object_weight",
-                    0.10,
+                    0.0,
                 ),
                 token_selection_heatmap_weight=self.hparams.get(
                     "token_selection_heatmap_weight",
@@ -399,6 +414,14 @@ class POGUISE(pl.LightningModule):
                     "actor_object_relation_heatmap_bias_weight",
                     1.0,
                 ),
+                actor_object_relation_learned_scale=self.hparams.get(
+                    "actor_object_relation_learned_scale",
+                    0,
+                ),
+                actor_object_relation_layer_scale_init=self.hparams.get(
+                    "actor_object_relation_layer_scale_init",
+                    0.25,
+                ),
                 return_heatmap_features=return_heatmap_features,
                 trt_safe_attention=self.hparams.get("trt_safe_attention", 0),
             )
@@ -429,6 +452,17 @@ class POGUISE(pl.LightningModule):
                 self.net.num_features,
                 self.hparams.num_classes,
             )
+            self.actor_relation_action_fusion = None
+            if self.actor_relation_action_fusion_enabled:
+                fusion_dim = self.net.num_features * 3 + 1
+                self.actor_relation_action_fusion = nn.Sequential(
+                    nn.LayerNorm(fusion_dim),
+                    nn.Linear(fusion_dim, self.net.num_features),
+                    nn.GELU(),
+                    nn.Linear(self.net.num_features, self.net.num_features),
+                )
+                nn.init.zeros_(self.actor_relation_action_fusion[-1].weight)
+                nn.init.zeros_(self.actor_relation_action_fusion[-1].bias)
             self.presence_head = (
                 nn.Linear(self.net.num_features, 1)
                 if self.hparams.get("actor_presence_head", 0)
@@ -463,6 +497,9 @@ class POGUISE(pl.LightningModule):
         if self.actor_prompt:
             if self.actor_head is not None:
                 for param in self.actor_head.parameters():
+                    param.requires_grad = True
+            if self.actor_relation_action_fusion is not None:
+                for param in self.actor_relation_action_fusion.parameters():
                     param.requires_grad = True
             if hasattr(self.net, "actor_token"):
                 self.net.actor_token.requires_grad = True
@@ -599,25 +636,54 @@ class POGUISE(pl.LightningModule):
                         torch.full_like(prompt_classes, none_id),
                     )
                     self.last_actor_object_prompt_classes = prompt_classes
-                self.last_actor_object_prompt_tokens = x_object_prompt
-                self.last_actor_object_prompt_valid = prompt_valid
+                    self.last_actor_object_prompt_tokens = x_object_prompt
+                    self.last_actor_object_prompt_valid = prompt_valid
             relation_context = None
+            relation_mass = None
             if self.last_actor_object_relation_aux:
                 last_block = sorted(
                     self.last_actor_object_relation_aux.keys(),
                     key=lambda value: int(value),
                 )[-1]
-                relation_context = self.last_actor_object_relation_aux[last_block].get(
-                    "object_context"
-                )
+                last_relation_aux = self.last_actor_object_relation_aux[last_block]
+                relation_context = last_relation_aux.get("object_context")
                 if relation_context is not None:
                     relation_context = relation_context.to(
                         device=x_actor.device,
                         dtype=x_actor.dtype,
                     )
                     self.last_actor_object_relation_context = relation_context
-            self.last_actor_action_tokens = x_actor
-            action_scores = self.actor_head(x_actor)
+                useful_mass = last_relation_aux.get("useful_mass")
+                if useful_mass is not None:
+                    relation_mass = useful_mass.to(
+                        device=x_actor.device,
+                        dtype=x_actor.dtype,
+                    ).unsqueeze(-1)
+            x_action = x_actor
+            if self.actor_relation_action_fusion is not None:
+                if relation_context is None:
+                    relation_context = torch.zeros_like(x_actor)
+                if relation_mass is None:
+                    relation_mass = x_actor.new_zeros(*x_actor.shape[:2], 1)
+                if valid is not None:
+                    valid_mask = valid.to(
+                        device=x_actor.device,
+                        dtype=x_actor.dtype,
+                    ).unsqueeze(-1)
+                    relation_context = relation_context * valid_mask
+                    relation_mass = relation_mass * valid_mask
+                fusion_in = torch.cat(
+                    [
+                        x_actor,
+                        relation_context,
+                        x_actor * relation_context,
+                        relation_mass,
+                    ],
+                    dim=-1,
+                )
+                x_action = x_actor + self.actor_relation_action_fusion(fusion_in)
+            self.last_actor_action_tokens = x_action
+            action_scores = self.actor_head(x_action)
             self.last_actor_action_logits = action_scores
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
@@ -679,6 +745,7 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--actor_bbox_prior_expand", type=float, default=1.75)
         parser.add_argument("--actor_presence_head", type=int, default=0)
         parser.add_argument("--presence_loss_weight", type=float, default=0.05)
+        parser.add_argument("--actor_pair_train_weight", type=float, default=0.0)
         parser.add_argument("--actor_val_diagnostics", type=int, default=1)
         parser.add_argument("--actor_val_diagnostic_max_pairs", type=int, default=8)
         parser.add_argument("--actor_interaction_heatmaps", type=int, default=0)
@@ -698,13 +765,20 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--token_selection_cls_weight", type=float, default=0.25)
         parser.add_argument("--token_selection_actor_weight", type=float, default=0.25)
         parser.add_argument("--token_selection_register_weight", type=float, default=0.0)
-        parser.add_argument("--token_selection_object_weight", type=float, default=0.10)
+        parser.add_argument("--token_selection_object_weight", type=float, default=0.0)
         parser.add_argument("--token_selection_heatmap_weight", type=float, default=0.35)
         parser.add_argument("--actor_object_relation_in_transformer", type=int, default=0)
         parser.add_argument("--actor_object_relation_blocks", type=str, default="2,5,8")
         parser.add_argument("--actor_object_relation_dim", type=int, default=256)
         parser.add_argument("--actor_object_relation_hidden_dim", type=int, default=512)
         parser.add_argument("--actor_object_relation_max_scale", type=float, default=1.0)
+        parser.add_argument("--actor_object_relation_learned_scale", type=int, default=0)
+        parser.add_argument(
+            "--actor_object_relation_layer_scale_init",
+            type=float,
+            default=0.25,
+        )
+        parser.add_argument("--actor_relation_action_fusion", type=int, default=0)
         parser.add_argument(
             "--actor_object_relation_null_logit_init",
             type=float,

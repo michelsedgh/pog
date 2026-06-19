@@ -66,7 +66,7 @@ class HeatmapModule(pl.LightningModule):
         if bool(hparams.get("scene_object_tokens", 0)):
             raise ValueError(
                 "scene_object_tokens was removed. Use actor_object_prompt_tokens=1 "
-                "for runtime object prompts."
+                "for relation-only runtime object memory."
             )
         self.actor_object_residual_head = bool(
             hparams.get("actor_object_residual_head", 0)
@@ -161,6 +161,16 @@ class HeatmapModule(pl.LightningModule):
         )
         if self.actor_object_relation_null_loss_weight < 0:
             raise ValueError("actor_object_relation_null_loss_weight must be >= 0")
+        self.actor_pair_train_weight = float(hparams.get("actor_pair_train_weight", 0.0))
+        if self.actor_pair_train_weight < 0:
+            raise ValueError("actor_pair_train_weight must be >= 0")
+        if (
+            self.actor_pair_train_weight > 0
+            and int(hparams.get("num_actor_tokens", 8)) < 2
+        ):
+            raise ValueError(
+                "actor_pair_train_weight requires num_actor_tokens >= 2"
+            )
         self.num_classes = hparams.num_classes
         self.dataset_name = hparams.dataset_artifact
         self.is_toyota = str(self.dataset_name).lower() == "toyotasm"
@@ -302,6 +312,7 @@ class HeatmapModule(pl.LightningModule):
                 "model.net.relation_heatmap_norm",
                 "model.net.relation_heatmap_proj",
                 "model.actor_head",
+                "model.actor_relation_action_fusion",
                 "model.presence_head",
             ]
             if self.model.hparams.get("use_register_tokens", 0):
@@ -392,6 +403,8 @@ class HeatmapModule(pl.LightningModule):
         params = []
         if getattr(self.model, "actor_head", None) is not None:
             params += list(self.model.actor_head.parameters())
+        if getattr(self.model, "actor_relation_action_fusion", None) is not None:
+            params += list(self.model.actor_relation_action_fusion.parameters())
         if self.model.presence_head is not None:
             params += list(self.model.presence_head.parameters())
         for name, param in self.model.net.named_parameters():
@@ -1038,7 +1051,7 @@ class HeatmapModule(pl.LightningModule):
         }
 
     def _log_token_selection_diagnostics(self, stage, actions, valid, target):
-        if stage == "train":
+        if stage.startswith("train"):
             return
         net = getattr(self.model, "net", None)
         diagnostics = getattr(net, "last_token_selection_diagnostics", None)
@@ -1285,6 +1298,7 @@ class HeatmapModule(pl.LightningModule):
             )
 
     def _actor_object_relation_loss(self, stage, actions, valid, target):
+        is_train = stage.startswith("train")
         if (
             not self.actor_object_relation_in_transformer
             or self.actor_object_relation_loss_weight <= 0
@@ -1350,7 +1364,7 @@ class HeatmapModule(pl.LightningModule):
             self.log(
                 f"{stage}_loss_actor_object_relation_block_{block_name}",
                 block_loss,
-                on_step=stage == "train",
+                on_step=is_train,
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
@@ -1365,7 +1379,7 @@ class HeatmapModule(pl.LightningModule):
         self.log(
             f"{stage}_loss_actor_object_relation",
             loss,
-            on_step=stage == "train",
+            on_step=is_train,
             on_epoch=True,
             prog_bar=False,
             logger=True,
@@ -1665,6 +1679,7 @@ class HeatmapModule(pl.LightningModule):
             loss.backward()
 
     def _actor_step(self, imgs, target, loss_fn, stage):
+        is_train = stage.startswith("train")
         actions = target["actions"].long()
         boxes = target["boxes"].float()
         valid = target["valid"].bool()
@@ -1687,7 +1702,7 @@ class HeatmapModule(pl.LightningModule):
         self.log(
             f"{stage}_loss_action",
             loss_action,
-            on_step=stage == "train",
+            on_step=is_train,
             on_epoch=True,
             prog_bar=False,
             logger=True,
@@ -1705,7 +1720,7 @@ class HeatmapModule(pl.LightningModule):
             self.log(
                 f"{stage}_loss_presence",
                 loss_presence,
-                on_step=stage == "train",
+                on_step=is_train,
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
@@ -1730,7 +1745,7 @@ class HeatmapModule(pl.LightningModule):
             labels_kp = target["heatmap"]
             kp_vis = target["kp_vis"]
             pose_hm_preds = self._pose_heatmap_pred(hm_preds)
-            if stage == "train" and self.model.hparams.target_kp_loss_weight:
+            if is_train and self.model.hparams.target_kp_loss_weight:
                 target_weights = self.target_weights.expand(labels_kp.shape[0], -1).to(
                     labels_kp.device
                 )
@@ -1763,7 +1778,7 @@ class HeatmapModule(pl.LightningModule):
                 self.log(
                     f"{stage}_loss_pose_heatmap_mse_scaled",
                     loss_pose_heatmap_optimized,
-                    on_step=stage == "train",
+                    on_step=is_train,
                     on_epoch=True,
                     prog_bar=False,
                     logger=True,
@@ -1774,7 +1789,7 @@ class HeatmapModule(pl.LightningModule):
             self.log(
                 f"{stage}_loss_pose_heatmap_frobenius",
                 loss_pose_frobenius,
-                on_step=stage == "train",
+                on_step=is_train,
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
@@ -1783,7 +1798,7 @@ class HeatmapModule(pl.LightningModule):
 
             if (
                 not self.actor_poguiseplus_loss
-                and stage == "train"
+                and is_train
                 and self.model.hparams.log_kp_loss_weight
             ):
                 loss_kp = torch.log(loss_kp + 1e-6)
@@ -1907,7 +1922,7 @@ class HeatmapModule(pl.LightningModule):
                     self.log(
                         f"{stage}_loss_interaction_heatmap_mse_scaled",
                         loss_interaction_heatmap_optimized,
-                        on_step=stage == "train",
+                        on_step=is_train,
                         on_epoch=True,
                         prog_bar=False,
                         logger=True,
@@ -1931,7 +1946,7 @@ class HeatmapModule(pl.LightningModule):
                     self.log(
                         f"{stage}_loss_interaction_heatmap_pos_balanced",
                         loss_interaction_pos_balanced,
-                        on_step=stage == "train",
+                        on_step=is_train,
                         on_epoch=True,
                         prog_bar=False,
                         logger=True,
@@ -1951,7 +1966,7 @@ class HeatmapModule(pl.LightningModule):
                     self.log(
                         f"{stage}_loss_interaction_heatmap_center",
                         loss_interaction_center,
-                        on_step=stage == "train",
+                        on_step=is_train,
                         on_epoch=True,
                         prog_bar=False,
                         logger=True,
@@ -1960,7 +1975,7 @@ class HeatmapModule(pl.LightningModule):
                 self.log(
                     f"{stage}_loss_interaction_heatmap",
                     loss_interaction_heatmap,
-                    on_step=stage == "train",
+                    on_step=is_train,
                     on_epoch=True,
                     prog_bar=False,
                     logger=True,
@@ -1969,7 +1984,7 @@ class HeatmapModule(pl.LightningModule):
                 self.log(
                     f"{stage}_loss_interaction_heatmap_raw_frobenius",
                     loss_interaction_raw_frobenius,
-                    on_step=stage == "train",
+                    on_step=is_train,
                     on_epoch=True,
                     prog_bar=False,
                     logger=True,
@@ -1978,13 +1993,13 @@ class HeatmapModule(pl.LightningModule):
                 self.log(
                     f"{stage}_loss_interaction_heatmap_frobenius",
                     loss_interaction_frobenius,
-                    on_step=stage == "train",
+                    on_step=is_train,
                     on_epoch=True,
                     prog_bar=False,
                     logger=True,
                     sync_dist=True,
                 )
-                if stage != "train":
+                if not is_train:
                     self._log_interaction_heatmap_metrics(
                         interaction_heatmap,
                         target_heatmap,
@@ -2031,7 +2046,7 @@ class HeatmapModule(pl.LightningModule):
             self.log(
                 f"{stage}_loss_heatmap_frobenius",
                 loss_heatmap_report,
-                on_step=stage == "train",
+                on_step=is_train,
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
@@ -2040,7 +2055,7 @@ class HeatmapModule(pl.LightningModule):
             self.log(
                 f"{stage}_loss_heatmap_optimized",
                 loss_heatmap_raw,
-                on_step=stage == "train",
+                on_step=is_train,
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
@@ -2049,7 +2064,7 @@ class HeatmapModule(pl.LightningModule):
             self.log(
                 f"{stage}_loss_heatmap_log",
                 loss_heatmap_task,
-                on_step=stage == "train",
+                on_step=is_train,
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
@@ -2062,7 +2077,7 @@ class HeatmapModule(pl.LightningModule):
             self.log(
                 f"{stage}_loss_main_deploy",
                 loss_main_task,
-                on_step=stage == "train",
+                on_step=is_train,
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
@@ -2071,13 +2086,13 @@ class HeatmapModule(pl.LightningModule):
             self.log(
                 f"{stage}_loss_heatmap_aux",
                 loss_aux_task,
-                on_step=stage == "train",
+                on_step=is_train,
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
                 sync_dist=True,
             )
-            if stage == "train" and self.model.hparams.grad_weights:
+            if is_train and self.model.hparams.grad_weights:
                 loss = torch.stack([loss_main_task, loss_aux_task])
             elif self.model.hparams.get("kp_only", False):
                 loss = loss_main_task * 1e-6 + loss_aux_task
@@ -2091,7 +2106,7 @@ class HeatmapModule(pl.LightningModule):
                 kp_loss_weight = float(self.model.hparams.kp_loss_weight)
                 if self.model.hparams.get("kp_only", False):
                     loss = loss * 1e-6 + loss_kp * kp_loss_weight
-                elif stage == "train" and self.model.hparams.grad_weights:
+                elif is_train and self.model.hparams.grad_weights:
                     loss = torch.stack([loss, loss_kp * kp_loss_weight])
                 elif kp_loss_weight > 0.0:
                     loss = loss + loss_kp * kp_loss_weight
@@ -2451,6 +2466,390 @@ class HeatmapModule(pl.LightningModule):
                 batch_size,
             )
 
+    def _scale_boxes_to_side_by_side_panel(self, boxes, side, split_frac):
+        boxes = boxes.clone()
+        if side == "left":
+            boxes[..., [0, 2]] = boxes[..., [0, 2]] * split_frac
+        elif side == "right":
+            boxes[..., [0, 2]] = split_frac + boxes[..., [0, 2]] * (1.0 - split_frac)
+        else:
+            raise ValueError(f"unknown side-by-side panel: {side}")
+        return boxes.clamp(0.0, 1.0)
+
+    def _compose_half_width_maps(self, left, right):
+        if left.shape != right.shape:
+            raise RuntimeError(
+                "side-by-side heatmap shape mismatch: "
+                f"{tuple(left.shape)} vs {tuple(right.shape)}"
+            )
+        if left.ndim < 3:
+            raise RuntimeError(
+                "side-by-side heatmap tensors must have at least 3 dims, got "
+                f"{tuple(left.shape)}"
+            )
+        height, width = int(left.shape[-2]), int(left.shape[-1])
+        split = width // 2
+        if split <= 0 or split >= width:
+            raise RuntimeError(f"invalid side-by-side heatmap width: {width}")
+
+        leading = left.shape[:-2]
+        left_4d = left.reshape(-1, 1, height, width).float()
+        right_4d = right.reshape(-1, 1, height, width).float()
+        left_scaled = F.interpolate(
+            left_4d,
+            size=(height, split),
+            mode="bilinear",
+            align_corners=False,
+        ).reshape(*leading, height, split)
+        right_scaled = F.interpolate(
+            right_4d,
+            size=(height, width - split),
+            mode="bilinear",
+            align_corners=False,
+        ).reshape(*leading, height, width - split)
+
+        output = left.new_zeros(*leading, height, width)
+        output[..., :split] = left_scaled.to(dtype=output.dtype)
+        output[..., split:] = right_scaled.to(dtype=output.dtype)
+        return output
+
+    def _copy_pair_objects_for_side(
+        self,
+        pair_target,
+        source,
+        pair_idx,
+        source_idx,
+        source_actor_slot,
+        target_actor_slot,
+        object_start,
+        object_capacity,
+        side,
+        split_frac,
+    ):
+        object_valid = source["object_valid"]
+        object_boxes = source["object_boxes"]
+        object_classes = source["object_classes"]
+        object_confs = source["object_confs"]
+        num_objects = int(object_valid.shape[1])
+        if object_capacity <= 0 or num_objects <= 0:
+            return
+
+        source_idx = int(source_idx)
+        source_actor_slot = int(source_actor_slot)
+        pair_idx = int(pair_idx)
+        target_actor_slot = int(target_actor_slot)
+
+        teacher_valid = bool(
+            source["interaction_object_index_valid"][source_idx, source_actor_slot].item()
+        )
+        teacher_one_based = int(
+            source["interaction_object_index"][source_idx, source_actor_slot].item()
+        )
+        if teacher_valid and teacher_one_based == 0:
+            pair_target["interaction_object_index"][pair_idx, target_actor_slot] = 0
+            pair_target["interaction_object_index_valid"][pair_idx, target_actor_slot] = True
+
+        teacher_zero_based = None
+        if teacher_valid and teacher_one_based > 0:
+            candidate = teacher_one_based - 1
+            if 0 <= candidate < num_objects and bool(object_valid[source_idx, candidate]):
+                teacher_zero_based = candidate
+
+        keep = []
+        if teacher_zero_based is not None:
+            keep.append(teacher_zero_based)
+        for old_idx in torch.nonzero(object_valid[source_idx], as_tuple=False).flatten():
+            old_idx = int(old_idx.item())
+            if old_idx not in keep:
+                keep.append(old_idx)
+            if len(keep) >= object_capacity:
+                break
+
+        for offset, old_idx in enumerate(keep[:object_capacity]):
+            new_idx = object_start + offset
+            pair_target["object_boxes"][pair_idx, new_idx] = (
+                self._scale_boxes_to_side_by_side_panel(
+                    object_boxes[source_idx, old_idx],
+                    side,
+                    split_frac,
+                )
+            )
+            pair_target["object_classes"][pair_idx, new_idx] = object_classes[
+                source_idx,
+                old_idx,
+            ]
+            pair_target["object_confs"][pair_idx, new_idx] = object_confs[
+                source_idx,
+                old_idx,
+            ]
+            pair_target["object_valid"][pair_idx, new_idx] = True
+            if teacher_zero_based is not None and old_idx == teacher_zero_based:
+                pair_target["interaction_object_index"][pair_idx, target_actor_slot] = (
+                    new_idx + 1
+                )
+                pair_target["interaction_object_index_valid"][
+                    pair_idx,
+                    target_actor_slot,
+                ] = True
+
+    def _compose_pair_training_batch(self, imgs, target):
+        if self.actor_pair_train_weight <= 0:
+            return None
+        valid = target["valid"].to(device=imgs.device, dtype=torch.bool)
+        batch_size, num_actor_tokens = valid.shape
+        if num_actor_tokens < 2:
+            raise ValueError("actor pair training requires num_actor_tokens >= 2")
+
+        available = torch.nonzero(valid.any(dim=1), as_tuple=False).flatten()
+        pair_count = int(available.numel() // 2)
+        if pair_count <= 0:
+            return None
+
+        left_idx = available[:pair_count]
+        right_idx = available[pair_count : pair_count * 2]
+        left_slot = valid[left_idx].long().argmax(dim=1)
+        right_slot = valid[right_idx].long().argmax(dim=1)
+
+        _, num_frames, channels, height, width = imgs.shape
+        split = width // 2
+        split_frac = float(split) / float(width)
+        left_frames = imgs[left_idx].reshape(
+            pair_count * num_frames,
+            channels,
+            height,
+            width,
+        )
+        right_frames = imgs[right_idx].reshape(
+            pair_count * num_frames,
+            channels,
+            height,
+            width,
+        )
+        left_panel = F.interpolate(
+            left_frames,
+            size=(height, split),
+            mode="bilinear",
+            align_corners=False,
+        ).reshape(pair_count, num_frames, channels, height, split)
+        right_panel = F.interpolate(
+            right_frames,
+            size=(height, width - split),
+            mode="bilinear",
+            align_corners=False,
+        ).reshape(pair_count, num_frames, channels, height, width - split)
+        pair_imgs = torch.zeros(
+            pair_count,
+            num_frames,
+            channels,
+            height,
+            width,
+            device=imgs.device,
+            dtype=imgs.dtype,
+        )
+        pair_imgs[:, :, :, :, :split] = left_panel
+        pair_imgs[:, :, :, :, split:] = right_panel
+
+        source = {
+            key: value.to(device=imgs.device)
+            for key, value in target.items()
+            if torch.is_tensor(value)
+        }
+        pair_target = {
+            "actions": torch.full(
+                (pair_count, num_actor_tokens),
+                -100,
+                device=imgs.device,
+                dtype=torch.long,
+            ),
+            "boxes": torch.zeros(
+                pair_count,
+                num_actor_tokens,
+                4,
+                device=imgs.device,
+                dtype=torch.float32,
+            ),
+            "valid": torch.zeros(
+                pair_count,
+                num_actor_tokens,
+                device=imgs.device,
+                dtype=torch.bool,
+            ),
+        }
+
+        left_boxes = source["boxes"][left_idx, left_slot].float()
+        right_boxes = source["boxes"][right_idx, right_slot].float()
+        pair_target["boxes"][:, 0] = self._scale_boxes_to_side_by_side_panel(
+            left_boxes,
+            "left",
+            split_frac,
+        )
+        pair_target["boxes"][:, 1] = self._scale_boxes_to_side_by_side_panel(
+            right_boxes,
+            "right",
+            split_frac,
+        )
+        pair_target["actions"][:, 0] = source["actions"][left_idx, left_slot].long()
+        pair_target["actions"][:, 1] = source["actions"][right_idx, right_slot].long()
+        pair_target["valid"][:, :2] = True
+
+        if "heatmap" in source and "kp_vis" in source:
+            pair_target["heatmap"] = self._compose_half_width_maps(
+                source["heatmap"][left_idx],
+                source["heatmap"][right_idx],
+            )
+            pair_target["kp_vis"] = self._compose_half_width_maps(
+                source["kp_vis"][left_idx],
+                source["kp_vis"][right_idx],
+            )
+
+        if "interaction_cls" in source:
+            pair_target["interaction_cls"] = torch.full(
+                (pair_count, num_actor_tokens),
+                NUM_OBJECT_CLASSES,
+                device=imgs.device,
+                dtype=torch.long,
+            )
+            pair_target["interaction_cls"][:, 0] = source["interaction_cls"][
+                left_idx,
+                left_slot,
+            ].long()
+            pair_target["interaction_cls"][:, 1] = source["interaction_cls"][
+                right_idx,
+                right_slot,
+            ].long()
+        if "interaction_valid" in source:
+            pair_target["interaction_valid"] = torch.zeros(
+                pair_count,
+                num_actor_tokens,
+                device=imgs.device,
+                dtype=torch.bool,
+            )
+            pair_target["interaction_valid"][:, 0] = source["interaction_valid"][
+                left_idx,
+                left_slot,
+            ].bool()
+            pair_target["interaction_valid"][:, 1] = source["interaction_valid"][
+                right_idx,
+                right_slot,
+            ].bool()
+        if "interaction_heatmap" in source:
+            _, _, hm_h, hm_w = source["interaction_heatmap"].shape
+            pair_target["interaction_heatmap"] = torch.zeros(
+                pair_count,
+                num_actor_tokens,
+                hm_h,
+                hm_w,
+                device=imgs.device,
+                dtype=source["interaction_heatmap"].dtype,
+            )
+            left_hm = source["interaction_heatmap"][left_idx, left_slot]
+            right_hm = source["interaction_heatmap"][right_idx, right_slot]
+            pair_target["interaction_heatmap"][:, 0] = self._compose_half_width_maps(
+                left_hm,
+                torch.zeros_like(left_hm),
+            )
+            pair_target["interaction_heatmap"][:, 1] = self._compose_half_width_maps(
+                torch.zeros_like(right_hm),
+                right_hm,
+            )
+        for key in ("interaction_heatmap_valid", "interaction_heatmap_positive_valid"):
+            if key not in source:
+                continue
+            pair_target[key] = torch.zeros(
+                pair_count,
+                num_actor_tokens,
+                device=imgs.device,
+                dtype=torch.bool,
+            )
+            pair_target[key][:, 0] = source[key][left_idx, left_slot].bool()
+            pair_target[key][:, 1] = source[key][right_idx, right_slot].bool()
+
+        if self.uses_object_proposals:
+            required = (
+                "object_boxes",
+                "object_classes",
+                "object_confs",
+                "object_valid",
+                "interaction_object_index",
+                "interaction_object_index_valid",
+            )
+            missing = [key for key in required if key not in source]
+            if missing:
+                raise RuntimeError(
+                    "actor pair training with object proposals requires "
+                    f"{missing}"
+                )
+            num_objects = int(source["object_boxes"].shape[1])
+            left_capacity = num_objects // 2
+            right_capacity = num_objects - left_capacity
+            none_id = int(
+                self.model.hparams.get("num_object_classes", NUM_OBJECT_CLASSES)
+            )
+            pair_target["object_boxes"] = torch.zeros(
+                pair_count,
+                num_objects,
+                4,
+                device=imgs.device,
+                dtype=torch.float32,
+            )
+            pair_target["object_classes"] = torch.full(
+                (pair_count, num_objects),
+                none_id,
+                device=imgs.device,
+                dtype=torch.long,
+            )
+            pair_target["object_confs"] = torch.zeros(
+                pair_count,
+                num_objects,
+                device=imgs.device,
+                dtype=torch.float32,
+            )
+            pair_target["object_valid"] = torch.zeros(
+                pair_count,
+                num_objects,
+                device=imgs.device,
+                dtype=torch.bool,
+            )
+            pair_target["interaction_object_index"] = torch.zeros(
+                pair_count,
+                num_actor_tokens,
+                device=imgs.device,
+                dtype=torch.long,
+            )
+            pair_target["interaction_object_index_valid"] = torch.zeros(
+                pair_count,
+                num_actor_tokens,
+                device=imgs.device,
+                dtype=torch.bool,
+            )
+            for pair_idx in range(pair_count):
+                self._copy_pair_objects_for_side(
+                    pair_target,
+                    source,
+                    pair_idx,
+                    int(left_idx[pair_idx].item()),
+                    int(left_slot[pair_idx].item()),
+                    0,
+                    0,
+                    left_capacity,
+                    "left",
+                    split_frac,
+                )
+                self._copy_pair_objects_for_side(
+                    pair_target,
+                    source,
+                    pair_idx,
+                    int(right_idx[pair_idx].item()),
+                    int(right_slot[pair_idx].item()),
+                    1,
+                    left_capacity,
+                    right_capacity,
+                    "right",
+                    split_frac,
+                )
+
+        return pair_imgs, pair_target
+
     def _compose_pair_batch(self, imgs, boxes, labels, same_action=False, swap=False):
         batch_size, n_frames, channels, height, width = imgs.shape
         num_actor_tokens = int(self.model.hparams.get("num_actor_tokens", 8))
@@ -2767,6 +3166,49 @@ class HeatmapModule(pl.LightningModule):
             loss, _, _, _, loss_kp, _, _ = self._actor_step(
                 imgs, target, self.train_loss, "train"
             )
+            pair_batch = self._compose_pair_training_batch(imgs, target)
+            if pair_batch is not None:
+                pair_imgs, pair_target = pair_batch
+                pair_loss, _, _, _, pair_loss_kp, _, _ = self._actor_step(
+                    pair_imgs,
+                    pair_target,
+                    self.train_loss,
+                    "train_pair",
+                )
+                loss = loss + pair_loss * self.actor_pair_train_weight
+                pair_loss_to_log = pair_loss.sum() if pair_loss.ndim > 0 else pair_loss
+                self.log(
+                    "train_pair_loss",
+                    pair_loss_to_log,
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                    sync_dist=True,
+                )
+                self.log(
+                    "train_pair_batch_size",
+                    torch.tensor(
+                        pair_imgs.shape[0],
+                        device=imgs.device,
+                        dtype=torch.float32,
+                    ),
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                    sync_dist=True,
+                )
+                if pair_loss_kp is not None:
+                    self.log(
+                        "train_pair_loss_kp",
+                        pair_loss_kp,
+                        on_step=True,
+                        on_epoch=True,
+                        prog_bar=False,
+                        logger=True,
+                        sync_dist=True,
+                    )
             loss_to_log = loss.sum() if loss.ndim > 0 else loss
             self.log(
                 "train_loss",

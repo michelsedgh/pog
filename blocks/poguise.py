@@ -892,7 +892,7 @@ class Block(nn.Module):
 
 
 class ActorObjectRelationUpdate(nn.Module):
-    """Update actor tokens from selected runtime object prompts.
+    """Update actor tokens from selected runtime object memory.
 
     The relation logits choose NULL or one object slot for each actor. The same
     selected object context is then fused into the actor token that ultimately
@@ -906,6 +906,8 @@ class ActorObjectRelationUpdate(nn.Module):
         hidden_dim=512,
         max_scale=1.0,
         null_logit_init=None,
+        learned_scale=False,
+        layer_scale_init=0.25,
     ):
         super().__init__()
         if null_logit_init is None:
@@ -938,6 +940,22 @@ class ActorObjectRelationUpdate(nn.Module):
         self.max_scale = float(max_scale)
         if self.max_scale < 0:
             raise ValueError("max_scale must be non-negative")
+        self.learned_scale = bool(learned_scale)
+        self.layer_scale_init = float(layer_scale_init)
+        if self.learned_scale:
+            if self.max_scale <= 0:
+                raise ValueError("learned relation scale requires max_scale > 0")
+            if self.layer_scale_init <= 0:
+                raise ValueError("layer_scale_init must be positive")
+            scale_ratio = min(
+                max(self.layer_scale_init / self.max_scale, 1.0e-4),
+                1.0 - 1.0e-4,
+            )
+            self.layer_scale_raw = nn.Parameter(
+                torch.tensor(math.log(scale_ratio / (1.0 - scale_ratio)))
+            )
+        else:
+            self.layer_scale_raw = None
 
         nn.init.zeros_(self.out[-1].weight)
         nn.init.zeros_(self.out[-1].bias)
@@ -946,6 +964,7 @@ class ActorObjectRelationUpdate(nn.Module):
         self,
         actor_tokens,
         object_tokens,
+        actor_valid,
         object_valid,
         object_confs,
         relation_bias=None,
@@ -959,6 +978,12 @@ class ActorObjectRelationUpdate(nn.Module):
         obj_scores = torch.matmul(q, k.transpose(1, 2))
         obj_scores = obj_scores / (q.shape[-1] ** 0.5)
 
+        actor_valid = actor_valid.to(device=obj_scores.device, dtype=torch.bool)
+        if tuple(actor_valid.shape) != tuple(actor_tokens.shape[:2]):
+            raise ValueError(
+                "actor_valid must have shape "
+                f"{tuple(actor_tokens.shape[:2])}, got {tuple(actor_valid.shape)}"
+            )
         object_valid = object_valid.to(device=obj_scores.device, dtype=torch.bool)
         object_confs = object_confs.to(device=obj_scores.device, dtype=obj_scores.dtype)
         conf_bias = torch.log(object_confs.clamp_min(1.0e-4))[:, None, :]
@@ -1015,8 +1040,19 @@ class ActorObjectRelationUpdate(nn.Module):
         # Relation NULL means "no interacted object"; in that case the
         # object-conditioned residual should be a near no-op on actor tokens.
         update_strength = gate * object_mass
+        update_strength = update_strength * actor_valid[:, :, None].to(
+            dtype=update_strength.dtype
+        )
 
-        scale = actor_tokens.new_tensor(self.max_scale)
+        if self.layer_scale_raw is None:
+            scale = actor_tokens.new_tensor(self.max_scale)
+        else:
+            scale = actor_tokens.new_tensor(self.max_scale) * torch.sigmoid(
+                self.layer_scale_raw.to(
+                    device=actor_tokens.device,
+                    dtype=actor_tokens.dtype,
+                )
+            )
         actor_tokens = actor_tokens + scale * update_strength * delta
 
         aux = {
@@ -1144,7 +1180,7 @@ class VisionTransformer(nn.Module):
         token_selection_cls_weight=0.25,
         token_selection_actor_weight=0.25,
         token_selection_register_weight=0.0,
-        token_selection_object_weight=0.10,
+        token_selection_object_weight=0.0,
         token_selection_heatmap_weight=0.35,
         actor_object_relation_in_transformer=0,
         actor_object_relation_blocks="2,5,8",
@@ -1154,6 +1190,8 @@ class VisionTransformer(nn.Module):
         actor_object_relation_null_logit_init=4.0,
         actor_object_relation_geometry_bias_weight=0.5,
         actor_object_relation_heatmap_bias_weight=1.0,
+        actor_object_relation_learned_scale=False,
+        actor_object_relation_layer_scale_init=0.25,
         return_heatmap_features=False,
         **kwargs,
     ):
@@ -1216,6 +1254,12 @@ class VisionTransformer(nn.Module):
         self.token_selection_register_weight = float(token_selection_register_weight)
         self.token_selection_object_weight = float(token_selection_object_weight)
         self.token_selection_heatmap_weight = float(token_selection_heatmap_weight)
+        if self.actor_object_prompt_tokens and self.token_selection_object_weight != 0:
+            raise ValueError(
+                "token_selection_object_weight is not used with relation-only "
+                "runtime object memory. Set it to 0 and use "
+                "actor_object_prompt_box_prior_weight for object-box pruning guidance."
+            )
         self.actor_object_relation_in_transformer = bool(
             actor_object_relation_in_transformer
         )
@@ -1242,6 +1286,12 @@ class VisionTransformer(nn.Module):
         self.actor_object_relation_heatmap_bias_weight = float(
             actor_object_relation_heatmap_bias_weight
         )
+        self.actor_object_relation_learned_scale = bool(
+            actor_object_relation_learned_scale
+        )
+        self.actor_object_relation_layer_scale_init = float(
+            actor_object_relation_layer_scale_init
+        )
         if self.actor_object_relation_dim <= 0:
             raise ValueError("actor_object_relation_dim must be positive")
         if self.actor_object_relation_hidden_dim <= 0:
@@ -1252,11 +1302,13 @@ class VisionTransformer(nn.Module):
             raise ValueError("actor_object_relation_geometry_bias_weight must be >= 0")
         if self.actor_object_relation_heatmap_bias_weight < 0:
             raise ValueError("actor_object_relation_heatmap_bias_weight must be >= 0")
+        if self.actor_object_relation_layer_scale_init <= 0:
+            raise ValueError("actor_object_relation_layer_scale_init must be positive")
         if "interaction_object_classes" in kwargs:
             raise ValueError(
                 "interaction_object_classes was removed. Actor-object heatmaps "
                 "are now one interacted-object channel per actor; object class "
-                "semantics come from runtime object prompt tokens."
+                "semantics come from relation-only runtime object memory."
             )
         self.return_heatmap_features = bool(return_heatmap_features)
         self.HW_OUT_CONV = (hw_out_conv, hw_out_conv)
@@ -1274,9 +1326,11 @@ class VisionTransformer(nn.Module):
             self.n_heatmap_tokens = 0
         self.mode = mode
 
-        # Class, actor, register, and object prompt tokens are protected from pruning.
+        # Class, actor, and register tokens are protected from pruning. Runtime
+        # object detections are kept as relation-only memory so they cannot
+        # leak object-presence shortcuts through generic self-attention.
         self.N_KEY_TOKENS = (
-            1 + self.n_actor_tokens + self.n_registers + self.n_object_tokens
+            1 + self.n_actor_tokens + self.n_registers
         )
         self.semantic_token_score_weights = self._semantic_token_score_weights()
 
@@ -1365,6 +1419,8 @@ class VisionTransformer(nn.Module):
                         hidden_dim=self.actor_object_relation_hidden_dim,
                         max_scale=self.actor_object_relation_max_scale,
                         null_logit_init=self.actor_object_relation_null_logit_init,
+                        learned_scale=self.actor_object_relation_learned_scale,
+                        layer_scale_init=self.actor_object_relation_layer_scale_init,
                     )
                     for block_idx in self.actor_object_relation_blocks
                 }
@@ -1375,6 +1431,8 @@ class VisionTransformer(nn.Module):
                 hidden_dim=self.actor_object_relation_hidden_dim,
                 max_scale=self.actor_object_relation_max_scale,
                 null_logit_init=self.actor_object_relation_null_logit_init,
+                learned_scale=self.actor_object_relation_learned_scale,
+                layer_scale_init=self.actor_object_relation_layer_scale_init,
             )
         else:
             self.actor_object_relation_updates = nn.ModuleDict()
@@ -1519,7 +1577,6 @@ class VisionTransformer(nn.Module):
         weights = [self.token_selection_cls_weight]
         weights.extend(distribute(self.token_selection_actor_weight, self.n_actor_tokens))
         weights.extend(distribute(self.token_selection_register_weight, self.n_registers))
-        weights.extend(distribute(self.token_selection_object_weight, self.n_object_tokens))
         weights.extend(distribute(self.token_selection_heatmap_weight, self.n_heatmap_tokens))
         return torch.tensor(weights, dtype=torch.float32)
 
@@ -1798,6 +1855,7 @@ class VisionTransformer(nn.Module):
         x = self.pos_drop(x)
         bbox_token_prior = None
         token_key_padding_mask = None
+        object_memory_tokens = None
 
         prefix_tokens = []
         prefix_key_masks = []
@@ -1829,9 +1887,7 @@ class VisionTransformer(nn.Module):
                 + self.valid_embed(valid.long()).to(dtype=x.dtype)
             )
             prefix_tokens.append(actor_tokens)
-            prefix_key_masks.append(
-                torch.zeros(B, self.n_actor_tokens, dtype=torch.bool, device=x.device)
-            )
+            prefix_key_masks.append(~valid)
 
         if self.n_registers > 0:
             prefix_tokens.append(self.register_tokens.expand(B, -1, -1))
@@ -1894,8 +1950,7 @@ class VisionTransformer(nn.Module):
                 + self.object_conf_mlp(object_confs.unsqueeze(-1))
                 + self.object_valid_embed(object_valid.long()).to(dtype=x.dtype)
             )
-            prefix_tokens.append(object_tokens)
-            prefix_key_masks.append(~object_valid)
+            object_memory_tokens = object_tokens
         if self.n_heatmap_out_channels > 0:
             prefix_tokens.append(self.heatmap_tokens.expand(B, -1, -1))
             prefix_key_masks.append(
@@ -1925,8 +1980,6 @@ class VisionTransformer(nn.Module):
             )
         actor_start = 1
         actor_end = actor_start + self.n_actor_tokens
-        object_start = 1 + self.n_actor_tokens + self.n_registers
-        object_end = object_start + self.n_object_tokens
         heatmap_start = self.N_KEY_TOKENS
         heatmap_end = heatmap_start + self.n_heatmap_tokens
         self.last_actor_object_relation_aux = {}
@@ -1960,10 +2013,11 @@ class VisionTransformer(nn.Module):
                     x.dtype,
                 )
                 actor_tokens = x[:, actor_start:actor_end, :]
-                object_tokens = x[:, object_start:object_end, :]
+                object_tokens = object_memory_tokens
                 actor_tokens, relation_aux = self.actor_object_relation_updates[str(i)](
                     actor_tokens,
                     object_tokens,
+                    valid,
                     object_valid,
                     object_confs,
                     relation_bias=relation_bias,
@@ -1995,7 +2049,7 @@ class VisionTransformer(nn.Module):
             x_actor = x[:, actor_start:actor_end, :]
         x_object = None
         if self.actor_object_prompt_tokens:
-            x_object = x[:, object_start:object_end, :]
+            x_object = object_memory_tokens
         if self.n_heatmap_out_channels > 0:
             x_heatmap = x[
                 :,
@@ -2047,6 +2101,7 @@ class VisionTransformer(nn.Module):
             x_actor, relation_aux = self.actor_object_final_relation_update(
                 x_actor,
                 x_object,
+                valid,
                 object_valid,
                 object_confs,
                 relation_bias=relation_bias,

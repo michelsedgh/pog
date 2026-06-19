@@ -456,7 +456,7 @@ def main():
     if getattr(hparams, "scene_object_tokens", 0):
         raise ValueError(
             "scene_object_tokens was removed. Use --actor_object_prompt_tokens 1 "
-            "for runtime object prompts."
+            "for relation-only runtime object memory."
         )
     if getattr(hparams, "actor_object_slot_head", 0):
         raise ValueError(

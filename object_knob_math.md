@@ -10,7 +10,7 @@ where:
 
 ```text
 index 0      = NULL
-index 1..K   = object prompt slots
+index 1..K   = detected object memory slots
 ```
 
 For actor `a` in batch item `b`:
@@ -27,7 +27,8 @@ The relation update also computes object attention over non-NULL slots:
 ```text
 object_attention = softmax(relation_logits)[..., 1:]
 object_context   = sum(object_attention[k] * object_token[k])
-actor_token'     = actor_token + gated_update(actor_token, object_context)
+update_strength  = learned_gate * non_null_mass * actor_valid
+actor_token'     = actor_token + update_strength * update(actor_token, object_context)
 ```
 
 The real action prediction remains:
@@ -39,13 +40,16 @@ L_action      = CE(action_logits, action_label)
 
 The update uses `actor_token`, `object_context`, and their elementwise product,
 so the adapter can learn interaction-specific changes instead of just adding a
-generic object vector. The same relation module runs inside the transformer
-before pruning stages and once more immediately before `actor_head`.
+generic object vector. Runtime object detections are relation-only memory, not
+ordinary transformer prefix tokens, so object presence cannot bypass relation
+selection through generic self-attention. The same relation module runs inside
+the transformer before pruning stages and once more immediately before
+`actor_head`.
 
 So the causal path is:
 
 ```text
-object prompts -> relation distribution -> object context -> actor token -> action head
+object memory -> relation distribution -> object context -> actor token -> action head
 ```
 
 ## Important Weights
@@ -77,8 +81,20 @@ heatmap localization with object slot selection.
 
 `actor_object_relation_max_scale`
 
-Caps how strongly relation updates can change actor tokens. Too low means object
-context may not affect action top-1; too high can destabilize action learning.
+Caps how strongly relation updates can change actor tokens. In the default
+object run the actual strength is learned per relation block from
+`actor_object_relation_layer_scale_init`; `max_scale` is only the upper bound.
+
+`actor_relation_action_fusion`
+
+Enables the final action input fusion:
+
+```text
+fuse(actor_token, selected_object_context, actor_token * selected_object_context, object_mass)
+```
+
+This keeps the same action CE target while making the selected object context
+explicitly available to `actor_head`.
 
 ## Reading Metrics
 
