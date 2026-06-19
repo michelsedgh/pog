@@ -170,6 +170,55 @@ class HeatmapModule(pl.LightningModule):
         )
         if self.actor_object_relation_null_loss_weight < 0:
             raise ValueError("actor_object_relation_null_loss_weight must be >= 0")
+        self.actor_object_detector_dropout_prob = float(
+            hparams.get("actor_object_detector_dropout_prob", 0.0)
+        )
+        if not 0.0 <= self.actor_object_detector_dropout_prob <= 1.0:
+            raise ValueError("actor_object_detector_dropout_prob must be in [0, 1]")
+        self.actor_object_detector_dropout_action_loss_weight = float(
+            hparams.get("actor_object_detector_dropout_action_loss_weight", 0.0)
+        )
+        if self.actor_object_detector_dropout_action_loss_weight < 0:
+            raise ValueError(
+                "actor_object_detector_dropout_action_loss_weight must be >= 0"
+            )
+        self.actor_object_detector_dropout_relation_loss_weight = float(
+            hparams.get("actor_object_detector_dropout_relation_loss_weight", 0.0)
+        )
+        if self.actor_object_detector_dropout_relation_loss_weight < 0:
+            raise ValueError(
+                "actor_object_detector_dropout_relation_loss_weight must be >= 0"
+            )
+        self.actor_object_detector_dropout_eval = bool(
+            hparams.get("actor_object_detector_dropout_eval", 0)
+        )
+        self.actor_object_proposal_aug_prob = float(
+            hparams.get("actor_object_proposal_aug_prob", 0.0)
+        )
+        if not 0.0 <= self.actor_object_proposal_aug_prob <= 1.0:
+            raise ValueError("actor_object_proposal_aug_prob must be in [0, 1]")
+        self.actor_object_proposal_box_jitter = float(
+            hparams.get("actor_object_proposal_box_jitter", 0.0)
+        )
+        if self.actor_object_proposal_box_jitter < 0:
+            raise ValueError("actor_object_proposal_box_jitter must be >= 0")
+        self.actor_object_proposal_scale_jitter = float(
+            hparams.get("actor_object_proposal_scale_jitter", 0.0)
+        )
+        if self.actor_object_proposal_scale_jitter < 0:
+            raise ValueError("actor_object_proposal_scale_jitter must be >= 0")
+        self.actor_object_proposal_conf_jitter = float(
+            hparams.get("actor_object_proposal_conf_jitter", 0.0)
+        )
+        if self.actor_object_proposal_conf_jitter < 0:
+            raise ValueError("actor_object_proposal_conf_jitter must be >= 0")
+        self.actor_object_proposal_distractor_drop_prob = float(
+            hparams.get("actor_object_proposal_distractor_drop_prob", 0.0)
+        )
+        if not 0.0 <= self.actor_object_proposal_distractor_drop_prob <= 1.0:
+            raise ValueError(
+                "actor_object_proposal_distractor_drop_prob must be in [0, 1]"
+            )
         self.actor_pair_train_weight = float(hparams.get("actor_pair_train_weight", 0.0))
         if self.actor_pair_train_weight < 0:
             raise ValueError("actor_pair_train_weight must be >= 0")
@@ -305,6 +354,10 @@ class HeatmapModule(pl.LightningModule):
             "relation_action_joint_exact": [],
             "relation_action_joint_objectless": [],
             "relation_action_joint_missing_objectful": [],
+            "object_dropout_action": [],
+            "object_dropout_action_Uselaptop": [],
+            "object_dropout_relation_action_joint_missing_objectful": [],
+            "object_dropout_relation_action_joint_missing_Uselaptop": [],
         }
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
@@ -959,6 +1012,220 @@ class HeatmapModule(pl.LightningModule):
                 device=device,
                 dtype=torch.bool,
             ),
+        }
+
+    def _detector_dropout_object_inputs(
+        self,
+        actions,
+        valid,
+        target,
+        object_inputs,
+        stage,
+    ):
+        if not self.uses_object_proposals or not object_inputs:
+            return None
+        is_train = stage.startswith("train")
+        train_active = (
+            is_train
+            and self.actor_object_detector_dropout_prob > 0.0
+            and (
+                self.actor_object_detector_dropout_action_loss_weight > 0.0
+                or self.actor_object_detector_dropout_relation_loss_weight > 0.0
+            )
+        )
+        eval_active = stage == "val" and self.actor_object_detector_dropout_eval
+        if not train_active and not eval_active:
+            return None
+
+        object_valid = object_inputs["object_valid"].to(dtype=torch.bool)
+        device = object_valid.device
+        info = self._exact_teacher_object_info(actions, valid, target, device)
+        if info is None:
+            return None
+
+        exact = info["valid"] & info["known_action"] & info["compatible_from_one_based"]
+        if not exact.any():
+            return None
+        selected_actor_mask = exact.clone()
+        if is_train and self.actor_object_detector_dropout_prob < 1.0:
+            keep = torch.rand(
+                selected_actor_mask.shape,
+                device=device,
+                dtype=torch.float32,
+            ) < self.actor_object_detector_dropout_prob
+            selected_actor_mask = selected_actor_mask & keep
+        if not selected_actor_mask.any():
+            return None
+
+        actions = actions.to(device=device, dtype=torch.long)
+        object_classes = object_inputs["object_classes"].to(
+            device=device,
+            dtype=torch.long,
+        )
+        dropped_object_mask = torch.zeros_like(object_valid, dtype=torch.bool)
+        for action_idx, object_ids in self.action_object_ids_by_index.items():
+            action_actor_mask = selected_actor_mask & (actions == int(action_idx))
+            if not action_actor_mask.any():
+                continue
+            sample_mask = action_actor_mask.any(dim=1)
+            object_ids = object_ids.to(device=device, dtype=torch.long)
+            # Drop every compatible proposal for the selected action, not only
+            # the teacher slot, so the auxiliary pass is a true detector miss.
+            class_match = (
+                object_classes.unsqueeze(-1) == object_ids.view(1, 1, -1)
+            ).any(dim=-1)
+            dropped_object_mask |= sample_mask[:, None] & object_valid & class_match
+
+        if not dropped_object_mask.any():
+            return None
+
+        masked_object_valid = object_valid & ~dropped_object_mask
+        masked_object_confs = object_inputs["object_confs"].clone()
+        masked_object_confs = masked_object_confs.masked_fill(dropped_object_mask, 0.0)
+
+        masked_object_inputs = {
+            "object_boxes": object_inputs["object_boxes"],
+            "object_classes": object_classes,
+            "object_confs": masked_object_confs,
+            "object_valid": masked_object_valid,
+        }
+        masked_target = dict(target)
+        for key in (
+            "object_boxes",
+            "object_classes",
+            "interaction_object_index",
+            "interaction_object_index_valid",
+        ):
+            if key in target:
+                masked_target[key] = target[key].to(device=device)
+        masked_target["object_valid"] = masked_object_valid
+        masked_target["object_confs"] = masked_object_confs
+
+        return {
+            "object_inputs": masked_object_inputs,
+            "target": masked_target,
+            "selected_actor_mask": selected_actor_mask,
+            "dropped_object_mask": dropped_object_mask,
+        }
+
+    def _teacher_object_slot_mask(self, target, shape, device):
+        teacher_mask = torch.zeros(shape, device=device, dtype=torch.bool)
+        if (
+            "interaction_object_index" not in target
+            or "interaction_object_index_valid" not in target
+        ):
+            return teacher_mask
+        selected = target["interaction_object_index"].to(device=device, dtype=torch.long)
+        selected_valid = target["interaction_object_index_valid"].to(
+            device=device,
+            dtype=torch.bool,
+        )
+        if selected.ndim != 2 or selected_valid.shape != selected.shape:
+            return teacher_mask
+        num_objects = int(shape[1])
+        one_based = selected_valid & (selected > 0) & ((selected - 1) < num_objects)
+        if not one_based.any():
+            return teacher_mask
+        batch_idx, _ = torch.nonzero(one_based, as_tuple=True)
+        object_idx = (selected[one_based] - 1).clamp(0, num_objects - 1)
+        teacher_mask[batch_idx, object_idx] = True
+        return teacher_mask
+
+    def _augment_object_inputs_for_training(self, object_inputs, target, stage):
+        if (
+            not stage.startswith("train")
+            or not self.uses_object_proposals
+            or not object_inputs
+            or self.actor_object_proposal_aug_prob <= 0.0
+        ):
+            return object_inputs
+
+        object_valid = object_inputs["object_valid"].to(dtype=torch.bool)
+        if not object_valid.any():
+            return object_inputs
+        device = object_valid.device
+        aug_mask = object_valid & (
+            torch.rand(object_valid.shape, device=device, dtype=torch.float32)
+            < self.actor_object_proposal_aug_prob
+        )
+        if not aug_mask.any():
+            return object_inputs
+
+        boxes = object_inputs["object_boxes"].clone()
+        original_boxes = boxes.clone()
+        confs = object_inputs["object_confs"].clone()
+        if self.actor_object_proposal_box_jitter > 0.0:
+            center = (boxes[..., :2] + boxes[..., 2:]) * 0.5
+            size = (boxes[..., 2:] - boxes[..., :2]).clamp_min(1.0e-4)
+            center_noise = (
+                torch.rand_like(center) * 2.0 - 1.0
+            ) * size * self.actor_object_proposal_box_jitter
+            center = center + torch.where(
+                aug_mask[..., None],
+                center_noise,
+                torch.zeros_like(center_noise),
+            )
+            if self.actor_object_proposal_scale_jitter > 0.0:
+                scale_noise = (
+                    torch.rand_like(size) * 2.0 - 1.0
+                ) * self.actor_object_proposal_scale_jitter
+                size = size * (1.0 + scale_noise).clamp_min(0.25)
+            half = size * 0.5
+            jittered_boxes = torch.cat([center - half, center + half], dim=-1)
+            boxes = torch.where(aug_mask[..., None], jittered_boxes, boxes)
+            boxes = boxes.clamp(0.0, 1.0)
+            min_xy = torch.minimum(boxes[..., :2], boxes[..., 2:])
+            max_xy = torch.maximum(boxes[..., :2], boxes[..., 2:])
+            jittered_boxes = torch.cat([min_xy, max_xy], dim=-1)
+            jittered_size = max_xy - min_xy
+            valid_jittered = aug_mask & (jittered_size > 1.0e-4).all(dim=-1)
+            boxes = torch.where(
+                valid_jittered[..., None],
+                jittered_boxes,
+                original_boxes,
+            )
+
+        if self.actor_object_proposal_conf_jitter > 0.0:
+            conf_noise = (
+                torch.rand_like(confs) * 2.0 - 1.0
+            ) * self.actor_object_proposal_conf_jitter
+            confs = torch.where(aug_mask, confs * (1.0 + conf_noise), confs)
+            confs = confs.clamp(0.0, 1.0)
+
+        output_valid = object_valid.clone()
+        if self.actor_object_proposal_distractor_drop_prob > 0.0:
+            teacher_mask = self._teacher_object_slot_mask(
+                target,
+                object_valid.shape,
+                device,
+            )
+            distractor_mask = object_valid & ~teacher_mask
+            drop_mask = distractor_mask & (
+                torch.rand(object_valid.shape, device=device, dtype=torch.float32)
+                < self.actor_object_proposal_distractor_drop_prob
+            )
+            output_valid = output_valid & ~drop_mask
+            confs = confs.masked_fill(drop_mask, 0.0)
+        else:
+            drop_mask = torch.zeros_like(object_valid, dtype=torch.bool)
+
+        self._log_scalar(
+            f"{stage}_object_proposal_aug_rate",
+            aug_mask.float().mean(),
+            aug_mask.numel(),
+        )
+        if self.actor_object_proposal_distractor_drop_prob > 0.0:
+            self._log_scalar(
+                f"{stage}_object_proposal_distractor_drop_rate",
+                drop_mask.float().mean(),
+                drop_mask.numel(),
+            )
+
+        return {
+            "object_boxes": boxes,
+            "object_classes": object_inputs["object_classes"],
+            "object_confs": confs,
+            "object_valid": output_valid,
         }
 
     def _exact_teacher_object_info(self, actions, valid, target, device):
@@ -1691,6 +1958,7 @@ class HeatmapModule(pl.LightningModule):
                 if action_idx is None:
                     continue
                 action_mask = exact & (actions == int(action_idx))
+                missing_action_mask = missing & (actions == int(action_idx))
                 safe_name = action_name.replace(".", "_")
                 log_masked(
                     f"{stage}_relation_action_joint_{safe_name}_acc",
@@ -1701,6 +1969,16 @@ class HeatmapModule(pl.LightningModule):
                     f"{stage}_relation_correct_action_wrong_{safe_name}_rate",
                     relation_correct_action_wrong,
                     action_mask,
+                )
+                log_masked(
+                    f"{stage}_relation_action_joint_missing_{safe_name}_acc",
+                    joint_correct,
+                    missing_action_mask,
+                )
+                log_masked(
+                    f"{stage}_relation_correct_action_wrong_missing_{safe_name}_rate",
+                    relation_correct_action_wrong,
+                    missing_action_mask,
                 )
 
             uselaptop_idx = self._action_index("Uselaptop")
@@ -1714,6 +1992,7 @@ class HeatmapModule(pl.LightningModule):
                     int(index) for index in confuser_indices if index is not None
                 ]
                 uselaptop_mask = exact & (actions == int(uselaptop_idx))
+                uselaptop_missing_mask = missing & (actions == int(uselaptop_idx))
                 if confuser_indices and uselaptop_mask.any():
                     action_logits = info["action_logits"].float()
                     true_logit = action_logits[..., int(uselaptop_idx)]
@@ -1738,6 +2017,30 @@ class HeatmapModule(pl.LightningModule):
                         (margin[uselaptop_mask] > 0).float().mean(),
                         count,
                     )
+                if confuser_indices and uselaptop_missing_mask.any():
+                    action_logits = info["action_logits"].float()
+                    true_logit = action_logits[..., int(uselaptop_idx)]
+                    confuser_tensor = torch.tensor(
+                        confuser_indices,
+                        device=action_logits.device,
+                        dtype=torch.long,
+                    )
+                    confuser_logit = action_logits.index_select(
+                        -1,
+                        confuser_tensor,
+                    ).amax(dim=-1)
+                    margin = true_logit - confuser_logit
+                    count = int(uselaptop_missing_mask.sum().item())
+                    self._log_scalar(
+                        f"{stage}_action_Uselaptop_missing_object_confuser_margin",
+                        margin[uselaptop_missing_mask].mean(),
+                        count,
+                    )
+                    self._log_scalar(
+                        f"{stage}_action_Uselaptop_missing_object_confuser_win_rate",
+                        (margin[uselaptop_missing_mask] > 0).float().mean(),
+                        count,
+                    )
 
             if not stage.startswith("val"):
                 return {}
@@ -1751,6 +2054,182 @@ class HeatmapModule(pl.LightningModule):
                 if mask.any():
                     outputs[name] = joint_correct[mask].float().detach()
             return outputs
+
+    def _actor_object_detector_dropout_aux(
+        self,
+        imgs,
+        actions,
+        boxes,
+        valid,
+        target,
+        object_inputs,
+        loss_fn,
+        stage,
+    ):
+        dropout_batch = self._detector_dropout_object_inputs(
+            actions,
+            valid,
+            target,
+            object_inputs,
+            stage,
+        )
+        if dropout_batch is None:
+            return None, {}
+
+        masked_inputs = dropout_batch["object_inputs"]
+        masked_target = dropout_batch["target"]
+        selected_actor_mask = dropout_batch["selected_actor_mask"]
+        dropped_object_mask = dropout_batch["dropped_object_mask"]
+        data = self.model(
+            imgs,
+            boxes=boxes,
+            valid=valid,
+            action_labels=actions,
+            **masked_inputs,
+        )
+        dropout_preds, _, _ = self._unpack_model_data(data)
+
+        aux_stage = f"{stage}_object_dropout"
+        selected_count = int(selected_actor_mask.sum().item())
+        self._log_scalar(
+            f"{aux_stage}_actor_rate",
+            selected_actor_mask.float().mean(),
+            selected_actor_mask.numel(),
+        )
+        self._log_count(
+            f"{aux_stage}_actor_count",
+            selected_actor_mask.float().sum(),
+        )
+        self._log_scalar(
+            f"{aux_stage}_object_drop_rate",
+            dropped_object_mask.float().mean(),
+            dropped_object_mask.numel(),
+        )
+        self._log_count(
+            f"{aux_stage}_object_drop_count",
+            dropped_object_mask.float().sum(),
+        )
+        if selected_count > 0:
+            dropout_labels = actions.to(device=dropout_preds.device, dtype=torch.long)
+            dropout_valid = selected_actor_mask.to(
+                device=dropout_preds.device,
+                dtype=torch.bool,
+            )
+            pred_labels = dropout_preds.argmax(dim=-1)
+            action_correct = pred_labels == dropout_labels
+            self._log_scalar(
+                f"{aux_stage}_action_acc",
+                action_correct[dropout_valid].float().mean(),
+                selected_count,
+            )
+            self._log_action_metrics(
+                f"{aux_stage}_action_{{action}}_acc",
+                dropout_preds[dropout_valid],
+                dropout_labels[dropout_valid],
+            )
+
+        aux_outputs = {}
+        aux_relation_loss = self._actor_object_relation_loss(
+            aux_stage,
+            actions,
+            selected_actor_mask,
+            masked_target,
+        )
+        self._log_relation_action_joint_metrics(
+            aux_stage,
+            dropout_preds,
+            actions,
+            selected_actor_mask,
+            masked_target,
+        )
+        if stage == "val" and selected_count > 0:
+            dropout_labels = actions.to(device=dropout_preds.device, dtype=torch.long)
+            dropout_valid = selected_actor_mask.to(
+                device=dropout_preds.device,
+                dtype=torch.bool,
+            )
+            pred_labels = dropout_preds.argmax(dim=-1)
+            action_correct = pred_labels == dropout_labels
+            aux_outputs["object_dropout_action"] = (
+                action_correct[dropout_valid].float().detach()
+            )
+            uselaptop_idx = self._action_index("Uselaptop")
+            if uselaptop_idx is not None:
+                uselaptop_mask = dropout_valid & (
+                    dropout_labels == int(uselaptop_idx)
+                )
+                if uselaptop_mask.any():
+                    aux_outputs["object_dropout_action_Uselaptop"] = (
+                        action_correct[uselaptop_mask].float().detach()
+                    )
+
+            joint_info = self._relation_action_joint_info(
+                dropout_preds,
+                actions,
+                selected_actor_mask,
+                masked_target,
+            )
+            if joint_info is not None:
+                missing = joint_info["missing_compatible"]
+                joint_correct = joint_info["joint_correct"]
+                if missing.any():
+                    aux_outputs[
+                        "object_dropout_relation_action_joint_missing_objectful"
+                    ] = joint_correct[missing].float().detach()
+                if uselaptop_idx is not None:
+                    joint_uselaptop_mask = missing & (
+                        joint_info["actions"] == int(uselaptop_idx)
+                    )
+                    if joint_uselaptop_mask.any():
+                        aux_outputs[
+                            "object_dropout_relation_action_joint_missing_Uselaptop"
+                        ] = joint_correct[joint_uselaptop_mask].float().detach()
+
+        if not stage.startswith("train"):
+            return None, aux_outputs
+
+        aux_losses = []
+        if self.actor_object_detector_dropout_action_loss_weight > 0.0:
+            aux_action_loss = self._action_loss(
+                dropout_preds,
+                actions,
+                loss_fn,
+                selected_actor_mask,
+            )
+            self.log(
+                f"{aux_stage}_loss_action",
+                aux_action_loss,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+            aux_losses.append(
+                aux_action_loss
+                * self.actor_object_detector_dropout_action_loss_weight
+            )
+        if (
+            aux_relation_loss is not None
+            and self.actor_object_detector_dropout_relation_loss_weight > 0.0
+        ):
+            aux_losses.append(
+                aux_relation_loss
+                * self.actor_object_detector_dropout_relation_loss_weight
+            )
+        if not aux_losses:
+            return None, aux_outputs
+        aux_total = torch.stack(aux_losses).sum()
+        self.log(
+            f"{aux_stage}_loss",
+            aux_total,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+        )
+        return aux_total, aux_outputs
 
     def _append_nash_mtl_params(self, params):
         if not (
@@ -1942,6 +2421,11 @@ class HeatmapModule(pl.LightningModule):
             raise ValueError(f"{stage} actor batch has no valid actor slots")
 
         object_inputs = self._object_inputs_from_target(target, imgs.device)
+        object_inputs = self._augment_object_inputs_for_training(
+            object_inputs,
+            target,
+            stage,
+        )
         data = self.model(
             imgs,
             boxes=boxes,
@@ -2000,6 +2484,23 @@ class HeatmapModule(pl.LightningModule):
         heatmap_aux_terms = []
 
         self._log_token_selection_diagnostics(stage, actions, valid, target)
+        (
+            detector_dropout_loss,
+            detector_dropout_outputs,
+        ) = self._actor_object_detector_dropout_aux(
+            imgs,
+            actions,
+            boxes,
+            valid,
+            target,
+            object_inputs,
+            loss_fn,
+            stage,
+        )
+        if is_train and detector_dropout_loss is not None:
+            loss_main_task = loss_main_task + detector_dropout_loss
+        if detector_dropout_outputs:
+            relation_action_joint_outputs.update(detector_dropout_outputs)
         loss_kp = None
         loss_pose_frobenius = None
         loss_pose_heatmap_optimized = None
@@ -3398,14 +3899,28 @@ class HeatmapModule(pl.LightningModule):
             if relation_action_joint_components
             else None
         )
+        object_dropout_action_acc = mean_gathered("object_dropout_action")
+        object_dropout_uselaptop_acc = mean_gathered(
+            "object_dropout_action_Uselaptop"
+        )
+        object_dropout_joint_missing_acc = mean_gathered(
+            "object_dropout_relation_action_joint_missing_objectful"
+        )
+        object_dropout_joint_uselaptop_acc = mean_gathered(
+            "object_dropout_relation_action_joint_missing_Uselaptop"
+        )
 
         key_action_values = self._deploy_action_accuracies(
             pred_labels,
             labels,
             DEPLOY_KEY_ACTIONS,
         )
-        key_action_mean = torch.stack(key_action_values).mean() if key_action_values else None
-        key_action_min = torch.stack(key_action_values).amin() if key_action_values else None
+        key_action_mean = (
+            torch.stack(key_action_values).mean() if key_action_values else None
+        )
+        key_action_min = (
+            torch.stack(key_action_values).amin() if key_action_values else None
+        )
         key_action_floor_deficit = (
             (torch.tensor(0.60, device=labels.device) - key_action_min).clamp_min(0.0)
             if key_action_min is not None
@@ -3421,6 +3936,10 @@ class HeatmapModule(pl.LightningModule):
                 (hard_objectless_acc, 0.15),
                 (key_action_mean, 0.10),
                 (relation_action_joint_balanced_acc, 0.15),
+                (object_dropout_action_acc, 0.10),
+                (object_dropout_joint_missing_acc, 0.10),
+                (object_dropout_uselaptop_acc, 0.05),
+                (object_dropout_joint_uselaptop_acc, 0.05),
             ],
             penalties=[
                 (hard_object_action_rate, 0.20),
@@ -3445,6 +3964,22 @@ class HeatmapModule(pl.LightningModule):
             (
                 "val_deploy_relation_action_joint_exact_acc",
                 relation_action_joint_exact_acc,
+            ),
+            (
+                "val_deploy_object_dropout_action_acc",
+                object_dropout_action_acc,
+            ),
+            (
+                "val_deploy_object_dropout_Uselaptop_acc",
+                object_dropout_uselaptop_acc,
+            ),
+            (
+                "val_deploy_object_dropout_joint_missing_acc",
+                object_dropout_joint_missing_acc,
+            ),
+            (
+                "val_deploy_object_dropout_joint_Uselaptop_acc",
+                object_dropout_joint_uselaptop_acc,
             ),
             (
                 "val_deploy_objectless_with_object_visible_acc",

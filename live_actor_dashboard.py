@@ -4,6 +4,7 @@ import json
 import socket
 import threading
 import time
+import traceback
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -25,7 +26,8 @@ LIVE_CAPTURE_BUFFER_FRAMES = 256
 MODEL_INPUT_SIZE = 224
 MODEL_SHORT_SIDE = 256
 DETECTION_EVERY_FRAME = 1
-MIN_OBJECT_TRACK_SAMPLE_COUNT = 2
+MIN_OBJECT_TRACK_SAMPLE_COUNT = 1
+OBJECT_TEMPORAL_CONF_POWER = 0.0
 DEFAULT_PERSON_CONTAINMENT_THRESHOLD = 0.80
 
 
@@ -578,6 +580,7 @@ def pack_temporal_object_tokens(
     device,
     track_iou_threshold=0.2,
     min_sample_count=MIN_OBJECT_TRACK_SAMPLE_COUNT,
+    temporal_conf_power=OBJECT_TEMPORAL_CONF_POWER,
 ):
     entries = []
     for sample_pos, record in enumerate(detection_records):
@@ -662,9 +665,16 @@ def pack_temporal_object_tokens(
         if box is None or box[2] <= box[0] or box[3] <= box[1]:
             continue
         track_confs = [float(item["conf"]) for item in track["entries"]]
+        coverage = len(track["sample_positions"]) / float(max(len(detection_records), 1))
+        temporal_weight = (
+            float(coverage) ** float(temporal_conf_power)
+            if float(temporal_conf_power) > 0.0
+            else 1.0
+        )
         boxes[0, slot] = torch.from_numpy(box).to(device=device)
         classes[0, slot] = int(track["class_id"])
-        confs[0, slot] = float(np.mean(track_confs)) if track_confs else 0.0
+        mean_conf = float(np.mean(track_confs)) if track_confs else 0.0
+        confs[0, slot] = mean_conf * temporal_weight
         valid[0, slot] = True
         packed.append(
             {
@@ -672,6 +682,9 @@ def pack_temporal_object_tokens(
                 "label": str(track["label"]),
                 "object_class_id": int(track["class_id"]),
                 "conf": float(confs[0, slot].detach().cpu().item()),
+                "mean_conf": float(mean_conf),
+                "temporal_coverage": float(coverage),
+                "temporal_conf_weight": float(temporal_weight),
                 "box_norm": box.astype(float).tolist(),
                 "sample_count": int(len(track["sample_positions"])),
             }
@@ -1137,6 +1150,7 @@ def run_actor_smoke(args, actor):
             "span_frames": TRAINING_SPAN_FRAMES,
             "sampling": "linspace",
             "min_object_track_sample_count": MIN_OBJECT_TRACK_SAMPLE_COUNT,
+            "object_temporal_conf_power": OBJECT_TEMPORAL_CONF_POWER,
             "valid_slots": int(valid.sum().item()),
             "top_action": ACTION_CLASSES[int(probs.argmax().item())],
             "top_prob": float(probs.max().item()),
@@ -1657,88 +1671,121 @@ class LiveRunner:
                         )
                     if valid.any():
                         started = time.perf_counter()
-                        logits, presence_logits = self.actor(
-                            clip,
-                            boxes,
-                            valid,
-                            object_inputs,
-                        )
-                        self.last_actor_ms = (time.perf_counter() - started) * 1000.0
-                        self.last_action_frame = self.frame_count
-                        self.last_action_time = latest_camera_time
-                        if logits.shape[-1] != len(ACTION_CLASSES):
-                            raise RuntimeError(
-                                "Actor output class count does not match dashboard "
-                                f"taxonomy: logits={logits.shape[-1]}, "
-                                f"labels={len(ACTION_CLASSES)}."
-                            )
-                        action_probs = torch.softmax(logits[0], dim=-1).detach().cpu().numpy()
-                        presence_tensor = objectful_presence_probs(presence_logits)
-                        presence_probs = (
-                            presence_tensor[0].detach().cpu().numpy()
-                            if presence_tensor is not None
-                            else None
-                        )
-                        kept_actor_idx = np.flatnonzero(keep)[: self.max_actors]
-                        for slot, actor_idx in enumerate(kept_actor_idx):
-                            if actor_idx >= len(self.current_track_ids):
-                                continue
-                            track_id = self.current_track_ids[int(actor_idx)]
-                            track = self.tracks.get(track_id)
-                            if track is None:
-                                continue
-                            relation_payload = actor_relation_debug_payload(
-                                self.actor,
-                                slot,
-                                packed_objects,
+                        try:
+                            logits, presence_logits = self.actor(
+                                clip,
+                                boxes,
+                                valid,
                                 object_inputs,
                             )
-                            extra_payload = {}
-                            if relation_payload is not None:
-                                extra_payload["debug_relation"] = relation_payload
-                            track.update_action(
-                                action_probs[slot],
-                                (
-                                    presence_probs[slot]
-                                    if presence_probs is not None
-                                    else None
-                                ),
-                                extra_payload,
+                            self.last_actor_ms = (
+                                time.perf_counter() - started
+                            ) * 1000.0
+                            self.last_action_frame = self.frame_count
+                            self.last_action_time = latest_camera_time
+                            if logits.shape[-1] != len(ACTION_CLASSES):
+                                raise RuntimeError(
+                                    "Actor output class count does not match dashboard "
+                                    f"taxonomy: logits={logits.shape[-1]}, "
+                                    f"labels={len(ACTION_CLASSES)}."
+                                )
+                            action_probs = (
+                                torch.softmax(logits[0], dim=-1).detach().cpu().numpy()
                             )
-                            actors[int(actor_idx)].update(
-                                track.action_payload()
+                            presence_tensor = objectful_presence_probs(presence_logits)
+                            presence_probs = (
+                                presence_tensor[0].detach().cpu().numpy()
+                                if presence_tensor is not None
+                                else None
                             )
-                        for actor in actors:
-                            track = self.tracks.get(actor["track_id"])
-                            if track is None:
-                                continue
-                            payload = track.action_payload()
-                            if payload:
-                                actor.update(payload)
-                        message = (
-                            f"{self.actor.backend_name} actors={int(valid.sum().item())} "
-                            f"objects={len(packed_objects)}/{len(objects)} "
-                            f"det={self.last_detector_ms:.0f}ms "
-                            f"actor={self.last_actor_ms:.0f}ms "
-                            f"det_age={det_age} "
-                            f"sampling=linspace "
-                            f"source_span={TRAINING_SPAN_FRAMES} "
-                            f"frames={TRAINING_CLIP_FRAMES} "
-                            f"source_fps={float(self.args.training_source_fps):.1f} "
-                            f"real_span={clip_span_sec:.1f}s "
-                            f"cam_fps={capture_info['capture_fps']:.1f} "
-                            f"crop={self.args.crop_mode} "
-                            "action_every="
-                            f"{training_sample_interval_seconds(self.args.training_source_fps):.2f}s "
-                            f"person_nms={float(self.args.person_nms_iou_threshold):.2f} "
-                            f"person_contain={float(self.args.person_containment_threshold):.2f} "
-                            f"max_live_actors={int(self.max_live_actors)} "
-                            f"min_obj_samples={MIN_OBJECT_TRACK_SAMPLE_COUNT} "
-                            f"live_objects={int(self.args.live_object_tokens)} "
-                            f"obj_hist={int(object_history_ready)} "
-                            f"people_hist={int(people_history_ready)} "
-                            f"frame={self.frame_count}"
-                        )
+                            kept_actor_idx = np.flatnonzero(keep)[: self.max_actors]
+                            for slot, actor_idx in enumerate(kept_actor_idx):
+                                if actor_idx >= len(self.current_track_ids):
+                                    continue
+                                track_id = self.current_track_ids[int(actor_idx)]
+                                track = self.tracks.get(track_id)
+                                if track is None:
+                                    continue
+                                relation_payload = actor_relation_debug_payload(
+                                    self.actor,
+                                    slot,
+                                    packed_objects,
+                                    object_inputs,
+                                )
+                                extra_payload = {}
+                                if relation_payload is not None:
+                                    extra_payload["debug_relation"] = relation_payload
+                                track.update_action(
+                                    action_probs[slot],
+                                    (
+                                        presence_probs[slot]
+                                        if presence_probs is not None
+                                        else None
+                                    ),
+                                    extra_payload,
+                                )
+                                actors[int(actor_idx)].update(track.action_payload())
+                            for actor in actors:
+                                track = self.tracks.get(actor["track_id"])
+                                if track is None:
+                                    continue
+                                payload = track.action_payload()
+                                if payload:
+                                    actor.update(payload)
+                            message = (
+                                f"{self.actor.backend_name} actors={int(valid.sum().item())} "
+                                f"objects={len(packed_objects)}/{len(objects)} "
+                                f"det={self.last_detector_ms:.0f}ms "
+                                f"actor={self.last_actor_ms:.0f}ms "
+                                f"det_age={det_age} "
+                                f"sampling=linspace "
+                                f"source_span={TRAINING_SPAN_FRAMES} "
+                                f"frames={TRAINING_CLIP_FRAMES} "
+                                f"source_fps={float(self.args.training_source_fps):.1f} "
+                                f"real_span={clip_span_sec:.1f}s "
+                                f"cam_fps={capture_info['capture_fps']:.1f} "
+                                f"crop={self.args.crop_mode} "
+                                "action_every="
+                                f"{training_sample_interval_seconds(self.args.training_source_fps):.2f}s "
+                                f"person_nms={float(self.args.person_nms_iou_threshold):.2f} "
+                                f"person_contain={float(self.args.person_containment_threshold):.2f} "
+                                f"max_live_actors={int(self.max_live_actors)} "
+                                f"min_obj_samples={MIN_OBJECT_TRACK_SAMPLE_COUNT} "
+                                f"obj_conf_power={OBJECT_TEMPORAL_CONF_POWER:.2f} "
+                                f"live_objects={int(self.args.live_object_tokens)} "
+                                f"obj_hist={int(object_history_ready)} "
+                                f"people_hist={int(people_history_ready)} "
+                                f"frame={self.frame_count}"
+                            )
+                        except RuntimeError as exc:
+                            self.last_actor_ms = (
+                                time.perf_counter() - started
+                            ) * 1000.0
+                            self.last_action_frame = self.frame_count
+                            self.last_action_time = latest_camera_time
+                            for actor_payload in actors:
+                                for key in (
+                                    "label",
+                                    "action_conf",
+                                    "top5",
+                                    "presence",
+                                    "debug_relation",
+                                ):
+                                    actor_payload.pop(key, None)
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                            error = f"{type(exc).__name__}: {exc}"
+                            print(
+                                "Actor inference failed "
+                                f"frame={self.frame_count} "
+                                f"clip_shape={tuple(clip.shape)} "
+                                f"boxes_shape={tuple(boxes.shape)} "
+                                f"object_boxes_shape={tuple(object_inputs['object_boxes'].shape)} "
+                                f"error={error}",
+                                flush=True,
+                            )
+                            traceback.print_exc()
+                            message = f"actor inference failed: {error}"
                         packed_object_payload = [
                             {
                                 "slot": int(item.get("slot", index)),

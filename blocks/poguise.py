@@ -427,7 +427,7 @@ class KTPAttention(Attention):
                     device=x.device,
                     dtype=q.dtype,
                 )
-                attn_mask = attn_mask.masked_fill(
+                attn_mask.masked_fill_(
                     key_padding_mask[:, None, None, :],
                     torch.finfo(q.dtype).min,
                 )
@@ -445,7 +445,7 @@ class KTPAttention(Attention):
             if key_padding_mask is not None and (
                 self.trt_safe_attention or key_padding_mask.any()
             ):
-                attn = attn.masked_fill(
+                attn.masked_fill_(
                     key_padding_mask[:, None, None, :],
                     torch.finfo(attn.dtype).min,
                 )

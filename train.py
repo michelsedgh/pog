@@ -430,6 +430,51 @@ def build_parser():
         type=float,
         default=0.5,
     )
+    parser.add_argument(
+        "--actor_object_detector_dropout_prob",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--actor_object_detector_dropout_action_loss_weight",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--actor_object_detector_dropout_relation_loss_weight",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--actor_object_detector_dropout_eval",
+        type=int,
+        default=0,
+    )
+    parser.add_argument(
+        "--actor_object_proposal_aug_prob",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--actor_object_proposal_box_jitter",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--actor_object_proposal_scale_jitter",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--actor_object_proposal_conf_jitter",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--actor_object_proposal_distractor_drop_prob",
+        type=float,
+        default=0.0,
+    )
     parser.add_argument("--deepspeed_optim", type=int, default=0)
     parser.add_argument("--kp_only", type=int, default=0)
 

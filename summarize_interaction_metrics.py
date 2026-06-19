@@ -82,6 +82,10 @@ CORE_COLUMNS = [
     "val_deploy_score",
     "val_deploy_key_action_mean",
     "val_deploy_key_action_min",
+    "val_deploy_object_dropout_action_acc",
+    "val_deploy_object_dropout_Uselaptop_acc",
+    "val_deploy_object_dropout_joint_missing_acc",
+    "val_deploy_object_dropout_joint_Uselaptop_acc",
     "val_actor_all_slot_acc",
     "val_actor_pair_acc",
     "val_actor_pair_swap_acc",
@@ -111,8 +115,22 @@ CORE_COLUMNS = [
     "val_relation_exact_when_action_correct",
     "val_relation_action_joint_Uselaptop_acc",
     "val_relation_correct_action_wrong_Uselaptop_rate",
+    "val_relation_action_joint_missing_Uselaptop_acc",
+    "val_relation_correct_action_wrong_missing_Uselaptop_rate",
     "val_action_Uselaptop_object_confuser_margin",
     "val_action_Uselaptop_object_confuser_win_rate",
+    "val_action_Uselaptop_missing_object_confuser_margin",
+    "val_action_Uselaptop_missing_object_confuser_win_rate",
+    "val_object_dropout_actor_rate",
+    "val_object_dropout_object_drop_rate",
+    "val_object_dropout_action_acc",
+    "val_object_dropout_action_Uselaptop_acc",
+    "val_object_dropout_relation_null_rate_missing_objectful",
+    "val_object_dropout_relation_action_joint_missing_objectful_acc",
+    "val_object_dropout_relation_action_joint_missing_Uselaptop_acc",
+    "val_object_dropout_relation_correct_action_wrong_missing_Uselaptop_rate",
+    "val_object_dropout_action_Uselaptop_missing_object_confuser_margin",
+    "val_object_dropout_action_Uselaptop_missing_object_confuser_win_rate",
     "val_actor_object_prompt_token_count",
     "val_token_selection_visual_keep_rate",
     "val_token_selection_actor_box_keep_rate",
@@ -363,6 +381,10 @@ def print_compact_epoch_summary(epoch_df):
         "val_relation_correct_action_wrong_Uselaptop_rate",
         "val_action_Uselaptop_object_confuser_margin",
         "val_action_Uselaptop_object_confuser_win_rate",
+        "val_object_dropout_action_acc",
+        "val_object_dropout_action_Uselaptop_acc",
+        "val_object_dropout_relation_action_joint_missing_Uselaptop_acc",
+        "val_object_dropout_action_Uselaptop_missing_object_confuser_margin",
         "val_actor_object_prompt_token_count",
         "val_token_selection_visual_keep_rate",
         "val_token_selection_actor_box_keep_rate",
@@ -497,6 +519,10 @@ def print_compact_best(epoch_df):
         "val_deploy_score",
         "val_f1",
         "val_acc_macro",
+        "val_deploy_object_dropout_action_acc",
+        "val_deploy_object_dropout_Uselaptop_acc",
+        "val_deploy_object_dropout_joint_missing_acc",
+        "val_deploy_object_dropout_joint_Uselaptop_acc",
         "val_group_object_mapped_acc",
         "val_group_objectless_acc",
         "val_group_laptop_book_tv_acc",
@@ -523,8 +549,22 @@ def print_compact_best(epoch_df):
         "val_relation_exact_when_action_correct",
         "val_relation_action_joint_Uselaptop_acc",
         "val_relation_correct_action_wrong_Uselaptop_rate",
+        "val_relation_action_joint_missing_Uselaptop_acc",
+        "val_relation_correct_action_wrong_missing_Uselaptop_rate",
         "val_action_Uselaptop_object_confuser_margin",
         "val_action_Uselaptop_object_confuser_win_rate",
+        "val_action_Uselaptop_missing_object_confuser_margin",
+        "val_action_Uselaptop_missing_object_confuser_win_rate",
+        "val_object_dropout_actor_rate",
+        "val_object_dropout_object_drop_rate",
+        "val_object_dropout_action_acc",
+        "val_object_dropout_action_Uselaptop_acc",
+        "val_object_dropout_relation_null_rate_missing_objectful",
+        "val_object_dropout_relation_action_joint_missing_objectful_acc",
+        "val_object_dropout_relation_action_joint_missing_Uselaptop_acc",
+        "val_object_dropout_relation_correct_action_wrong_missing_Uselaptop_rate",
+        "val_object_dropout_action_Uselaptop_missing_object_confuser_margin",
+        "val_object_dropout_action_Uselaptop_missing_object_confuser_win_rate",
         "val_token_selection_actor_box_keep_rate",
         "val_token_selection_visible_object_box_keep_rate",
         "val_token_selection_exact_teacher_object_keep_rate",
@@ -613,6 +653,14 @@ def print_decision(epoch_df):
         latest,
         "val_relation_correct_action_wrong_Uselaptop_rate",
     )
+    uselaptop_missing_joint = metric(
+        latest,
+        "val_relation_action_joint_missing_Uselaptop_acc",
+    )
+    uselaptop_missing_relation_action_wrong = metric(
+        latest,
+        "val_relation_correct_action_wrong_missing_Uselaptop_rate",
+    )
     uselaptop_confuser_margin = metric(
         latest,
         "val_action_Uselaptop_object_confuser_margin",
@@ -620,6 +668,43 @@ def print_decision(epoch_df):
     uselaptop_confuser_win = metric(
         latest,
         "val_action_Uselaptop_object_confuser_win_rate",
+    )
+    uselaptop_missing_confuser_margin = metric(
+        latest,
+        "val_action_Uselaptop_missing_object_confuser_margin",
+    )
+    uselaptop_missing_confuser_win = metric(
+        latest,
+        "val_action_Uselaptop_missing_object_confuser_win_rate",
+    )
+    dropout_action = metric(latest, "val_object_dropout_action_acc")
+    dropout_uselaptop_action = metric(
+        latest,
+        "val_object_dropout_action_Uselaptop_acc",
+    )
+    dropout_null_missing = metric(
+        latest,
+        "val_object_dropout_relation_null_rate_missing_objectful",
+    )
+    dropout_joint_missing = metric(
+        latest,
+        "val_object_dropout_relation_action_joint_missing_objectful_acc",
+    )
+    dropout_uselaptop_joint = metric(
+        latest,
+        "val_object_dropout_relation_action_joint_missing_Uselaptop_acc",
+    )
+    dropout_uselaptop_relation_action_wrong = metric(
+        latest,
+        "val_object_dropout_relation_correct_action_wrong_missing_Uselaptop_rate",
+    )
+    dropout_uselaptop_margin = metric(
+        latest,
+        "val_object_dropout_action_Uselaptop_missing_object_confuser_margin",
+    )
+    dropout_uselaptop_win = metric(
+        latest,
+        "val_object_dropout_action_Uselaptop_missing_object_confuser_win_rate",
     )
 
     pos = metric(latest, "val_interaction_heatmap_positive_mean")
@@ -736,8 +821,25 @@ def print_decision(epoch_df):
             "uselaptop joint: "
             f"joint {fmt(uselaptop_joint)}, "
             f"rel_ok_action_wrong {fmt(uselaptop_relation_action_wrong)}, "
+            f"missing_joint {fmt(uselaptop_missing_joint)}, "
+            f"missing_rel_ok_action_wrong {fmt(uselaptop_missing_relation_action_wrong)}, "
             f"confuser_margin {fmt(uselaptop_confuser_margin)}, "
-            f"confuser_win {fmt(uselaptop_confuser_win)}"
+            f"confuser_win {fmt(uselaptop_confuser_win)}, "
+            f"missing_margin {fmt(uselaptop_missing_confuser_margin)}, "
+            f"missing_win {fmt(uselaptop_missing_confuser_win)}"
+        )
+    if pd.notna(dropout_action) or pd.notna(dropout_uselaptop_joint):
+        print(
+            "object-dropout fallback: "
+            f"action {fmt(dropout_action)}, "
+            f"uselaptop_action {fmt(dropout_uselaptop_action)}, "
+            f"null_missing {fmt(dropout_null_missing)}, "
+            f"joint_missing {fmt(dropout_joint_missing)}, "
+            f"uselaptop_joint {fmt(dropout_uselaptop_joint)}, "
+            "uselaptop_rel_ok_action_wrong "
+            f"{fmt(dropout_uselaptop_relation_action_wrong)}, "
+            f"uselaptop_margin {fmt(dropout_uselaptop_margin)}, "
+            f"uselaptop_win {fmt(dropout_uselaptop_win)}"
         )
     if pd.notna(token_keep_visual):
         print(
@@ -789,6 +891,23 @@ def print_decision(epoch_df):
 
     if pd.notna(f1_delta) and f1_delta < -0.01:
         print("STOP/ROLL BACK: action F1 dropped more than 0.01 from epoch 0.")
+        return
+    if pd.notna(dropout_uselaptop_action) and dropout_uselaptop_action < 0.70:
+        print(
+            "FALLBACK FAIL: Uselaptop is weak when the compatible object is "
+            "dropped from detector inputs."
+        )
+        return
+    if pd.notna(dropout_uselaptop_joint) and dropout_uselaptop_joint < 0.70:
+        print(
+            "FALLBACK FAIL: Uselaptop action and NULL relation do not agree under "
+            "object dropout."
+        )
+        return
+    if pd.notna(dropout_joint_missing) and dropout_joint_missing < 0.65:
+        print(
+            "CONTINUE: detector-miss fallback is improving but not strong enough yet."
+        )
         return
     if pd.notna(joint_exact):
         if (
@@ -871,6 +990,17 @@ def print_row(title, row):
             f"{metric(row, 'val_relation_action_joint_Uselaptop_acc'):.4f}, "
             "uselaptop_margin "
             f"{metric(row, 'val_action_Uselaptop_object_confuser_margin'):.4f}"
+        )
+    if pd.notna(metric(row, "val_object_dropout_action_acc")):
+        print(
+            "object-dropout fallback: "
+            f"action {metric(row, 'val_object_dropout_action_acc'):.4f}, "
+            "uselaptop_action "
+            f"{metric(row, 'val_object_dropout_action_Uselaptop_acc'):.4f}, "
+            "uselaptop_joint "
+            f"{metric(row, 'val_object_dropout_relation_action_joint_missing_Uselaptop_acc'):.4f}, "
+            "uselaptop_margin "
+            f"{metric(row, 'val_object_dropout_action_Uselaptop_missing_object_confuser_margin'):.4f}"
         )
     print(
         "interaction heatmap: "
@@ -958,6 +1088,7 @@ def main():
 
     print("\nREAD THIS:")
     print("- Main proof: val_f1/per-action accuracy stay healthy while joint relation-action metrics improve.")
+    print("- Detector-dropout metrics prove objectful actions still work when the compatible object token is hidden.")
     print("- For each actor, the object objective is one CE over NULL plus detected object slots.")
     print("- Runtime objects update actor tokens inside the transformer and feed selected object memory into actor_head.")
     print("- The only object objective is relation CE; removed side objectives are not part of this run.")
