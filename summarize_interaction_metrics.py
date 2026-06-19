@@ -86,6 +86,9 @@ CORE_COLUMNS = [
     "val_deploy_object_dropout_Uselaptop_acc",
     "val_deploy_object_dropout_joint_missing_acc",
     "val_deploy_object_dropout_joint_Uselaptop_acc",
+    "val_deploy_object_present_true_prob_gain",
+    "val_deploy_object_present_Uselaptop_prob_gain",
+    "val_deploy_object_present_Uselaptop_confuser_margin_gain",
     "val_actor_all_slot_acc",
     "val_actor_pair_acc",
     "val_actor_pair_swap_acc",
@@ -131,6 +134,9 @@ CORE_COLUMNS = [
     "val_object_dropout_relation_correct_action_wrong_missing_Uselaptop_rate",
     "val_object_dropout_action_Uselaptop_missing_object_confuser_margin",
     "val_object_dropout_action_Uselaptop_missing_object_confuser_win_rate",
+    "val_object_dropout_object_present_true_prob_gain",
+    "val_object_dropout_object_present_Uselaptop_prob_gain",
+    "val_object_dropout_object_present_Uselaptop_confuser_margin_gain",
     "val_actor_object_prompt_token_count",
     "val_token_selection_visual_keep_rate",
     "val_token_selection_actor_box_keep_rate",
@@ -385,6 +391,8 @@ def print_compact_epoch_summary(epoch_df):
         "val_object_dropout_action_Uselaptop_acc",
         "val_object_dropout_relation_action_joint_missing_Uselaptop_acc",
         "val_object_dropout_action_Uselaptop_missing_object_confuser_margin",
+        "val_deploy_object_present_Uselaptop_prob_gain",
+        "val_deploy_object_present_Uselaptop_confuser_margin_gain",
         "val_actor_object_prompt_token_count",
         "val_token_selection_visual_keep_rate",
         "val_token_selection_actor_box_keep_rate",
@@ -706,6 +714,18 @@ def print_decision(epoch_df):
         latest,
         "val_object_dropout_action_Uselaptop_missing_object_confuser_win_rate",
     )
+    object_present_true_gain = metric(
+        latest,
+        "val_deploy_object_present_true_prob_gain",
+    )
+    object_present_uselaptop_gain = metric(
+        latest,
+        "val_deploy_object_present_Uselaptop_prob_gain",
+    )
+    object_present_uselaptop_margin_gain = metric(
+        latest,
+        "val_deploy_object_present_Uselaptop_confuser_margin_gain",
+    )
 
     pos = metric(latest, "val_interaction_heatmap_positive_mean")
     pred_max = metric(latest, "val_interaction_heatmap_pred_max")
@@ -841,6 +861,13 @@ def print_decision(epoch_df):
             f"uselaptop_margin {fmt(dropout_uselaptop_margin)}, "
             f"uselaptop_win {fmt(dropout_uselaptop_win)}"
         )
+    if pd.notna(object_present_true_gain) or pd.notna(object_present_uselaptop_gain):
+        print(
+            "object-present gain: "
+            f"true_prob {fmt(object_present_true_gain)}, "
+            f"uselaptop_prob {fmt(object_present_uselaptop_gain)}, "
+            f"uselaptop_margin {fmt(object_present_uselaptop_margin_gain)}"
+        )
     if pd.notna(token_keep_visual):
         print(
             "token-selection retention: "
@@ -902,6 +929,12 @@ def print_decision(epoch_df):
         print(
             "FALLBACK FAIL: Uselaptop action and NULL relation do not agree under "
             "object dropout."
+        )
+        return
+    if pd.notna(object_present_uselaptop_gain) and object_present_uselaptop_gain < -0.02:
+        print(
+            "OBJECT PATH FAIL: detected object evidence is hurting Uselaptop "
+            "relative to the object-hidden pass."
         )
         return
     if pd.notna(dropout_joint_missing) and dropout_joint_missing < 0.65:
@@ -1001,6 +1034,15 @@ def print_row(title, row):
             f"{metric(row, 'val_object_dropout_relation_action_joint_missing_Uselaptop_acc'):.4f}, "
             "uselaptop_margin "
             f"{metric(row, 'val_object_dropout_action_Uselaptop_missing_object_confuser_margin'):.4f}"
+        )
+    if pd.notna(metric(row, "val_deploy_object_present_true_prob_gain")):
+        print(
+            "object-present gain: "
+            f"true_prob {metric(row, 'val_deploy_object_present_true_prob_gain'):.4f}, "
+            "uselaptop_prob "
+            f"{metric(row, 'val_deploy_object_present_Uselaptop_prob_gain'):.4f}, "
+            "uselaptop_margin "
+            f"{metric(row, 'val_deploy_object_present_Uselaptop_confuser_margin_gain'):.4f}"
         )
     print(
         "interaction heatmap: "

@@ -76,6 +76,12 @@ class TensorRTActorEngine:
         }
         input_set = set(self.input_names)
         output_set = set(self.output_names)
+        if "object_confs" in input_set:
+            raise RuntimeError(
+                "This TensorRT actor engine uses the removed object_confs input. "
+                "Re-export the actor engine so object existence is represented by "
+                "object_valid only."
+            )
         self.uses_object_proposals = object_inputs.issubset(input_set)
         export_hparams = self.metadata.get("export_hparams", {})
         self.actor_object_relation_in_transformer = bool(

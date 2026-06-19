@@ -8,7 +8,11 @@ import torch
 import os
 import os.path
 import pickle
-from datasets.object_vocab import NUM_OBJECT_CLASSES
+from datasets.object_vocab import NUM_OBJECT_CLASSES, OBJECT_TO_ID
+from datasets.toyota_action_taxonomy import (
+    toyota_action_object_map,
+    toyota_action_to_index,
+)
 
 
 def load_state_dict(
@@ -155,6 +159,16 @@ class POGUISE(pl.LightningModule):
         self.actor_relation_action_fusion_enabled = bool(
             self.hparams.get("actor_relation_action_fusion", 0)
         )
+        self.actor_object_action_prior_weight = float(
+            self.hparams.get("actor_object_action_prior_weight", 0.0)
+        )
+        self.actor_object_action_prior_negative_weight = float(
+            self.hparams.get("actor_object_action_prior_negative_weight", 0.0)
+        )
+        if self.actor_object_action_prior_weight < 0:
+            raise ValueError("actor_object_action_prior_weight must be >= 0")
+        if self.actor_object_action_prior_negative_weight < 0:
+            raise ValueError("actor_object_action_prior_negative_weight must be >= 0")
         if bool(self.hparams.get("actor_object_slot_head", 0)):
             raise ValueError(
                 "actor_object_slot_head was replaced by "
@@ -216,6 +230,11 @@ class POGUISE(pl.LightningModule):
                 "semantics come from relation-only runtime object memory."
             )
         self.use_register_tokens = bool(self.hparams.get("use_register_tokens", 0))
+        self.register_buffer(
+            "actor_object_action_prior_matrix",
+            self._build_actor_object_action_prior_matrix(),
+            persistent=False,
+        )
         self._create_network()
         # freeze backbone if specified
         if self.hparams.freeze_backbone:
@@ -229,12 +248,133 @@ class POGUISE(pl.LightningModule):
         if stale_object_conf:
             preview = ", ".join(stale_object_conf[:12])
             raise RuntimeError(
-                "Checkpoint contains removed object-confidence weights. "
-                "The actor-object model now receives only object boxes, classes, "
-                "and valid masks; retrain from a clean base checkpoint. "
+                "Checkpoint contains removed learned object-confidence embedding "
+                "weights. Detector confidence is no longer a learned actor-model "
+                "feature; thresholded object_valid proposals provide object "
+                "existence evidence. Retrain from a clean base checkpoint. "
                 f"First stale keys: {preview}"
             )
         return result
+
+    def _build_actor_object_action_prior_matrix(self):
+        num_objects = int(self.hparams.get("num_object_classes", NUM_OBJECT_CLASSES))
+        num_classes = int(self.hparams.get("num_classes", 0))
+        matrix = torch.zeros(num_objects, num_classes, dtype=torch.float32)
+        compatible = torch.zeros(num_objects, num_classes, dtype=torch.bool)
+        if num_objects <= 0 or num_classes <= 0:
+            if (
+                self.actor_object_action_prior_weight > 0
+                or self.actor_object_action_prior_negative_weight > 0
+            ):
+                raise ValueError(
+                    "actor object/action priors require positive "
+                    f"num_object_classes and num_classes, got {num_objects} and "
+                    f"{num_classes}"
+                )
+            return matrix
+        task_type = self.hparams.get("task_type", "CS")
+        action_taxonomy = self.hparams.get("toyota_action_taxonomy", "toyota_31")
+        try:
+            action_to_index = toyota_action_to_index(task_type, action_taxonomy)
+            action_objects = toyota_action_object_map(task_type, action_taxonomy)
+        except Exception as exc:
+            if (
+                self.actor_object_action_prior_weight > 0
+                or self.actor_object_action_prior_negative_weight > 0
+            ):
+                raise ValueError(
+                    "actor object/action priors require a valid Toyota "
+                    f"action/object map, got task_type={task_type!r}, "
+                    f"toyota_action_taxonomy={action_taxonomy!r}"
+                ) from exc
+            return matrix
+        mapped_action_indices = set()
+        mapped_object_indices = set()
+        for action_name, object_names in action_objects.items():
+            action_idx = action_to_index.get(action_name)
+            if action_idx is None or not 0 <= int(action_idx) < num_classes:
+                continue
+            mapped_action_indices.add(int(action_idx))
+            for object_name in object_names:
+                object_idx = OBJECT_TO_ID.get(object_name)
+                if object_idx is None or not 0 <= int(object_idx) < num_objects:
+                    continue
+                mapped_object_indices.add(int(object_idx))
+                compatible[int(object_idx), int(action_idx)] = True
+        if (
+            (
+                self.actor_object_action_prior_weight > 0
+                or self.actor_object_action_prior_negative_weight > 0
+            )
+            and not compatible.any()
+        ):
+            raise ValueError(
+                "actor object/action priors are enabled but no object/action "
+                f"pairs were mapped for task_type={task_type!r}, "
+                f"toyota_action_taxonomy={action_taxonomy!r}, "
+                f"num_object_classes={num_objects}, num_classes={num_classes}"
+            )
+        if self.actor_object_action_prior_weight > 0:
+            matrix = matrix + compatible.to(dtype=matrix.dtype) * float(
+                self.actor_object_action_prior_weight
+            )
+        if self.actor_object_action_prior_negative_weight > 0:
+            for object_idx in mapped_object_indices:
+                for action_idx in mapped_action_indices:
+                    if not bool(compatible[object_idx, action_idx]):
+                        matrix[object_idx, action_idx] = -float(
+                            self.actor_object_action_prior_negative_weight
+                        )
+        return matrix
+
+    def _actor_object_action_prior(self, relation_aux, object_classes, object_valid, dtype):
+        if (
+            self.actor_object_action_prior_weight <= 0
+            and self.actor_object_action_prior_negative_weight <= 0
+        ):
+            return None
+        object_attention = relation_aux.get("object_attention")
+        if object_attention is None or object_classes is None or object_valid is None:
+            return None
+        if self.actor_object_action_prior_matrix.numel() == 0:
+            return None
+
+        object_attention = object_attention.float()
+        object_classes = object_classes.to(
+            device=object_attention.device,
+            dtype=torch.long,
+        )
+        object_valid = object_valid.to(
+            device=object_attention.device,
+            dtype=torch.bool,
+        )
+        if object_classes.shape != object_valid.shape:
+            raise RuntimeError(
+                "object_classes/object_valid shape mismatch for action prior: "
+                f"{tuple(object_classes.shape)} vs {tuple(object_valid.shape)}"
+            )
+        if object_attention.shape[:1] != object_classes.shape[:1] or (
+            object_attention.shape[2] != object_classes.shape[1]
+        ):
+            raise RuntimeError(
+                "relation attention/object class shape mismatch for action prior: "
+                f"{tuple(object_attention.shape)} vs {tuple(object_classes.shape)}"
+            )
+        max_object = int(self.actor_object_action_prior_matrix.shape[0]) - 1
+        safe_classes = object_classes.clamp(0, max_object)
+        object_action_matrix = self.actor_object_action_prior_matrix.to(
+            device=object_attention.device,
+            dtype=object_attention.dtype,
+        )[safe_classes]
+        object_action_matrix = object_action_matrix * object_valid[:, :, None].to(
+            dtype=object_action_matrix.dtype
+        )
+        prior = torch.einsum(
+            "bak,bkc->bac",
+            object_attention,
+            object_action_matrix,
+        )
+        return prior.to(dtype=dtype)
 
     def _create_network(self):
         n_registers = (
@@ -324,6 +464,10 @@ class POGUISE(pl.LightningModule):
                 actor_object_relation_null_logit_init=self.hparams.get(
                     "actor_object_relation_null_logit_init",
                     4.0,
+                ),
+                actor_object_relation_valid_logit_bonus=self.hparams.get(
+                    "actor_object_relation_valid_logit_bonus",
+                    0.0,
                 ),
                 actor_object_relation_geometry_bias_weight=self.hparams.get(
                     "actor_object_relation_geometry_bias_weight",
@@ -426,6 +570,10 @@ class POGUISE(pl.LightningModule):
                 actor_object_relation_null_logit_init=self.hparams.get(
                     "actor_object_relation_null_logit_init",
                     4.0,
+                ),
+                actor_object_relation_valid_logit_bonus=self.hparams.get(
+                    "actor_object_relation_valid_logit_bonus",
+                    0.0,
                 ),
                 actor_object_relation_geometry_bias_weight=self.hparams.get(
                     "actor_object_relation_geometry_bias_weight",
@@ -571,6 +719,7 @@ class POGUISE(pl.LightningModule):
         action_labels=None,
         object_boxes=None,
         object_classes=None,
+        object_confs=None,
         object_valid=None,
     ):
         # convert to b c t h w
@@ -623,6 +772,7 @@ class POGUISE(pl.LightningModule):
             self.last_actor_object_prompt_valid = None
             self.last_actor_object_relation_context = None
             self.last_actor_object_relation_mass = None
+            self.last_actor_object_action_prior = None
             self.last_actor_action_tokens = None
             self.last_actor_object_relation_aux = getattr(
                 self.net,
@@ -717,6 +867,26 @@ class POGUISE(pl.LightningModule):
                 x_action = x_actor + self.actor_relation_action_fusion(fusion_in)
             self.last_actor_action_tokens = x_action
             action_scores = self.actor_head(x_action)
+            if (
+                (
+                    self.actor_object_action_prior_weight > 0
+                    or self.actor_object_action_prior_negative_weight > 0
+                )
+                and self.last_actor_object_relation_aux
+            ):
+                last_block = sorted(
+                    self.last_actor_object_relation_aux.keys(),
+                    key=lambda value: int(value),
+                )[-1]
+                action_prior = self._actor_object_action_prior(
+                    self.last_actor_object_relation_aux[last_block],
+                    object_classes,
+                    object_valid,
+                    action_scores.dtype,
+                )
+                if action_prior is not None:
+                    action_scores = action_scores + action_prior
+                    self.last_actor_object_action_prior = action_prior
             self.last_actor_action_logits = action_scores
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
@@ -813,9 +983,24 @@ class POGUISE(pl.LightningModule):
         )
         parser.add_argument("--actor_relation_action_fusion", type=int, default=0)
         parser.add_argument(
+            "--actor_object_action_prior_weight",
+            type=float,
+            default=0.0,
+        )
+        parser.add_argument(
+            "--actor_object_action_prior_negative_weight",
+            type=float,
+            default=0.0,
+        )
+        parser.add_argument(
             "--actor_object_relation_null_logit_init",
             type=float,
             default=4.0,
+        )
+        parser.add_argument(
+            "--actor_object_relation_valid_logit_bonus",
+            type=float,
+            default=0.0,
         )
         parser.add_argument(
             "--actor_object_relation_geometry_bias_weight",

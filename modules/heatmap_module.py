@@ -209,9 +209,9 @@ class HeatmapModule(pl.LightningModule):
             raise ValueError("actor_object_proposal_scale_jitter must be >= 0")
         if float(hparams.get("actor_object_proposal_conf_jitter", 0.0)) != 0.0:
             raise ValueError(
-                "actor_object_proposal_conf_jitter was removed. The actor model "
-                "does not receive detector confidence; use box jitter and "
-                "distractor dropping for object-proposal robustness."
+                "actor_object_proposal_conf_jitter was removed. Detector confidence "
+                "is detector-side evidence, not an augmented actor-model feature; "
+                "use box jitter and distractor dropping for proposal robustness."
             )
         self.actor_object_proposal_distractor_drop_prob = float(
             hparams.get("actor_object_proposal_distractor_drop_prob", 0.0)
@@ -359,6 +359,9 @@ class HeatmapModule(pl.LightningModule):
             "object_dropout_action_Uselaptop": [],
             "object_dropout_relation_action_joint_missing_objectful": [],
             "object_dropout_relation_action_joint_missing_Uselaptop": [],
+            "object_present_true_prob_gain": [],
+            "object_present_Uselaptop_prob_gain": [],
+            "object_present_Uselaptop_confuser_margin_gain": [],
         }
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
@@ -371,9 +374,10 @@ class HeatmapModule(pl.LightningModule):
         if stale_object_conf:
             preview = ", ".join(stale_object_conf[:12])
             raise RuntimeError(
-                "Checkpoint contains removed object-confidence weights. "
-                "The actor-object model now receives only object boxes, classes, "
-                "and valid masks; retrain from a clean base checkpoint. "
+                "Checkpoint contains removed learned object-confidence embedding "
+                "weights. Detector confidence is no longer a learned actor-model "
+                "feature; thresholded object_valid proposals provide object "
+                "existence evidence. Retrain from a clean base checkpoint. "
                 f"First stale keys: {preview}"
             )
         if self.actor_prompt and not strict:
@@ -430,6 +434,7 @@ class HeatmapModule(pl.LightningModule):
         action_labels=None,
         object_boxes=None,
         object_classes=None,
+        object_confs=None,
         object_valid=None,
     ):
         # Forward function that is run when visualizing the graph
@@ -976,6 +981,12 @@ class HeatmapModule(pl.LightningModule):
                 device=device,
                 dtype=torch.long,
             ),
+            "object_confs": torch.zeros(
+                batch_size,
+                n_objects,
+                device=device,
+                dtype=dtype,
+            ),
             "object_valid": torch.zeros(
                 batch_size,
                 n_objects,
@@ -990,6 +1001,7 @@ class HeatmapModule(pl.LightningModule):
         required = (
             "object_boxes",
             "object_classes",
+            "object_confs",
             "object_valid",
         )
         missing = [key for key in required if key not in target]
@@ -1007,10 +1019,24 @@ class HeatmapModule(pl.LightningModule):
                 device=device,
                 dtype=torch.long,
             ),
+            "object_confs": target["object_confs"].to(
+                device=device,
+                dtype=torch.float32,
+            ),
             "object_valid": target["object_valid"].to(
                 device=device,
                 dtype=torch.bool,
             ),
+        }
+
+    @staticmethod
+    def _actor_model_object_inputs(object_inputs):
+        if not object_inputs:
+            return {}
+        return {
+            key: value
+            for key, value in object_inputs.items()
+            if key != "object_confs"
         }
 
     def _detector_dropout_object_inputs(
@@ -1079,22 +1105,27 @@ class HeatmapModule(pl.LightningModule):
             return None
 
         masked_object_valid = object_valid & ~dropped_object_mask
+        masked_object_confs = object_inputs["object_confs"].clone()
+        masked_object_confs = masked_object_confs.masked_fill(dropped_object_mask, 0.0)
 
         masked_object_inputs = {
             "object_boxes": object_inputs["object_boxes"],
             "object_classes": object_classes,
+            "object_confs": masked_object_confs,
             "object_valid": masked_object_valid,
         }
         masked_target = dict(target)
         for key in (
             "object_boxes",
             "object_classes",
+            "object_confs",
             "interaction_object_index",
             "interaction_object_index_valid",
         ):
             if key in target:
                 masked_target[key] = target[key].to(device=device)
         masked_target["object_valid"] = masked_object_valid
+        masked_target["object_confs"] = masked_object_confs
 
         return {
             "object_inputs": masked_object_inputs,
@@ -1148,6 +1179,7 @@ class HeatmapModule(pl.LightningModule):
 
         boxes = object_inputs["object_boxes"].clone()
         original_boxes = boxes.clone()
+        confs = object_inputs["object_confs"].clone()
         if self.actor_object_proposal_box_jitter > 0.0:
             center = (boxes[..., :2] + boxes[..., 2:]) * 0.5
             size = (boxes[..., 2:] - boxes[..., :2]).clamp_min(1.0e-4)
@@ -1192,6 +1224,7 @@ class HeatmapModule(pl.LightningModule):
                 < self.actor_object_proposal_distractor_drop_prob
             )
             output_valid = output_valid & ~drop_mask
+            confs = confs.masked_fill(drop_mask, 0.0)
         else:
             drop_mask = torch.zeros_like(object_valid, dtype=torch.bool)
 
@@ -1210,6 +1243,7 @@ class HeatmapModule(pl.LightningModule):
         return {
             "object_boxes": boxes,
             "object_classes": object_inputs["object_classes"],
+            "object_confs": confs,
             "object_valid": output_valid,
         }
 
@@ -2048,6 +2082,7 @@ class HeatmapModule(pl.LightningModule):
         valid,
         target,
         object_inputs,
+        present_preds,
         loss_fn,
         stage,
     ):
@@ -2070,7 +2105,7 @@ class HeatmapModule(pl.LightningModule):
             boxes=boxes,
             valid=valid,
             action_labels=actions,
-            **masked_inputs,
+            **self._actor_model_object_inputs(masked_inputs),
         )
         dropout_preds, _, _ = self._unpack_model_data(data)
 
@@ -2094,6 +2129,7 @@ class HeatmapModule(pl.LightningModule):
             f"{aux_stage}_object_drop_count",
             dropped_object_mask.float().sum(),
         )
+        aux_outputs = {}
         if selected_count > 0:
             dropout_labels = actions.to(device=dropout_preds.device, dtype=torch.long)
             dropout_valid = selected_actor_mask.to(
@@ -2112,8 +2148,74 @@ class HeatmapModule(pl.LightningModule):
                 dropout_preds[dropout_valid],
                 dropout_labels[dropout_valid],
             )
+            present_probs = F.softmax(present_preds.detach().float(), dim=-1)
+            dropout_probs = F.softmax(dropout_preds.detach().float(), dim=-1)
+            label_idx = dropout_labels.clamp(
+                0,
+                present_probs.shape[-1] - 1,
+            ).unsqueeze(-1)
+            true_prob_gain = (
+                present_probs.gather(-1, label_idx).squeeze(-1)
+                - dropout_probs.gather(-1, label_idx).squeeze(-1)
+            )
+            self._log_scalar(
+                f"{aux_stage}_object_present_true_prob_gain",
+                true_prob_gain[dropout_valid].mean(),
+                selected_count,
+            )
+            if stage == "val":
+                aux_outputs["object_present_true_prob_gain"] = (
+                    true_prob_gain[dropout_valid].detach()
+                )
 
-        aux_outputs = {}
+            uselaptop_idx = self._action_index("Uselaptop")
+            if uselaptop_idx is not None:
+                uselaptop_mask = dropout_valid & (
+                    dropout_labels == int(uselaptop_idx)
+                )
+                if uselaptop_mask.any():
+                    self._log_scalar(
+                        f"{aux_stage}_object_present_Uselaptop_prob_gain",
+                        true_prob_gain[uselaptop_mask].mean(),
+                        int(uselaptop_mask.sum().item()),
+                    )
+                    if stage == "val":
+                        aux_outputs["object_present_Uselaptop_prob_gain"] = (
+                            true_prob_gain[uselaptop_mask].detach()
+                        )
+                    confuser_indices = [
+                        self._action_index(action_name)
+                        for action_name in RELATION_ACTION_AUDIT_ACTIONS
+                        if action_name != "Uselaptop"
+                    ]
+                    confuser_indices = [
+                        int(index) for index in confuser_indices if index is not None
+                    ]
+                    if confuser_indices:
+                        confuser_tensor = torch.tensor(
+                            confuser_indices,
+                            device=dropout_preds.device,
+                            dtype=torch.long,
+                        )
+                        present_logits = present_preds.detach().float()
+                        dropout_logits = dropout_preds.detach().float()
+                        present_margin = present_logits[..., int(uselaptop_idx)] - (
+                            present_logits.index_select(-1, confuser_tensor).amax(dim=-1)
+                        )
+                        dropout_margin = dropout_logits[..., int(uselaptop_idx)] - (
+                            dropout_logits.index_select(-1, confuser_tensor).amax(dim=-1)
+                        )
+                        margin_gain = present_margin - dropout_margin
+                        self._log_scalar(
+                            f"{aux_stage}_object_present_Uselaptop_confuser_margin_gain",
+                            margin_gain[uselaptop_mask].mean(),
+                            int(uselaptop_mask.sum().item()),
+                        )
+                        if stage == "val":
+                            aux_outputs[
+                                "object_present_Uselaptop_confuser_margin_gain"
+                            ] = margin_gain[uselaptop_mask].detach()
+
         aux_relation_loss = self._actor_object_relation_loss(
             aux_stage,
             actions,
@@ -2416,7 +2518,7 @@ class HeatmapModule(pl.LightningModule):
             boxes=boxes,
             valid=valid,
             action_labels=actions,
-            **object_inputs,
+            **self._actor_model_object_inputs(object_inputs),
         )
         preds, hm_preds, presence_logits = self._unpack_model_data(data)
 
@@ -2479,6 +2581,7 @@ class HeatmapModule(pl.LightningModule):
             valid,
             target,
             object_inputs,
+            preds,
             loss_fn,
             stage,
         )
@@ -3152,7 +3255,7 @@ class HeatmapModule(pl.LightningModule):
             imgs,
             boxes=diag_boxes,
             valid=diag_valid,
-            **object_inputs,
+            **self._actor_model_object_inputs(object_inputs),
         )
         _, _, presence_logits = self._unpack_model_data(data)
         if presence_logits is None:
@@ -3189,7 +3292,7 @@ class HeatmapModule(pl.LightningModule):
             imgs,
             boxes=diag_boxes,
             valid=diag_valid,
-            **object_inputs,
+            **self._actor_model_object_inputs(object_inputs),
         )
         preds, _, _ = self._unpack_model_data(data)
         pred_labels = preds.argmax(dim=-1)
@@ -3278,6 +3381,7 @@ class HeatmapModule(pl.LightningModule):
         object_valid = source["object_valid"]
         object_boxes = source["object_boxes"]
         object_classes = source["object_classes"]
+        object_confs = source["object_confs"]
         num_objects = int(object_valid.shape[1])
         if object_capacity <= 0 or num_objects <= 0:
             return
@@ -3323,6 +3427,10 @@ class HeatmapModule(pl.LightningModule):
                 )
             )
             pair_target["object_classes"][pair_idx, new_idx] = object_classes[
+                source_idx,
+                old_idx,
+            ]
+            pair_target["object_confs"][pair_idx, new_idx] = object_confs[
                 source_idx,
                 old_idx,
             ]
@@ -3512,6 +3620,7 @@ class HeatmapModule(pl.LightningModule):
             required = (
                 "object_boxes",
                 "object_classes",
+                "object_confs",
                 "object_valid",
                 "interaction_object_index",
                 "interaction_object_index_valid",
@@ -3540,6 +3649,12 @@ class HeatmapModule(pl.LightningModule):
                 none_id,
                 device=imgs.device,
                 dtype=torch.long,
+            )
+            pair_target["object_confs"] = torch.zeros(
+                pair_count,
+                num_objects,
+                device=imgs.device,
+                dtype=torch.float32,
             )
             pair_target["object_valid"] = torch.zeros(
                 pair_count,
@@ -3687,7 +3802,7 @@ class HeatmapModule(pl.LightningModule):
                 pair_imgs,
                 boxes=pair_boxes,
                 valid=pair_valid,
-                **object_inputs,
+                **self._actor_model_object_inputs(object_inputs),
             )
             preds, _, _ = self._unpack_model_data(data)
             pair_preds = preds[:, :2].argmax(dim=-1)
@@ -3882,6 +3997,23 @@ class HeatmapModule(pl.LightningModule):
         object_dropout_joint_uselaptop_acc = mean_gathered(
             "object_dropout_relation_action_joint_missing_Uselaptop"
         )
+        object_present_true_gain = mean_gathered("object_present_true_prob_gain")
+        object_present_uselaptop_gain = mean_gathered(
+            "object_present_Uselaptop_prob_gain"
+        )
+        object_present_uselaptop_margin_gain = mean_gathered(
+            "object_present_Uselaptop_confuser_margin_gain"
+        )
+        object_present_true_hurt = (
+            (-object_present_true_gain).clamp_min(0.0)
+            if object_present_true_gain is not None
+            else None
+        )
+        object_present_uselaptop_hurt = (
+            (-object_present_uselaptop_gain).clamp_min(0.0)
+            if object_present_uselaptop_gain is not None
+            else None
+        )
 
         key_action_values = self._deploy_action_accuracies(
             pred_labels,
@@ -3917,6 +4049,8 @@ class HeatmapModule(pl.LightningModule):
             penalties=[
                 (hard_object_action_rate, 0.20),
                 (key_action_floor_deficit, 0.15),
+                (object_present_true_hurt, 0.10),
+                (object_present_uselaptop_hurt, 0.20),
             ],
         )
         if deploy_score is None:
@@ -3953,6 +4087,18 @@ class HeatmapModule(pl.LightningModule):
             (
                 "val_deploy_object_dropout_joint_Uselaptop_acc",
                 object_dropout_joint_uselaptop_acc,
+            ),
+            (
+                "val_deploy_object_present_true_prob_gain",
+                object_present_true_gain,
+            ),
+            (
+                "val_deploy_object_present_Uselaptop_prob_gain",
+                object_present_uselaptop_gain,
+            ),
+            (
+                "val_deploy_object_present_Uselaptop_confuser_margin_gain",
+                object_present_uselaptop_margin_gain,
             ),
             (
                 "val_deploy_objectless_with_object_visible_acc",
@@ -4401,7 +4547,7 @@ class HeatmapModule(pl.LightningModule):
                 imgs,
                 boxes=boxes,
                 valid=valid,
-                **object_inputs,
+                **self._actor_model_object_inputs(object_inputs),
             )
             preds, hm, _ = self._unpack_model_data(data)
             preds = preds.float()

@@ -523,15 +523,15 @@ def main():
         )
     if float(getattr(hparams, "actor_object_proposal_conf_jitter", 0.0)) != 0.0:
         raise ValueError(
-            "actor_object_proposal_conf_jitter was removed. The actor model "
-            "does not receive detector confidence; use box jitter and "
-            "distractor dropping for object-proposal robustness."
+            "actor_object_proposal_conf_jitter was removed. Detector confidence "
+            "is detector-side evidence, not an augmented actor-model feature; "
+            "use box jitter and distractor dropping for proposal robustness."
         )
     if float(getattr(hparams, "object_temporal_conf_power", 0.0)) != 0.0:
         raise ValueError(
-            "object_temporal_conf_power was removed. Detector confidence is "
-            "used only before the model for filtering/sorting; actor inputs "
-            "are object boxes, classes, and valid masks."
+            "object_temporal_conf_power was removed. Object existence is controlled "
+            "by detector-side thresholding and object_valid; sparse valid detections "
+            "are not down-weighted by temporal coverage inside the actor model."
         )
     if getattr(hparams, "actor_object_relation_in_transformer", 0):
         if not hparams.actor_object_prompt_tokens:

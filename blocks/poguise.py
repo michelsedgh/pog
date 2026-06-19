@@ -906,6 +906,7 @@ class ActorObjectRelationUpdate(nn.Module):
         hidden_dim=512,
         max_scale=1.0,
         null_logit_init=None,
+        valid_object_logit_bonus=0.0,
         learned_scale=False,
         layer_scale_init=0.25,
     ):
@@ -920,6 +921,9 @@ class ActorObjectRelationUpdate(nn.Module):
         self.object_v = nn.Linear(dim, dim, bias=False)
 
         self.null_logit = nn.Parameter(torch.tensor(float(null_logit_init)))
+        self.valid_object_logit_bonus = float(valid_object_logit_bonus)
+        if self.valid_object_logit_bonus < 0:
+            raise ValueError("valid_object_logit_bonus must be >= 0")
 
         fusion_dim = 3 * dim
         self.out = nn.Sequential(
@@ -984,6 +988,10 @@ class ActorObjectRelationUpdate(nn.Module):
                 f"{tuple(actor_tokens.shape[:2])}, got {tuple(actor_valid.shape)}"
             )
         object_valid = object_valid.to(device=obj_scores.device, dtype=torch.bool)
+        if self.valid_object_logit_bonus > 0:
+            obj_scores = obj_scores + object_valid[:, None, :].to(
+                dtype=obj_scores.dtype
+            ) * self.valid_object_logit_bonus
 
         if relation_bias is not None:
             relation_bias = relation_bias.to(
@@ -1187,6 +1195,7 @@ class VisionTransformer(nn.Module):
         actor_object_relation_hidden_dim=512,
         actor_object_relation_max_scale=1.0,
         actor_object_relation_null_logit_init=4.0,
+        actor_object_relation_valid_logit_bonus=0.0,
         actor_object_relation_geometry_bias_weight=0.5,
         actor_object_relation_heatmap_bias_weight=1.0,
         actor_object_relation_learned_scale=False,
@@ -1279,6 +1288,9 @@ class VisionTransformer(nn.Module):
         self.actor_object_relation_null_logit_init = float(
             actor_object_relation_null_logit_init
         )
+        self.actor_object_relation_valid_logit_bonus = float(
+            actor_object_relation_valid_logit_bonus
+        )
         self.actor_object_relation_geometry_bias_weight = float(
             actor_object_relation_geometry_bias_weight
         )
@@ -1297,6 +1309,8 @@ class VisionTransformer(nn.Module):
             raise ValueError("actor_object_relation_hidden_dim must be positive")
         if self.actor_object_relation_max_scale < 0:
             raise ValueError("actor_object_relation_max_scale must be non-negative")
+        if self.actor_object_relation_valid_logit_bonus < 0:
+            raise ValueError("actor_object_relation_valid_logit_bonus must be >= 0")
         if self.actor_object_relation_geometry_bias_weight < 0:
             raise ValueError("actor_object_relation_geometry_bias_weight must be >= 0")
         if self.actor_object_relation_heatmap_bias_weight < 0:
@@ -1418,6 +1432,9 @@ class VisionTransformer(nn.Module):
                         hidden_dim=self.actor_object_relation_hidden_dim,
                         max_scale=self.actor_object_relation_max_scale,
                         null_logit_init=self.actor_object_relation_null_logit_init,
+                        valid_object_logit_bonus=(
+                            self.actor_object_relation_valid_logit_bonus
+                        ),
                         learned_scale=self.actor_object_relation_learned_scale,
                         layer_scale_init=self.actor_object_relation_layer_scale_init,
                     )
@@ -1430,6 +1447,7 @@ class VisionTransformer(nn.Module):
                 hidden_dim=self.actor_object_relation_hidden_dim,
                 max_scale=self.actor_object_relation_max_scale,
                 null_logit_init=self.actor_object_relation_null_logit_init,
+                valid_object_logit_bonus=self.actor_object_relation_valid_logit_bonus,
                 learned_scale=self.actor_object_relation_learned_scale,
                 layer_scale_init=self.actor_object_relation_layer_scale_init,
             )
@@ -1918,7 +1936,7 @@ class VisionTransformer(nn.Module):
                 raise ValueError(
                     "object_valid must have shape "
                     f"{tuple(object_boxes.shape[:2])}, got {tuple(object_valid.shape)}"
-                )
+            )
             object_boxes = object_boxes.to(device=x.device, dtype=x.dtype).clamp(0.0, 1.0)
             object_classes = object_classes.to(device=x.device, dtype=torch.long)
             object_valid = object_valid.to(device=x.device, dtype=torch.bool)

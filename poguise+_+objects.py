@@ -432,7 +432,7 @@ def set_cmd_arg(cmd, key, value):
 REQUESTED_EPOCHS = parse_launcher_args(sys.argv)
 TS = datetime.now().strftime("%Y%m%d_%H%M%S")
 RUN_EPOCHS = REQUESTED_EPOCHS or 10
-RUN_NAME = f"actor_object_relation_noconf_dropout_aug_{RUN_EPOCHS}ep_{TS}"
+RUN_NAME = f"actor_object_relation_validprior_margin_aug_{RUN_EPOCHS}ep_{TS}"
 EPOCH_DIR = str(Path(DATA_DIR) / "checkpoints" / RUN_NAME / "epoch_checkpoints")
 
 cmd = [
@@ -470,18 +470,22 @@ cmd = [
 
     "--actor_interaction_heatmaps", "1",
 
-    # Runtime detections are relation-only object memory. They guide pruning by
-    # object-box priors and update actor tokens only through actor-object relation.
+    # Runtime detections are relation-only object memory. Detector thresholds
+    # decide whether an object exists; the actor model receives valid object
+    # proposals as binary evidence, not calibrated detector-confidence features.
     "--actor_object_prompt_tokens", "1",
     "--actor_object_relation_in_transformer", "1",
     "--actor_object_relation_blocks", "2,5,8",
-    "--actor_object_relation_null_logit_init", "3.0",
+    "--actor_object_relation_null_logit_init", "3.5",
+    "--actor_object_relation_valid_logit_bonus", "2.0",
     "--actor_object_relation_geometry_bias_weight", "1.0",
     "--actor_object_relation_heatmap_bias_weight", "2.0",
     "--actor_object_relation_max_scale", "1.5",
     "--actor_object_relation_learned_scale", "1",
     "--actor_object_relation_layer_scale_init", "0.25",
     "--actor_relation_action_fusion", "1",
+    "--actor_object_action_prior_weight", "1.50",
+    "--actor_object_action_prior_negative_weight", "0.75",
     "--token_selection_cls_weight", "0.15",
     "--token_selection_actor_weight", "0.25",
     "--token_selection_object_weight", "0.00",
@@ -494,7 +498,7 @@ cmd = [
     "--object_detector_cache", OBJECT_DETECTOR_CACHE,
     "--object_camera_allowlist", "tv_monitor=c05,c06",
     "--object_ignore_regions", "c03=0,0,0.26,0.42",
-    "--object_conf_threshold", "0.20",
+    "--object_conf_threshold", "0.25",
 
     "--interaction_heatmap_sigma", "2.5",
 
@@ -520,11 +524,11 @@ cmd = [
 
     "--actor_object_relation_loss_weight", "1.00",
     "--actor_object_relation_null_loss_weight", "0.75",
-    "--actor_object_detector_dropout_prob", "1.0",
-    "--actor_object_detector_dropout_action_loss_weight", "0.40",
-    "--actor_object_detector_dropout_relation_loss_weight", "0.20",
+    "--actor_object_detector_dropout_prob", "0.45",
+    "--actor_object_detector_dropout_action_loss_weight", "0.20",
+    "--actor_object_detector_dropout_relation_loss_weight", "0.10",
     "--actor_object_detector_dropout_eval", "1",
-    "--actor_object_proposal_aug_prob", "0.70",
+    "--actor_object_proposal_aug_prob", "0.35",
     "--actor_object_proposal_box_jitter", "0.08",
     "--actor_object_proposal_scale_jitter", "0.15",
     "--actor_object_proposal_distractor_drop_prob", "0.08",
@@ -572,8 +576,9 @@ print("\nSINGLE ACTOR-OBJECT RELATION TRAINING RUN", flush=True)
 print(f"epochs: {RUN_EPOCHS}", flush=True)
 print(
     "actor-object relation: one CE over NULL plus detected object slots, "
-    "no detector-confidence model input, detector-miss auxiliary action training, "
-    "relation-only object memory, and PO-GUISE+ heatmap auxiliary supervision",
+    "binary valid-object relation prior, signed object-action margin prior, "
+    "moderate detector-miss auxiliary training, relation-only object memory, "
+    "and PO-GUISE+ heatmap auxiliary supervision",
     flush=True,
 )
 run_dir = run_training_with_epoch_summaries(cmd, RUN_NAME, EPOCH_DIR, poll_secs=20)

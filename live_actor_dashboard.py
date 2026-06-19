@@ -648,6 +648,7 @@ def pack_temporal_object_tokens(
         dtype=torch.long,
         device=device,
     )
+    confs = torch.zeros((1, max_objects), dtype=torch.float32, device=device)
     valid = torch.zeros((1, max_objects), dtype=torch.bool, device=device)
     packed = []
     min_sample_count = max(int(min_sample_count), 1)
@@ -670,6 +671,7 @@ def pack_temporal_object_tokens(
         mean_conf = float(np.mean(track_confs)) if track_confs else 0.0
         boxes[0, slot] = torch.from_numpy(box).to(device=device)
         classes[0, slot] = int(track["class_id"])
+        confs[0, slot] = float(max_conf)
         valid[0, slot] = True
         packed.append(
             {
@@ -688,6 +690,7 @@ def pack_temporal_object_tokens(
         {
             "object_boxes": boxes,
             "object_classes": classes,
+            "object_confs": confs,
             "object_valid": valid,
         },
         packed,
@@ -786,6 +789,7 @@ def actor_relation_debug_payload(actor, slot, packed_objects, object_inputs):
                     "valid": bool(object_slot in valid_slots),
                     "label": item.get("label"),
                     "object_class_id": item.get("object_class_id"),
+                    "object_conf": item.get("detector_max_conf"),
                     "detector_max_conf": item.get("detector_max_conf"),
                     "attention": float(attn_row[object_slot].item()),
                     "attention_norm": float(norm_row[object_slot].item()),
@@ -1138,7 +1142,7 @@ def run_actor_smoke(args, actor):
             "span_frames": TRAINING_SPAN_FRAMES,
             "sampling": "linspace",
             "min_object_track_sample_count": MIN_OBJECT_TRACK_SAMPLE_COUNT,
-            "object_model_inputs": "boxes_classes_valid",
+            "object_model_inputs": "boxes_classes_conf_valid",
             "valid_slots": int(valid.sum().item()),
             "top_action": ACTION_CLASSES[int(probs.argmax().item())],
             "top_prob": float(probs.max().item()),
@@ -1739,7 +1743,7 @@ class LiveRunner:
                                 f"person_contain={float(self.args.person_containment_threshold):.2f} "
                                 f"max_live_actors={int(self.max_live_actors)} "
                                 f"min_obj_samples={MIN_OBJECT_TRACK_SAMPLE_COUNT} "
-                                f"obj_inputs=boxes_classes_valid "
+                                f"obj_inputs=boxes_classes_conf_valid "
                                 f"live_objects={int(self.args.live_object_tokens)} "
                                 f"obj_hist={int(object_history_ready)} "
                                 f"people_hist={int(people_history_ready)} "

@@ -157,9 +157,9 @@ class ToyotaSMDataset(Dataset):
             raise ValueError("object_conf_threshold must be in [0, 1]")
         if float(kwargs.get("object_temporal_conf_power", 0.0)) != 0.0:
             raise ValueError(
-                "object_temporal_conf_power was removed. Detector confidence is "
-                "used only before the model for filtering/sorting; actor inputs "
-                "are object boxes, classes, and valid masks."
+                "object_temporal_conf_power was removed. Object existence is controlled "
+                "by detector-side thresholding and object_valid; sparse valid detections "
+                "are not down-weighted by temporal coverage inside the actor model."
             )
         self.interaction_heatmap_size = int(
             kwargs.get("interaction_heatmap_size", 56)
@@ -1212,6 +1212,10 @@ class ToyotaSMDataset(Dataset):
                 NONE_OBJECT_ID,
                 dtype=torch.long,
             ),
+            "object_confs": torch.zeros(
+                self.num_scene_object_tokens,
+                dtype=torch.float32,
+            ),
             "object_valid": torch.zeros(
                 self.num_scene_object_tokens,
                 dtype=torch.bool,
@@ -1254,6 +1258,9 @@ class ToyotaSMDataset(Dataset):
                 continue
             target["object_boxes"][slot] = box
             target["object_classes"][slot] = int(track["cls_id"])
+            target["object_confs"][slot] = (
+                max(float(conf) for conf in track["confs"]) if track["confs"] else 0.0
+            )
             target["object_valid"][slot] = True
             track_to_slot[id(track)] = int(slot)
         return target, track_to_slot
@@ -1752,7 +1759,7 @@ class ToyotaSMDataset(Dataset):
 
     def _object_cache_path(self, file_ids):
         payload = {
-            "kind": "toyota_object_cache_v4_actor_object_heatmap_no_model_conf",
+            "kind": "toyota_object_cache_v5_actor_object_heatmap_relation_evidence",
             "set_type": self.set_type,
             "source": self._path_signature(self.object_detector_cache),
             "file_ids": sorted(str(file_id) for file_id in file_ids),
