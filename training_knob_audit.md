@@ -21,7 +21,7 @@ Relation:
 --actor_object_relation_in_transformer 1
 --actor_object_relation_blocks 2,5,8
 --actor_object_relation_loss_weight 1.00
---actor_object_relation_null_loss_weight 1.00
+--actor_object_relation_null_loss_weight 0.75
 --actor_object_relation_null_logit_init 3.5
 --actor_object_relation_geometry_bias_weight 1.0
 --actor_object_relation_heatmap_bias_weight 2.0

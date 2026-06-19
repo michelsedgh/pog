@@ -393,7 +393,7 @@ def build_working_cell_base_cmd(env: dict[str, str], run_name: str, epoch_dir: P
         "--actor_object_relation_loss_weight",
         "1.00",
         "--actor_object_relation_null_loss_weight",
-        "1.00",
+        "0.75",
         "--batch_size",
         "32",
         "--accum_grad_batches",

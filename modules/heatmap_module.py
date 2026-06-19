@@ -1333,12 +1333,9 @@ class HeatmapModule(pl.LightningModule):
             max_object_index,
         )
 
-        sample_weight = torch.zeros_like(actions, dtype=torch.float32, device=device)
-        sample_weight[exact_compatible] = 1.0
         null_weight = self.actor_object_relation_null_loss_weight
-        sample_weight[missing_compatible] = null_weight
-        sample_weight[objectless] = null_weight
-        supervised = sample_weight > 0
+        null_supervised = missing_compatible | objectless
+        supervised = exact_compatible | (null_supervised & (null_weight > 0))
         if not supervised.any():
             return None
 
@@ -1357,9 +1354,32 @@ class HeatmapModule(pl.LightningModule):
                 target_index.reshape(-1),
                 reduction="none",
             ).reshape_as(target_index)
-            block_loss = (per_item * sample_weight).sum() / sample_weight.sum().clamp_min(
-                1.0
-            )
+
+            block_components = []
+            block_weights = []
+            exact_loss = None
+            if exact_compatible.any():
+                exact_loss = per_item[exact_compatible].mean()
+                block_components.append(exact_loss)
+                block_weights.append(per_item.new_tensor(1.0))
+
+            null_loss = None
+            if null_supervised.any() and null_weight > 0:
+                null_parts = []
+                if missing_compatible.any():
+                    null_parts.append(per_item[missing_compatible].mean())
+                if objectless.any():
+                    null_parts.append(per_item[objectless].mean())
+                if null_parts:
+                    null_loss = torch.stack(null_parts).mean()
+                    block_components.append(null_loss * null_weight)
+                    block_weights.append(per_item.new_tensor(null_weight))
+
+            if not block_components:
+                continue
+            block_loss = torch.stack(block_components).sum() / torch.stack(
+                block_weights
+            ).sum().clamp_min(1e-6)
             losses.append(block_loss)
             self.log(
                 f"{stage}_loss_actor_object_relation_block_{block_name}",
@@ -1370,6 +1390,26 @@ class HeatmapModule(pl.LightningModule):
                 logger=True,
                 sync_dist=True,
             )
+            if exact_loss is not None:
+                self.log(
+                    f"{stage}_loss_actor_object_relation_exact_block_{block_name}",
+                    exact_loss,
+                    on_step=is_train,
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                    sync_dist=True,
+                )
+            if null_loss is not None:
+                self.log(
+                    f"{stage}_loss_actor_object_relation_null_block_{block_name}",
+                    null_loss,
+                    on_step=is_train,
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                    sync_dist=True,
+                )
 
         if not losses:
             return None

@@ -514,7 +514,7 @@ cmd = [
     "--poguiseplus_heatmap_mse_scale", "1000",
 
     "--actor_object_relation_loss_weight", "1.00",
-    "--actor_object_relation_null_loss_weight", "1.00",
+    "--actor_object_relation_null_loss_weight", "0.75",
     "--batch_size", "32",
     "--accum_grad_batches", "2",
 

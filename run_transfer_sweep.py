@@ -317,7 +317,7 @@ def make_base_cmd(run_name, epoch_dir):
         "--poguiseplus_heatmap_mse_scale", "1000",
 
         "--actor_object_relation_loss_weight", "1.00",
-        "--actor_object_relation_null_loss_weight", "1.00",
+        "--actor_object_relation_null_loss_weight", "0.75",
 
 
         "--batch_size", "32",

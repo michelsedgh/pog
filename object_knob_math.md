@@ -61,8 +61,11 @@ Too high and the auxiliary relation task can dominate action learning.
 
 `actor_object_relation_null_loss_weight`
 
-Weights NULL examples in relation CE. This protects objectless actions and
-missing-object cases.
+Weights the NULL component in relation CE. Relation loss is component-balanced:
+exact object selection is averaged separately from missing/objectless NULL
+routing, then the two components are combined with this weight. This protects
+objectless actions without letting numerous easy NULL samples drown out exact
+object selection.
 
 `actor_object_relation_null_logit_init`
 
