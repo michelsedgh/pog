@@ -491,6 +491,12 @@ def main():
                 "actor_object_relation_in_transformer requires "
                 "--actor_interaction_heatmaps 1"
             )
+        if not getattr(hparams, "actor_relation_action_fusion", 0):
+            raise ValueError(
+                "actor_object_relation_in_transformer requires "
+                "--actor_relation_action_fusion 1 so selected object memory reaches "
+                "the final action head"
+            )
     if (
         hparams.actor_object_prompt_tokens
         and not hparams.object_detector_cache

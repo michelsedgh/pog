@@ -1024,6 +1024,8 @@ class ActorObjectRelationUpdate(nn.Module):
         )
         useful_mass = object_mass.squeeze(-1)
 
+        selected_object_memory = torch.matmul(object_attn, object_tokens)
+        selected_object_memory = selected_object_memory * object_mass
         object_context = torch.matmul(object_attn, v)
         object_context = object_context * object_mass
 
@@ -1062,6 +1064,7 @@ class ActorObjectRelationUpdate(nn.Module):
             "null_prob": null_prob,
             "useful_mass": useful_mass,
             "object_context": object_context,
+            "selected_object_memory": selected_object_memory,
             "scale": scale.detach(),
             "gate": gate.detach(),
             "update_strength": update_strength.detach(),

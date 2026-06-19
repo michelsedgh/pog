@@ -100,6 +100,19 @@ CORE_COLUMNS = [
     "val_relation_null_rate_missing_objectful",
     "val_relation_null_prob_missing_objectful",
     "val_relation_useful_mass_missing_objectful",
+    "val_relation_action_joint_balanced_acc",
+    "val_relation_action_joint_acc",
+    "val_relation_action_joint_exact_acc",
+    "val_relation_action_joint_objectless_acc",
+    "val_relation_action_joint_missing_objectful_acc",
+    "val_relation_correct_action_wrong_exact_rate",
+    "val_action_correct_relation_wrong_exact_rate",
+    "val_action_acc_when_relation_exact",
+    "val_relation_exact_when_action_correct",
+    "val_relation_action_joint_Uselaptop_acc",
+    "val_relation_correct_action_wrong_Uselaptop_rate",
+    "val_action_Uselaptop_object_confuser_margin",
+    "val_action_Uselaptop_object_confuser_win_rate",
     "val_actor_object_prompt_token_count",
     "val_token_selection_visual_keep_rate",
     "val_token_selection_actor_box_keep_rate",
@@ -214,6 +227,16 @@ def df_has_metric(df, name):
         candidate in df.columns
         for candidate in (name, f"{name}_epoch", f"{name}_step")
     )
+
+
+def metric_prefers_lower(name):
+    lower_markers = (
+        "_loss",
+        "_wrong_",
+        "_object_action_pred_rate",
+        "_center_l2",
+    )
+    return any(marker in name for marker in lower_markers)
 
 
 def print_table(title, rows, columns=None):
@@ -332,6 +355,14 @@ def print_compact_epoch_summary(epoch_df):
         "val_relation_null_rate_missing_objectful",
         "val_relation_null_prob_missing_objectful",
         "val_relation_useful_mass_missing_objectful",
+        "val_relation_action_joint_balanced_acc",
+        "val_relation_action_joint_acc",
+        "val_relation_action_joint_exact_acc",
+        "val_relation_correct_action_wrong_exact_rate",
+        "val_relation_action_joint_Uselaptop_acc",
+        "val_relation_correct_action_wrong_Uselaptop_rate",
+        "val_action_Uselaptop_object_confuser_margin",
+        "val_action_Uselaptop_object_confuser_win_rate",
         "val_actor_object_prompt_token_count",
         "val_token_selection_visual_keep_rate",
         "val_token_selection_actor_box_keep_rate",
@@ -481,6 +512,19 @@ def print_compact_best(epoch_df):
         "val_relation_null_rate_missing_objectful",
         "val_relation_null_prob_missing_objectful",
         "val_relation_useful_mass_missing_objectful",
+        "val_relation_action_joint_balanced_acc",
+        "val_relation_action_joint_acc",
+        "val_relation_action_joint_exact_acc",
+        "val_relation_action_joint_objectless_acc",
+        "val_relation_action_joint_missing_objectful_acc",
+        "val_relation_correct_action_wrong_exact_rate",
+        "val_action_correct_relation_wrong_exact_rate",
+        "val_action_acc_when_relation_exact",
+        "val_relation_exact_when_action_correct",
+        "val_relation_action_joint_Uselaptop_acc",
+        "val_relation_correct_action_wrong_Uselaptop_rate",
+        "val_action_Uselaptop_object_confuser_margin",
+        "val_action_Uselaptop_object_confuser_win_rate",
         "val_token_selection_actor_box_keep_rate",
         "val_token_selection_visible_object_box_keep_rate",
         "val_token_selection_exact_teacher_object_keep_rate",
@@ -505,7 +549,7 @@ def print_compact_best(epoch_df):
         valid = series.dropna()
         if not len(valid):
             continue
-        best_idx = valid.idxmax()
+        best_idx = valid.idxmin() if metric_prefers_lower(name) else valid.idxmax()
         rows.append(
             {
                 "metric": name,
@@ -545,6 +589,37 @@ def print_decision(epoch_df):
     relation_useful_missing = metric(
         latest,
         "val_relation_useful_mass_missing_objectful",
+    )
+    joint_balanced = metric(latest, "val_relation_action_joint_balanced_acc")
+    joint_acc = metric(latest, "val_relation_action_joint_acc")
+    joint_exact = metric(latest, "val_relation_action_joint_exact_acc")
+    joint_objectless = metric(latest, "val_relation_action_joint_objectless_acc")
+    joint_missing = metric(latest, "val_relation_action_joint_missing_objectful_acc")
+    relation_correct_action_wrong = metric(
+        latest,
+        "val_relation_correct_action_wrong_exact_rate",
+    )
+    action_correct_relation_wrong = metric(
+        latest,
+        "val_action_correct_relation_wrong_exact_rate",
+    )
+    action_when_relation_exact = metric(latest, "val_action_acc_when_relation_exact")
+    relation_when_action_correct = metric(
+        latest,
+        "val_relation_exact_when_action_correct",
+    )
+    uselaptop_joint = metric(latest, "val_relation_action_joint_Uselaptop_acc")
+    uselaptop_relation_action_wrong = metric(
+        latest,
+        "val_relation_correct_action_wrong_Uselaptop_rate",
+    )
+    uselaptop_confuser_margin = metric(
+        latest,
+        "val_action_Uselaptop_object_confuser_margin",
+    )
+    uselaptop_confuser_win = metric(
+        latest,
+        "val_action_Uselaptop_object_confuser_win_rate",
     )
 
     pos = metric(latest, "val_interaction_heatmap_positive_mean")
@@ -644,6 +719,26 @@ def print_decision(epoch_df):
             f"useful_missing {fmt(relation_useful_missing)}, "
             f"tokens {fmt(prompt_tokens, 0)}"
         )
+    if pd.notna(joint_acc) or pd.notna(joint_exact):
+        print(
+            "relation-action joint: "
+            f"balanced {fmt(joint_balanced)}, "
+            f"all {fmt(joint_acc)}, exact {fmt(joint_exact)}, "
+            f"objectless {fmt(joint_objectless)}, "
+            f"missing {fmt(joint_missing)}, "
+            f"rel_ok_action_wrong {fmt(relation_correct_action_wrong)}, "
+            f"action_ok_rel_wrong {fmt(action_correct_relation_wrong)}, "
+            f"action_when_rel_ok {fmt(action_when_relation_exact)}, "
+            f"rel_when_action_ok {fmt(relation_when_action_correct)}"
+        )
+    if pd.notna(uselaptop_joint) or pd.notna(uselaptop_confuser_margin):
+        print(
+            "uselaptop joint: "
+            f"joint {fmt(uselaptop_joint)}, "
+            f"rel_ok_action_wrong {fmt(uselaptop_relation_action_wrong)}, "
+            f"confuser_margin {fmt(uselaptop_confuser_margin)}, "
+            f"confuser_win {fmt(uselaptop_confuser_win)}"
+        )
     if pd.notna(token_keep_visual):
         print(
             "token-selection retention: "
@@ -695,6 +790,35 @@ def print_decision(epoch_df):
     if pd.notna(f1_delta) and f1_delta < -0.01:
         print("STOP/ROLL BACK: action F1 dropped more than 0.01 from epoch 0.")
         return
+    if pd.notna(joint_exact):
+        if (
+            pd.notna(relation_correct_action_wrong)
+            and relation_correct_action_wrong > 0.15
+        ):
+            print(
+                "ACTION COUPLING FAIL: relation is often correct while action is "
+                "wrong on exact objectful cases."
+            )
+            return
+        if joint_exact < 0.60:
+            print(
+                "NOT PROVEN: exact objectful relation and action are not jointly "
+                "correct often enough yet."
+            )
+            return
+        if joint_exact < 0.70:
+            print(
+                "CONTINUE: joint relation-action evidence is improving but is not "
+                "strong enough yet."
+            )
+            return
+        if (
+            joint_exact >= 0.70
+            and pd.notna(relation_exact_acc)
+            and relation_exact_acc >= 0.65
+        ):
+            print("GOOD JOINT SIGN: exact object binding and action agree.")
+            return
     if (
         pd.notna(relation_exact_acc)
         and relation_exact_acc >= 0.65
@@ -736,6 +860,18 @@ def print_row(title, row):
         "null_missing "
         f"{metric(row, 'val_relation_null_rate_missing_objectful'):.4f}"
     )
+    if pd.notna(metric(row, "val_relation_action_joint_exact_acc")):
+        print(
+            "relation-action joint: "
+            f"balanced {metric(row, 'val_relation_action_joint_balanced_acc'):.4f}, "
+            f"exact {metric(row, 'val_relation_action_joint_exact_acc'):.4f}, "
+            "rel_ok_action_wrong "
+            f"{metric(row, 'val_relation_correct_action_wrong_exact_rate'):.4f}, "
+            "uselaptop_joint "
+            f"{metric(row, 'val_relation_action_joint_Uselaptop_acc'):.4f}, "
+            "uselaptop_margin "
+            f"{metric(row, 'val_action_Uselaptop_object_confuser_margin'):.4f}"
+        )
     print(
         "interaction heatmap: "
         f"loss {metric(row, 'val_loss_interaction_heatmap'):.6f}, "
@@ -821,10 +957,11 @@ def main():
     print_decision(epoch_df)
 
     print("\nREAD THIS:")
-    print("- Main proof: val_f1/per-action accuracy stay healthy while relation slot learning and interaction heatmaps improve.")
+    print("- Main proof: val_f1/per-action accuracy stay healthy while joint relation-action metrics improve.")
     print("- For each actor, the object objective is one CE over NULL plus detected object slots.")
-    print("- Runtime objects update actor tokens inside the transformer before actor_head.")
+    print("- Runtime objects update actor tokens inside the transformer and feed selected object memory into actor_head.")
     print("- The only object objective is relation CE; removed side objectives are not part of this run.")
+    print("- Exact objectful cases must get both action and relation right; relation-right/action-wrong is a coupling failure.")
     print("- Exact compatible detections should select the teacher object; missing/objectless cases should route relation attention to NULL.")
     print("- Objectless hard-negative metrics remain a protection check: visible objects must not force object actions.")
 

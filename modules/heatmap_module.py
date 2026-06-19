@@ -45,6 +45,15 @@ DEPLOY_KEY_ACTIONS = (
     "Sitdown",
     "Laydown",
 )
+RELATION_ACTION_AUDIT_ACTIONS = (
+    "Uselaptop",
+    "Readbook",
+    "WatchTV",
+    "Usetelephone",
+    "Usetablet",
+)
+
+
 class HeatmapModule(pl.LightningModule):
     def __init__(self, model, hparams=None, **kwargs):
         """
@@ -292,6 +301,10 @@ class HeatmapModule(pl.LightningModule):
             "preds": [],
             "labels": [],
             "hard_objectless": [],
+            "relation_action_joint": [],
+            "relation_action_joint_exact": [],
+            "relation_action_joint_objectless": [],
+            "relation_action_joint_missing_objectful": [],
         }
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
@@ -1537,6 +1550,208 @@ class HeatmapModule(pl.LightningModule):
                         count,
                     )
 
+    def _relation_action_joint_info(self, preds, actions, valid, target):
+        if not self.actor_object_relation_in_transformer:
+            return None
+        relation_aux = getattr(self.model, "last_actor_object_relation_aux", None)
+        if not relation_aux:
+            return None
+        last_aux = relation_aux[sorted(relation_aux.keys(), key=lambda x: int(x))[-1]]
+        relation_logits = last_aux.get("logits")
+        if relation_logits is None:
+            return None
+
+        device = relation_logits.device
+        actions = actions.to(device=device, dtype=torch.long)
+        valid = valid.to(device=device, dtype=torch.bool)
+        preds = preds.to(device=device)
+        if relation_logits.shape[:2] != actions.shape:
+            raise RuntimeError(
+                "actor-object relation logits shape mismatch for joint metrics: "
+                f"{tuple(relation_logits.shape[:2])} vs {tuple(actions.shape)}"
+            )
+        if preds.shape[:2] != actions.shape:
+            raise RuntimeError(
+                "action logits shape mismatch for joint relation-action metrics: "
+                f"{tuple(preds.shape[:2])} vs {tuple(actions.shape)}"
+            )
+
+        info = self._exact_teacher_object_info(actions, valid, target, device)
+        if info is None:
+            return None
+
+        objectless = self._labels_in_indices(actions, self.objectless_action_indices)
+        objectless = info["valid"] & objectless
+        known_objectful = info["valid"] & info["known_action"]
+        exact_compatible = known_objectful & info["compatible_from_one_based"]
+        missing_compatible = known_objectful & ~info["any_compatible"]
+
+        target_index = torch.zeros_like(actions, dtype=torch.long, device=device)
+        selected_index = info["selected_indices"].to(device=device, dtype=torch.long)
+        max_object_index = int(relation_logits.shape[-1]) - 1
+        target_index[exact_compatible] = selected_index[exact_compatible].clamp(
+            1,
+            max_object_index,
+        )
+
+        relation_pred = relation_logits.argmax(dim=-1)
+        action_pred = preds.argmax(dim=-1)
+        action_correct = info["valid"] & (action_pred == actions)
+        relation_goal_correct = torch.zeros_like(info["valid"], dtype=torch.bool)
+        relation_goal_correct[exact_compatible] = (
+            relation_pred[exact_compatible] == target_index[exact_compatible]
+        )
+        null_supervised = objectless | missing_compatible
+        relation_goal_correct[null_supervised] = relation_pred[null_supervised] == 0
+        supervised = exact_compatible | null_supervised
+        joint_correct = action_correct & relation_goal_correct
+
+        return {
+            "actions": actions,
+            "action_logits": preds,
+            "action_correct": action_correct,
+            "relation_goal_correct": relation_goal_correct,
+            "joint_correct": joint_correct,
+            "supervised": supervised,
+            "exact_compatible": exact_compatible,
+            "objectless": objectless,
+            "missing_compatible": missing_compatible,
+        }
+
+    def _log_relation_action_joint_metrics(self, stage, preds, actions, valid, target):
+        info = self._relation_action_joint_info(preds, actions, valid, target)
+        if info is None:
+            return {}
+
+        def log_masked(name, values, mask):
+            if not mask.any():
+                return
+            count = int(mask.sum().item())
+            self._log_scalar(name, values[mask].float().mean(), count)
+            self._log_count(f"{name}_count", mask.float().sum())
+
+        with torch.no_grad():
+            joint_correct = info["joint_correct"]
+            action_correct = info["action_correct"]
+            relation_correct = info["relation_goal_correct"]
+            supervised = info["supervised"]
+            exact = info["exact_compatible"]
+            objectless = info["objectless"]
+            missing = info["missing_compatible"]
+
+            log_masked(
+                f"{stage}_relation_action_joint_acc",
+                joint_correct,
+                supervised,
+            )
+            log_masked(
+                f"{stage}_relation_action_joint_exact_acc",
+                joint_correct,
+                exact,
+            )
+            log_masked(
+                f"{stage}_relation_action_joint_objectless_acc",
+                joint_correct,
+                objectless,
+            )
+            log_masked(
+                f"{stage}_relation_action_joint_missing_objectful_acc",
+                joint_correct,
+                missing,
+            )
+
+            relation_correct_action_wrong = relation_correct & ~action_correct
+            action_correct_relation_wrong = action_correct & ~relation_correct
+            log_masked(
+                f"{stage}_relation_correct_action_wrong_exact_rate",
+                relation_correct_action_wrong,
+                exact,
+            )
+            log_masked(
+                f"{stage}_action_correct_relation_wrong_exact_rate",
+                action_correct_relation_wrong,
+                exact,
+            )
+            relation_correct_exact = exact & relation_correct
+            action_correct_exact = exact & action_correct
+            log_masked(
+                f"{stage}_action_acc_when_relation_exact",
+                action_correct,
+                relation_correct_exact,
+            )
+            log_masked(
+                f"{stage}_relation_exact_when_action_correct",
+                relation_correct,
+                action_correct_exact,
+            )
+
+            actions = info["actions"]
+            for action_name in RELATION_ACTION_AUDIT_ACTIONS:
+                action_idx = self._action_index(action_name)
+                if action_idx is None:
+                    continue
+                action_mask = exact & (actions == int(action_idx))
+                safe_name = action_name.replace(".", "_")
+                log_masked(
+                    f"{stage}_relation_action_joint_{safe_name}_acc",
+                    joint_correct,
+                    action_mask,
+                )
+                log_masked(
+                    f"{stage}_relation_correct_action_wrong_{safe_name}_rate",
+                    relation_correct_action_wrong,
+                    action_mask,
+                )
+
+            uselaptop_idx = self._action_index("Uselaptop")
+            if uselaptop_idx is not None:
+                confuser_indices = [
+                    self._action_index(action_name)
+                    for action_name in RELATION_ACTION_AUDIT_ACTIONS
+                    if action_name != "Uselaptop"
+                ]
+                confuser_indices = [
+                    int(index) for index in confuser_indices if index is not None
+                ]
+                uselaptop_mask = exact & (actions == int(uselaptop_idx))
+                if confuser_indices and uselaptop_mask.any():
+                    action_logits = info["action_logits"].float()
+                    true_logit = action_logits[..., int(uselaptop_idx)]
+                    confuser_tensor = torch.tensor(
+                        confuser_indices,
+                        device=action_logits.device,
+                        dtype=torch.long,
+                    )
+                    confuser_logit = action_logits.index_select(
+                        -1,
+                        confuser_tensor,
+                    ).amax(dim=-1)
+                    margin = true_logit - confuser_logit
+                    count = int(uselaptop_mask.sum().item())
+                    self._log_scalar(
+                        f"{stage}_action_Uselaptop_object_confuser_margin",
+                        margin[uselaptop_mask].mean(),
+                        count,
+                    )
+                    self._log_scalar(
+                        f"{stage}_action_Uselaptop_object_confuser_win_rate",
+                        (margin[uselaptop_mask] > 0).float().mean(),
+                        count,
+                    )
+
+            if not stage.startswith("val"):
+                return {}
+            outputs = {}
+            for name, mask in (
+                ("relation_action_joint", supervised),
+                ("relation_action_joint_exact", exact),
+                ("relation_action_joint_objectless", objectless),
+                ("relation_action_joint_missing_objectful", missing),
+            ):
+                if mask.any():
+                    outputs[name] = joint_correct[mask].float().detach()
+            return outputs
+
     def _append_nash_mtl_params(self, params):
         if not (
             self.model.hparams.grad_weights
@@ -1774,6 +1989,13 @@ class HeatmapModule(pl.LightningModule):
         )
         if loss_actor_object_relation is not None:
             loss_main_task = loss_main_task + loss_actor_object_relation
+        relation_action_joint_outputs = self._log_relation_action_joint_metrics(
+            stage,
+            preds,
+            actions,
+            valid,
+            target,
+        )
 
         heatmap_aux_terms = []
 
@@ -2159,6 +2381,7 @@ class HeatmapModule(pl.LightningModule):
             loss_kp,
             preds,
             presence_logits,
+            relation_action_joint_outputs,
         )
 
     def _unpack_model_data(self, data):
@@ -3144,6 +3367,38 @@ class HeatmapModule(pl.LightningModule):
                 else None
             )
 
+        def mean_gathered(name):
+            values = self._flatten_gathered_validation_tensor(gathered_outputs, name)
+            if values is None:
+                return None
+            values = values.to(device=labels.device, dtype=torch.float32)
+            if values.numel() == 0:
+                return None
+            return values.mean()
+
+        relation_action_joint_acc = mean_gathered("relation_action_joint")
+        relation_action_joint_exact_acc = mean_gathered("relation_action_joint_exact")
+        relation_action_joint_objectless_acc = mean_gathered(
+            "relation_action_joint_objectless"
+        )
+        relation_action_joint_missing_acc = mean_gathered(
+            "relation_action_joint_missing_objectful"
+        )
+        relation_action_joint_components = [
+            value
+            for value in (
+                relation_action_joint_exact_acc,
+                relation_action_joint_objectless_acc,
+                relation_action_joint_missing_acc,
+            )
+            if value is not None
+        ]
+        relation_action_joint_balanced_acc = (
+            torch.stack(relation_action_joint_components).mean()
+            if relation_action_joint_components
+            else None
+        )
+
         key_action_values = self._deploy_action_accuracies(
             pred_labels,
             labels,
@@ -3165,6 +3420,7 @@ class HeatmapModule(pl.LightningModule):
                 (objectless_acc, 0.15),
                 (hard_objectless_acc, 0.15),
                 (key_action_mean, 0.10),
+                (relation_action_joint_balanced_acc, 0.15),
             ],
             penalties=[
                 (hard_object_action_rate, 0.20),
@@ -3178,6 +3434,18 @@ class HeatmapModule(pl.LightningModule):
             ("val_deploy_score", deploy_score),
             ("val_deploy_key_action_mean", key_action_mean),
             ("val_deploy_key_action_min", key_action_min),
+            (
+                "val_relation_action_joint_balanced_acc",
+                relation_action_joint_balanced_acc,
+            ),
+            (
+                "val_deploy_relation_action_joint_acc",
+                relation_action_joint_acc,
+            ),
+            (
+                "val_deploy_relation_action_joint_exact_acc",
+                relation_action_joint_exact_acc,
+            ),
             (
                 "val_deploy_objectless_with_object_visible_acc",
                 hard_objectless_acc,
@@ -3203,13 +3471,13 @@ class HeatmapModule(pl.LightningModule):
             batch.reraise()
         if self.actor_prompt:
             imgs, target = batch
-            loss, _, _, _, loss_kp, _, _ = self._actor_step(
+            loss, _, _, _, loss_kp, _, _, _ = self._actor_step(
                 imgs, target, self.train_loss, "train"
             )
             pair_batch = self._compose_pair_training_batch(imgs, target)
             if pair_batch is not None:
                 pair_imgs, pair_target = pair_batch
-                pair_loss, _, _, _, pair_loss_kp, _, _ = self._actor_step(
+                pair_loss, _, _, _, pair_loss_kp, _, _, _ = self._actor_step(
                     pair_imgs,
                     pair_target,
                     self.train_loss,
@@ -3348,9 +3616,12 @@ class HeatmapModule(pl.LightningModule):
                 loss_kp,
                 full_preds,
                 presence_logits,
+                relation_action_joint_outputs,
             ) = self._actor_step(
                 imgs, target, self.val_loss, "val"
             )
+            for name, tensor in relation_action_joint_outputs.items():
+                self.validation_step_outputs[name].append(tensor)
             self._log_actor_val_diagnostics(imgs, target, presence_logits)
             self._log_objectless_hard_negative_metrics(
                 "val",

@@ -32,9 +32,9 @@ DEFAULT_PERSON_CONTAINMENT_THRESHOLD = 0.80
 def objectful_presence_probs(presence_logits):
     if presence_logits is None:
         return None
-    if presence_logits.shape[-1] == 2:
+    if presence_logits.ndim >= 3 and presence_logits.shape[-1] == 2:
         return torch.softmax(presence_logits, dim=-1)[..., 1]
-    if presence_logits.shape[-1] == 1:
+    if presence_logits.ndim >= 3 and presence_logits.shape[-1] == 1:
         return torch.sigmoid(presence_logits.squeeze(-1))
     return torch.sigmoid(presence_logits)
 
@@ -831,6 +831,26 @@ def actor_relation_debug_payload(actor, slot, packed_objects, object_inputs):
     if not blocks:
         return None
     payload = {"blocks": blocks}
+    action_context = getattr(model, "last_actor_object_relation_context", None)
+    if (
+        torch.is_tensor(action_context)
+        and action_context.ndim == 3
+        and slot < action_context.shape[1]
+    ):
+        payload["action_relation_context_norm"] = float(
+            torch.linalg.vector_norm(
+                action_context[0, slot].detach().float().cpu()
+            ).item()
+        )
+    action_mass = getattr(model, "last_actor_object_relation_mass", None)
+    if (
+        torch.is_tensor(action_mass)
+        and action_mass.ndim == 3
+        and slot < action_mass.shape[1]
+    ):
+        payload["action_relation_mass"] = float(
+            action_mass[0, slot, 0].detach().float().cpu().item()
+        )
     return payload
 
 

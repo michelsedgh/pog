@@ -212,3 +212,5 @@ object_cache_rfdetr_large_visual100_strict.jsonl
 object_cache_rfdetr_large_visual100.jsonl
 object_cache_rfdetr_large_coco19_visual100_viewfiltered_staticmasked.jsonl
 epoch=009.ckpt-3
+epoch=005.ckpt-2
+epoch=006.ckpt-2

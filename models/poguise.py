@@ -191,6 +191,12 @@ class POGUISE(pl.LightningModule):
             raise ValueError(
                 "actor_object_relation_in_transformer requires actor_object_prompt_tokens"
             )
+        if self.actor_object_relation_in_transformer and not self.actor_relation_action_fusion_enabled:
+            raise ValueError(
+                "actor_object_relation_in_transformer requires "
+                "actor_relation_action_fusion so the final action head consumes "
+                "the selected object memory."
+            )
         if self.actor_relation_action_fusion_enabled and not self.actor_object_relation_in_transformer:
             raise ValueError(
                 "actor_relation_action_fusion requires actor_object_relation_in_transformer"
@@ -605,6 +611,7 @@ class POGUISE(pl.LightningModule):
             self.last_actor_object_prompt_tokens = None
             self.last_actor_object_prompt_valid = None
             self.last_actor_object_relation_context = None
+            self.last_actor_object_relation_mass = None
             self.last_actor_action_tokens = None
             self.last_actor_object_relation_aux = getattr(
                 self.net,
@@ -646,25 +653,40 @@ class POGUISE(pl.LightningModule):
                     key=lambda value: int(value),
                 )[-1]
                 last_relation_aux = self.last_actor_object_relation_aux[last_block]
-                relation_context = last_relation_aux.get("object_context")
-                if relation_context is not None:
-                    relation_context = relation_context.to(
-                        device=x_actor.device,
-                        dtype=x_actor.dtype,
-                    )
-                    self.last_actor_object_relation_context = relation_context
                 useful_mass = last_relation_aux.get("useful_mass")
                 if useful_mass is not None:
                     relation_mass = useful_mass.to(
                         device=x_actor.device,
                         dtype=x_actor.dtype,
                     ).unsqueeze(-1)
+                selected_object_memory = last_relation_aux.get("selected_object_memory")
+                if selected_object_memory is not None:
+                    # Use the selected object memory produced by the final relation
+                    # block itself. This keeps relation CE and action CE tied to the
+                    # same object distribution and the same object representation.
+                    relation_context = selected_object_memory.to(
+                        device=x_actor.device,
+                        dtype=x_actor.dtype,
+                    )
+                    if tuple(relation_context.shape) != tuple(x_actor.shape):
+                        raise RuntimeError(
+                            "selected_object_memory shape "
+                            f"{tuple(relation_context.shape)} does not match actor "
+                            f"tokens {tuple(x_actor.shape)}"
+                        )
+                    if relation_mass is None:
+                        raise RuntimeError(
+                            "useful_mass is required for actor_relation_action_fusion"
+                        )
+                    self.last_actor_object_relation_context = relation_context
+                    self.last_actor_object_relation_mass = relation_mass
             x_action = x_actor
             if self.actor_relation_action_fusion is not None:
-                if relation_context is None:
-                    relation_context = torch.zeros_like(x_actor)
-                if relation_mass is None:
-                    relation_mass = x_actor.new_zeros(*x_actor.shape[:2], 1)
+                if relation_context is None or relation_mass is None:
+                    raise RuntimeError(
+                        "actor_relation_action_fusion requires final relation "
+                        "selected object memory"
+                    )
                 if valid is not None:
                     valid_mask = valid.to(
                         device=x_actor.device,
