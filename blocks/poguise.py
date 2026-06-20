@@ -719,7 +719,11 @@ class Block(nn.Module):
                     dtype=x.dtype,
                     device=x.device,
                 )
-                selected.scatter_(1, idx.long(), 1.0)
+                selected = selected.scatter(
+                    1,
+                    idx.long(),
+                    torch.ones_like(idx, dtype=x.dtype, device=x.device),
+                )
                 num_nonselected = (N - num_s_tokens) - idx.shape[1]
                 idx_nonselected = torch.topk(
                     1.0 - selected,
@@ -1960,7 +1964,12 @@ class VisionTransformer(nn.Module):
 
         selected_mask = torch.zeros(B, N, dtype=torch.bool, device=x.device)
         if idx is not None and idx.numel() > 0:
-            selected_mask.scatter_(1, idx.clamp(0, N - 1).long(), True)
+            selected_idx = idx.clamp(0, N - 1).long()
+            selected_mask = selected_mask.scatter(
+                1,
+                selected_idx,
+                torch.ones_like(selected_idx, dtype=torch.bool, device=x.device),
+            )
         self.last_token_selection_diagnostics = {
             "selected_indices": idx.detach() if idx is not None else None,
             "selected_mask": selected_mask.detach(),

@@ -208,17 +208,17 @@ def main():
     actor_object_relation_normalize_pointers = bool(
         hparams.get("actor_object_relation_normalize_pointers", 0)
     )
-    actor_relation_action_fusion = bool(
-        hparams.get("actor_relation_action_fusion", 0)
+    actor_object_pair_action_head = bool(
+        hparams.get("actor_object_pair_action_head", 0)
     )
     if actor_object_prompt_tokens and (
         not actor_object_relation_in_transformer
-        or not actor_relation_action_fusion
+        or not actor_object_pair_action_head
     ):
         raise RuntimeError(
             "Object-proposal checkpoints now have one supported TensorRT path: "
             "actor_object_relation_in_transformer=1 and "
-            "actor_relation_action_fusion=1."
+            "actor_object_pair_action_head=1."
         )
     if actor_object_prompt_tokens and not actor_object_region_visual_tokens:
         raise RuntimeError(
@@ -272,13 +272,13 @@ def main():
             f"checkpoint={actor_object_relation_normalize_pointers}, "
             f"engine={engine.actor_object_relation_normalize_pointers}"
         )
-    if actor_relation_action_fusion != bool(
-        getattr(engine, "actor_relation_action_fusion", False)
+    if actor_object_pair_action_head != bool(
+        getattr(engine, "actor_object_pair_action_head", False)
     ):
         raise RuntimeError(
-            "Checkpoint/engine actor relation-action fusion mismatch: "
-            f"checkpoint={actor_relation_action_fusion}, "
-            f"engine={engine.actor_relation_action_fusion}"
+            "Checkpoint/engine actor-object pair action head mismatch: "
+            f"checkpoint={actor_object_pair_action_head}, "
+            f"engine={engine.actor_object_pair_action_head}"
         )
     wrapped = ActorExport(model, uses_object_proposals).eval()
 

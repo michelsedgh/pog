@@ -87,11 +87,21 @@ CORE_COLUMNS = [
     "val_deploy_object_dropout_joint_missing_acc",
     "val_deploy_object_dropout_joint_Uselaptop_acc",
     "val_deploy_object_present_true_prob_gain",
+    "val_deploy_object_present_true_prob_gain_median",
+    "val_deploy_object_present_true_prob_gain_negative_rate",
     "val_deploy_object_present_true_logit_gain",
     "val_deploy_object_present_action_margin_gain",
+    "val_deploy_object_present_action_margin_gain_median",
+    "val_deploy_object_present_action_margin_gain_negative_rate",
     "val_deploy_object_present_Uselaptop_prob_gain",
+    "val_deploy_object_present_Uselaptop_prob_gain_median",
+    "val_deploy_object_present_Uselaptop_prob_gain_negative_rate",
     "val_deploy_object_present_Uselaptop_confuser_margin_gain",
-    "val_actor_object_fusion_delta_norm",
+    "val_actor_object_pair_action_score_abs",
+    "val_actor_object_pair_action_margin",
+    "val_actor_object_pair_action_margin_win_rate",
+    "val_actor_object_pair_action_Uselaptop_margin",
+    "val_actor_object_pair_action_Uselaptop_margin_win_rate",
     "val_actor_all_slot_acc",
     "val_actor_pair_acc",
     "val_actor_pair_swap_acc",
@@ -142,6 +152,11 @@ CORE_COLUMNS = [
     "val_object_dropout_object_present_action_margin_gain",
     "val_object_dropout_object_present_Uselaptop_prob_gain",
     "val_object_dropout_object_present_Uselaptop_confuser_margin_gain",
+    "val_actor_object_pair_action_score_abs",
+    "val_actor_object_pair_action_margin",
+    "val_actor_object_pair_action_margin_win_rate",
+    "val_actor_object_pair_action_Uselaptop_margin",
+    "val_actor_object_pair_action_Uselaptop_margin_win_rate",
     "val_actor_object_prompt_token_count",
     "val_token_selection_visual_keep_rate",
     "val_token_selection_actor_box_keep_rate",
@@ -399,10 +414,16 @@ def print_compact_epoch_summary(epoch_df):
         "val_object_dropout_relation_action_joint_missing_Uselaptop_acc",
         "val_object_dropout_action_Uselaptop_missing_object_confuser_margin",
         "val_deploy_object_present_Uselaptop_prob_gain",
+        "val_deploy_object_present_Uselaptop_prob_gain_median",
+        "val_deploy_object_present_Uselaptop_prob_gain_negative_rate",
         "val_deploy_object_present_Uselaptop_confuser_margin_gain",
         "val_deploy_object_present_true_logit_gain",
         "val_deploy_object_present_action_margin_gain",
-        "val_actor_object_fusion_delta_norm",
+        "val_deploy_object_present_action_margin_gain_median",
+        "val_deploy_object_present_action_margin_gain_negative_rate",
+        "val_actor_object_pair_action_score_abs",
+        "val_actor_object_pair_action_margin",
+        "val_actor_object_pair_action_margin_win_rate",
         "val_actor_object_prompt_token_count",
         "val_token_selection_visual_keep_rate",
         "val_token_selection_actor_box_keep_rate",
@@ -586,11 +607,21 @@ def print_compact_best(epoch_df):
         "val_object_dropout_action_Uselaptop_missing_object_confuser_margin",
         "val_object_dropout_action_Uselaptop_missing_object_confuser_win_rate",
         "val_deploy_object_present_true_prob_gain",
+        "val_deploy_object_present_true_prob_gain_median",
+        "val_deploy_object_present_true_prob_gain_negative_rate",
         "val_deploy_object_present_true_logit_gain",
         "val_deploy_object_present_action_margin_gain",
+        "val_deploy_object_present_action_margin_gain_median",
+        "val_deploy_object_present_action_margin_gain_negative_rate",
         "val_deploy_object_present_Uselaptop_prob_gain",
+        "val_deploy_object_present_Uselaptop_prob_gain_median",
+        "val_deploy_object_present_Uselaptop_prob_gain_negative_rate",
         "val_deploy_object_present_Uselaptop_confuser_margin_gain",
-        "val_actor_object_fusion_delta_norm",
+        "val_actor_object_pair_action_score_abs",
+        "val_actor_object_pair_action_margin",
+        "val_actor_object_pair_action_margin_win_rate",
+        "val_actor_object_pair_action_Uselaptop_margin",
+        "val_actor_object_pair_action_Uselaptop_margin_win_rate",
         "val_token_selection_actor_box_keep_rate",
         "val_token_selection_visible_object_box_keep_rate",
         "val_token_selection_exact_teacher_object_keep_rate",
@@ -737,6 +768,14 @@ def print_decision(epoch_df):
         latest,
         "val_deploy_object_present_true_prob_gain",
     )
+    object_present_true_gain_median = metric(
+        latest,
+        "val_deploy_object_present_true_prob_gain_median",
+    )
+    object_present_true_gain_negative_rate = metric(
+        latest,
+        "val_deploy_object_present_true_prob_gain_negative_rate",
+    )
     object_present_true_logit_gain = metric(
         latest,
         "val_deploy_object_present_true_logit_gain",
@@ -745,15 +784,44 @@ def print_decision(epoch_df):
         latest,
         "val_deploy_object_present_action_margin_gain",
     )
+    object_present_action_margin_gain_median = metric(
+        latest,
+        "val_deploy_object_present_action_margin_gain_median",
+    )
+    object_present_action_margin_gain_negative_rate = metric(
+        latest,
+        "val_deploy_object_present_action_margin_gain_negative_rate",
+    )
     object_present_uselaptop_gain = metric(
         latest,
         "val_deploy_object_present_Uselaptop_prob_gain",
+    )
+    object_present_uselaptop_gain_median = metric(
+        latest,
+        "val_deploy_object_present_Uselaptop_prob_gain_median",
+    )
+    object_present_uselaptop_gain_negative_rate = metric(
+        latest,
+        "val_deploy_object_present_Uselaptop_prob_gain_negative_rate",
     )
     object_present_uselaptop_margin_gain = metric(
         latest,
         "val_deploy_object_present_Uselaptop_confuser_margin_gain",
     )
-    fusion_delta_norm = metric(latest, "val_actor_object_fusion_delta_norm")
+    pair_action_score_abs = metric(latest, "val_actor_object_pair_action_score_abs")
+    pair_action_margin = metric(latest, "val_actor_object_pair_action_margin")
+    pair_action_margin_win = metric(
+        latest,
+        "val_actor_object_pair_action_margin_win_rate",
+    )
+    pair_action_uselaptop_margin = metric(
+        latest,
+        "val_actor_object_pair_action_Uselaptop_margin",
+    )
+    pair_action_uselaptop_margin_win = metric(
+        latest,
+        "val_actor_object_pair_action_Uselaptop_margin_win_rate",
+    )
 
     pos = metric(latest, "val_interaction_heatmap_positive_mean")
     pred_max = metric(latest, "val_interaction_heatmap_pred_max")
@@ -893,14 +961,27 @@ def print_decision(epoch_df):
     if pd.notna(object_present_true_gain) or pd.notna(object_present_uselaptop_gain):
         print(
             "object-present gain: "
-            f"true_prob {fmt(object_present_true_gain)}, "
+            f"true_prob {fmt(object_present_true_gain)} "
+            f"(median {fmt(object_present_true_gain_median)}, "
+            f"neg {fmt(object_present_true_gain_negative_rate)}), "
             f"true_logit {fmt(object_present_true_logit_gain)}, "
-            f"action_margin {fmt(object_present_action_margin_gain)}, "
-            f"uselaptop_prob {fmt(object_present_uselaptop_gain)}, "
+            f"action_margin {fmt(object_present_action_margin_gain)} "
+            f"(median {fmt(object_present_action_margin_gain_median)}, "
+            f"neg {fmt(object_present_action_margin_gain_negative_rate)}), "
+            f"uselaptop_prob {fmt(object_present_uselaptop_gain)} "
+            f"(median {fmt(object_present_uselaptop_gain_median)}, "
+            f"neg {fmt(object_present_uselaptop_gain_negative_rate)}), "
             f"uselaptop_margin {fmt(object_present_uselaptop_margin_gain)}"
         )
-    if pd.notna(fusion_delta_norm):
-        print(f"learned object fusion: delta_norm {fmt(fusion_delta_norm)}")
+    if pd.notna(pair_action_score_abs):
+        print(
+            "pair action scoring: "
+            f"score_abs {fmt(pair_action_score_abs)}, "
+            f"margin {fmt(pair_action_margin)}, "
+            f"win {fmt(pair_action_margin_win)}, "
+            f"uselaptop_margin {fmt(pair_action_uselaptop_margin)}, "
+            f"uselaptop_win {fmt(pair_action_uselaptop_margin_win)}"
+        )
     if pd.notna(token_keep_visual):
         print(
             "token-selection retention: "
@@ -971,6 +1052,24 @@ def print_decision(epoch_df):
         )
         return
     if (
+        pd.notna(object_present_uselaptop_gain_median)
+        and object_present_uselaptop_gain_median < -0.02
+    ):
+        print(
+            "OBJECT PATH FAIL: median detected-object Uselaptop gain is negative; "
+            "the mean is not enough evidence."
+        )
+        return
+    if (
+        pd.notna(object_present_uselaptop_gain_negative_rate)
+        and object_present_uselaptop_gain_negative_rate > 0.35
+    ):
+        print(
+            "OBJECT PATH FAIL: too many Uselaptop object-present windows are hurt "
+            "relative to object-hidden inference."
+        )
+        return
+    if (
         pd.notna(object_present_action_margin_gain)
         and object_present_action_margin_gain < -0.02
     ):
@@ -979,9 +1078,31 @@ def print_decision(epoch_df):
             "action margin relative to the object-hidden pass."
         )
         return
-    if pd.notna(fusion_delta_norm) and latest_epoch >= 2 and fusion_delta_norm < 0.05:
+    if (
+        pd.notna(object_present_action_margin_gain_median)
+        and object_present_action_margin_gain_median < -0.02
+    ):
         print(
-            "OBJECT FUSION WARNING: learned object-context fusion is nearly inactive."
+            "OBJECT PATH FAIL: median detected-object action-margin gain is negative."
+        )
+        return
+    if (
+        pd.notna(object_present_action_margin_gain_negative_rate)
+        and object_present_action_margin_gain_negative_rate > 0.35
+    ):
+        print(
+            "OBJECT PATH FAIL: too many detected-object windows reduce the true "
+            "action margin."
+        )
+        return
+    if (
+        pd.notna(pair_action_margin_win)
+        and latest_epoch >= 2
+        and pair_action_margin_win < 0.60
+    ):
+        print(
+            "PAIR ACTION WARNING: true actor-object-action tuples do not beat "
+            "wrong pair/action tuples often enough yet."
         )
         return
     if pd.notna(dropout_joint_missing) and dropout_joint_missing < 0.65:
@@ -1090,19 +1211,38 @@ def print_row(title, row):
         print(
             "object-present gain: "
             f"true_prob {metric(row, 'val_deploy_object_present_true_prob_gain'):.4f}, "
+            "true_prob_median "
+            f"{metric(row, 'val_deploy_object_present_true_prob_gain_median'):.4f}, "
+            "true_prob_neg "
+            f"{metric(row, 'val_deploy_object_present_true_prob_gain_negative_rate'):.4f}, "
             "true_logit "
             f"{metric(row, 'val_deploy_object_present_true_logit_gain'):.4f}, "
             "action_margin "
             f"{metric(row, 'val_deploy_object_present_action_margin_gain'):.4f}, "
+            "action_margin_median "
+            f"{metric(row, 'val_deploy_object_present_action_margin_gain_median'):.4f}, "
+            "action_margin_neg "
+            f"{metric(row, 'val_deploy_object_present_action_margin_gain_negative_rate'):.4f}, "
             "uselaptop_prob "
             f"{metric(row, 'val_deploy_object_present_Uselaptop_prob_gain'):.4f}, "
+            "uselaptop_prob_median "
+            f"{metric(row, 'val_deploy_object_present_Uselaptop_prob_gain_median'):.4f}, "
+            "uselaptop_prob_neg "
+            f"{metric(row, 'val_deploy_object_present_Uselaptop_prob_gain_negative_rate'):.4f}, "
             "uselaptop_margin "
             f"{metric(row, 'val_deploy_object_present_Uselaptop_confuser_margin_gain'):.4f}"
         )
-    if pd.notna(metric(row, "val_actor_object_fusion_delta_norm")):
+    if pd.notna(metric(row, "val_actor_object_pair_action_score_abs")):
         print(
-            "learned object fusion: "
-            f"delta_norm {metric(row, 'val_actor_object_fusion_delta_norm'):.4f}"
+            "pair action scoring: "
+            f"score_abs {metric(row, 'val_actor_object_pair_action_score_abs'):.4f}, "
+            f"margin {metric(row, 'val_actor_object_pair_action_margin'):.4f}, "
+            "win "
+            f"{metric(row, 'val_actor_object_pair_action_margin_win_rate'):.4f}, "
+            "uselaptop_margin "
+            f"{metric(row, 'val_actor_object_pair_action_Uselaptop_margin'):.4f}, "
+            "uselaptop_win "
+            f"{metric(row, 'val_actor_object_pair_action_Uselaptop_margin_win_rate'):.4f}"
         )
     print(
         "interaction heatmap: "
@@ -1192,7 +1332,7 @@ def main():
     print("- Main proof: val_f1/per-action accuracy stay healthy while joint relation-action metrics improve.")
     print("- Detector-dropout metrics prove objectful actions still work when the compatible object token is hidden.")
     print("- For each actor, the object objective is one CE over NULL plus detected object slots.")
-    print("- Runtime objects update actor tokens inside the transformer and feed selected object memory into actor_head.")
+    print("- Runtime objects update actor tokens inside the transformer and feed ROI object memory into pair action scoring.")
     print("- Object-present gain must be non-negative; detected objects should not hurt the true action versus an object-hidden pass.")
     print("- The only object objective is relation CE; removed side objectives are not part of this run.")
     print("- Exact objectful cases must get both action and relation right; relation-right/action-wrong is a coupling failure.")

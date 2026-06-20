@@ -28,12 +28,12 @@ def uses_prompt_object_proposals(hparams):
         )
     if uses_objects and (
         not bool(hparams.get("actor_object_relation_in_transformer", 0))
-        or not bool(hparams.get("actor_relation_action_fusion", 0))
+        or not bool(hparams.get("actor_object_pair_action_head", 0))
     ):
         raise RuntimeError(
             "Object-proposal checkpoints now have one supported export path: "
             "actor_object_relation_in_transformer=1 and "
-            "actor_relation_action_fusion=1."
+            "actor_object_pair_action_head=1."
         )
     return uses_objects
 
@@ -415,8 +415,8 @@ def checkpoint_payload(checkpoint_path, hparam_overrides=None):
         "actor_object_relation_layer_scale_init": float(
             hparams.get("actor_object_relation_layer_scale_init", 0.25)
         ),
-        "actor_relation_action_fusion": int(
-            hparams.get("actor_relation_action_fusion", 0)
+        "actor_object_pair_action_head": int(
+            hparams.get("actor_object_pair_action_head", 0)
         ),
         "uses_object_proposals": int(uses_prompt_object_proposals(hparams)),
         "num_scene_object_tokens": int(hparams.get("num_scene_object_tokens", 0)),
@@ -679,8 +679,8 @@ def main():
             "actor_object_relation_layer_scale_init": float(
                 hparams.get("actor_object_relation_layer_scale_init", 0.25)
             ),
-            "actor_relation_action_fusion": int(
-                hparams.get("actor_relation_action_fusion", 0)
+            "actor_object_pair_action_head": int(
+                hparams.get("actor_object_pair_action_head", 0)
             ),
             "uses_object_proposals": int(uses_object_proposals),
         },

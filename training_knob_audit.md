@@ -8,7 +8,7 @@ box, validity, and a pooled visual descriptor from the video patch tokens inside
 that object box. Runtime detections are relation-only object memory rather than
 ordinary transformer prefix tokens, so object presence cannot bypass the relation
 update through generic self-attention. If object proposals are enabled, object
-ROI visual memory, relation binding, and final relation-action fusion are
+ROI visual memory, relation binding, and final pair action scoring are
 required; there is no passive object-prompt-only mode.
 
 ## Architecture Contract
@@ -21,9 +21,8 @@ adds detected object candidates as relation-only memory, then learns:
 ```text
 actor token + visual object-region candidates + PO-GUISE+ video/heatmap context
     -> relation over NULL + object slots
-    -> selected object context
-    -> learned actor/action fusion
-    -> one actor action head
+    -> actor-object pair action scores
+    -> one aggregated actor action prediction
 ```
 
 The detector threshold decides whether a proposal is valid. Once a proposal is
@@ -31,7 +30,8 @@ valid, the model should treat it as real scene evidence and learn whether it is
 the interacted object. The model must not receive a learned detector-confidence
 feature, and it must not receive a hand-coded `object class -> action logit`
 boost. Object/action coupling is learned through relation CE, action CE, the
-actual object-region visual feature, and the object-present margin objective.
+actual object-region visual feature, pair-action margin, and the object-present
+margin objective.
 
 Sparse detections are handled by window-level `object_valid`: one valid detected
 laptop in the clip is enough for a laptop slot to compete against `NULL`.
@@ -61,8 +61,11 @@ Relation:
 --actor_object_relation_max_scale 1.5
 --actor_object_relation_learned_scale 1
 --actor_object_relation_layer_scale_init 0.25
---actor_relation_action_fusion 1
---actor_relation_action_fusion_init_scale 0.01
+--actor_object_pair_action_head 1
+--actor_object_pair_action_hidden_dim 0
+--actor_object_pair_action_init_scale 0.01
+--actor_object_pair_action_margin_loss_weight 0.25
+--actor_object_pair_action_margin 0.50
 --actor_object_present_margin_loss_weight 0.15
 --actor_object_present_margin 0.25
 ```
@@ -109,14 +112,14 @@ Regular action training:
 
 Do not add duplicate object-state heads or separate object-action heads. The
 relation path now updates actor tokens before the pruning stages and again right
-before classification. The final actor classifier also receives a small-initialized
-learned fusion of actor token, selected object context, actor/object product, and
-object mass, so action CE trains the real object-conditioned action path.
+before classification. The final action prediction is produced by the pair action
+scorer over `NULL` plus valid object slots, so action CE trains the same
+actor-object pairs as relation CE.
 
 Do not put runtime object detections back into ordinary transformer self-attention.
 Runtime detections should influence action through relation-selected object
-memory and object-box pruning priors, not through global object-presence
-attention shortcuts.
+memory, pair action scores, and object-box pruning priors, not through global
+object-presence attention shortcuts.
 
 Do not add fake labels based on swapping object names. The dataset label remains
 the action CE target; object supervision is the relation slot target.
@@ -126,7 +129,7 @@ failure and make deployment brittle.
 
 Do not reintroduce fixed object-action logit priors. If a valid laptop helps
 `Uselaptop`, that should happen because the relation module selected laptop and
-the learned fusion/action head used that context, not because inference added a
+the pair action scorer used that actor-object tuple, not because inference added a
 manual class boost.
 
 ## What To Read In A Run
@@ -142,8 +145,11 @@ A promising run should show:
 - `val_object_region_visual_feature_norm` present and nonzero
 - `val_relation_logit_scale` staying finite and not collapsing
 - `val_deploy_object_present_action_margin_gain` not negative
+- `val_deploy_object_present_action_margin_gain_median` not negative
+- `val_deploy_object_present_action_margin_gain_negative_rate` low
 - `val_deploy_object_present_Uselaptop_prob_gain` not negative
-- `val_actor_object_fusion_delta_norm` nonzero but not exploding
+- `val_deploy_object_present_Uselaptop_prob_gain_median` not negative
+- `val_actor_object_pair_action_margin_win_rate` rising
 - `val_interaction_heatmap_soft_iou` and positive response improving
 
 `val_deploy_score` strongly penalizes negative object-present gain and negative
@@ -155,6 +161,6 @@ same clip with valid compatible detections present versus hidden and trains only
 the object-present pass to keep the true-action logit at least slightly better.
 The detector-dropout action loss separately preserves the no-object fallback.
 
-A bad run can still have high relation metrics if the action head ignores the
-updated actor token. In that case, do not add more side losses; inspect and
-strengthen the object-context update before `actor_head`.
+A bad run can still have high relation metrics if pair action margins do not
+improve. In that case, inspect pair scoring and object-present intervention
+metrics before adding more objectives.

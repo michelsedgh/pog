@@ -89,6 +89,9 @@ class HeatmapModule(pl.LightningModule):
         self.actor_object_relation_in_transformer = bool(
             hparams.get("actor_object_relation_in_transformer", 0)
         )
+        self.actor_object_pair_action_head = bool(
+            hparams.get("actor_object_pair_action_head", 0)
+        )
         actor_object_slot_head = bool(hparams.get("actor_object_slot_head", 0))
         if actor_object_slot_head:
             raise ValueError(
@@ -120,8 +123,8 @@ class HeatmapModule(pl.LightningModule):
         ):
             raise ValueError(
                 "actor_object_prompt_tokens now has one supported training path: "
-                "actor_object_relation_in_transformer=1 with learned "
-                "relation-action fusion."
+                "actor_object_relation_in_transformer=1 with learned pair action "
+                "scoring."
             )
         if self.actor_object_relation_in_transformer and not self.actor_object_prompt_tokens:
             raise ValueError(
@@ -130,6 +133,17 @@ class HeatmapModule(pl.LightningModule):
         if self.actor_object_relation_in_transformer and not self.actor_interaction_heatmaps:
             raise ValueError(
                 "actor_object_relation_in_transformer requires actor_interaction_heatmaps"
+            )
+        if self.actor_object_relation_in_transformer and not self.actor_object_pair_action_head:
+            raise ValueError(
+                "actor_object_relation_in_transformer requires "
+                "actor_object_pair_action_head=1 so action CE trains the same "
+                "actor-object pairs as relation CE."
+            )
+        if self.actor_object_pair_action_head and not self.actor_object_relation_in_transformer:
+            raise ValueError(
+                "actor_object_pair_action_head requires "
+                "actor_object_relation_in_transformer=1"
             )
         self.actor_poguiseplus_loss = self.actor_prompt and self.actor_interaction_heatmaps
         self.poguiseplus_heatmap_loss_weight = float(
@@ -188,6 +202,18 @@ class HeatmapModule(pl.LightningModule):
         )
         if self.actor_object_relation_null_loss_weight < 0:
             raise ValueError("actor_object_relation_null_loss_weight must be >= 0")
+        self.actor_object_pair_action_margin_loss_weight = float(
+            hparams.get("actor_object_pair_action_margin_loss_weight", 0.0)
+        )
+        if self.actor_object_pair_action_margin_loss_weight < 0:
+            raise ValueError(
+                "actor_object_pair_action_margin_loss_weight must be >= 0"
+            )
+        self.actor_object_pair_action_margin = float(
+            hparams.get("actor_object_pair_action_margin", 0.0)
+        )
+        if self.actor_object_pair_action_margin < 0:
+            raise ValueError("actor_object_pair_action_margin must be >= 0")
         self.actor_object_detector_dropout_prob = float(
             hparams.get("actor_object_detector_dropout_prob", 0.0)
         )
@@ -432,7 +458,8 @@ class HeatmapModule(pl.LightningModule):
                 "model.net.actor_object_relation_updates",
                 "model.net.actor_object_final_relation_update",
                 "model.actor_head",
-                "model.actor_relation_action_fusion",
+                "model.actor_object_null_pair_token",
+                "model.actor_object_pair_action_head",
                 "model.presence_head",
             ]
             if self.model.hparams.get("use_register_tokens", 0):
@@ -518,8 +545,11 @@ class HeatmapModule(pl.LightningModule):
         params = []
         if getattr(self.model, "actor_head", None) is not None:
             params += list(self.model.actor_head.parameters())
-        if getattr(self.model, "actor_relation_action_fusion", None) is not None:
-            params += list(self.model.actor_relation_action_fusion.parameters())
+        if getattr(self.model, "actor_object_pair_action_head", None) is not None:
+            params += list(self.model.actor_object_pair_action_head.parameters())
+        null_pair_token = getattr(self.model, "actor_object_null_pair_token", None)
+        if isinstance(null_pair_token, nn.Parameter):
+            params.append(null_pair_token)
         if self.model.presence_head is not None:
             params += list(self.model.presence_head.parameters())
         for name, param in self.model.net.named_parameters():
@@ -1795,6 +1825,116 @@ class HeatmapModule(pl.LightningModule):
         )
         return weighted_loss
 
+    def _actor_object_pair_action_margin_loss(self, stage, actions, valid, target):
+        if not self.actor_object_pair_action_head:
+            return None
+        pair_scores = getattr(self.model, "last_actor_object_pair_action_scores", None)
+        pair_allowed = getattr(self.model, "last_actor_object_pair_action_allowed", None)
+        if pair_scores is None or pair_allowed is None:
+            return None
+        if pair_scores.ndim != 4:
+            raise RuntimeError(
+                "pair action scores must have shape [B,A,P,C], got "
+                f"{tuple(pair_scores.shape)}"
+            )
+
+        device = pair_scores.device
+        actions = actions.to(device=device, dtype=torch.long)
+        valid = valid.to(device=device, dtype=torch.bool)
+        pair_scores = pair_scores.float()
+        pair_allowed = pair_allowed.to(device=device, dtype=torch.bool)
+        info = self._exact_teacher_object_info(actions, valid, target, device)
+        if info is None:
+            return None
+
+        objectless = self._labels_in_indices(actions, self.objectless_action_indices)
+        objectless = info["valid"] & objectless
+        known_objectful = info["valid"] & info["known_action"]
+        exact_compatible = known_objectful & info["compatible_from_one_based"]
+        missing_compatible = known_objectful & ~info["any_compatible"]
+        supervised = exact_compatible | objectless | missing_compatible
+        supervised = supervised & (actions >= 0) & (actions < pair_scores.shape[-1])
+        if not supervised.any():
+            return None
+
+        num_pairs = int(pair_scores.shape[2])
+        target_pair = torch.zeros_like(actions, dtype=torch.long, device=device)
+        selected_index = info["selected_indices"].to(device=device, dtype=torch.long)
+        if num_pairs > 1:
+            target_pair[exact_compatible] = selected_index[exact_compatible].clamp(
+                1,
+                num_pairs - 1,
+            )
+
+        scores_s = pair_scores[supervised]
+        allowed_s = pair_allowed[supervised]
+        labels_s = actions[supervised]
+        pair_s = target_pair[supervised].clamp(0, num_pairs - 1)
+        rows = torch.arange(scores_s.shape[0], device=device)
+        target_allowed = allowed_s[rows, pair_s, labels_s]
+        if not bool(target_allowed.all()):
+            raise RuntimeError(
+                "The supervised pair/action target is masked out. This means the "
+                "Toyota action-object map, target interaction object, or object "
+                "validity disagrees with pair scorer routing."
+            )
+
+        true_scores = scores_s[rows, pair_s, labels_s]
+        wrong_scores = scores_s.masked_fill(~allowed_s, -1.0e4).clone()
+        wrong_scores[rows, pair_s, labels_s] = -1.0e4
+        max_wrong = wrong_scores.reshape(scores_s.shape[0], -1).amax(dim=-1)
+        usable = max_wrong > -9999.0
+        if not usable.any():
+            return None
+
+        margins = true_scores[usable] - max_wrong[usable]
+        count = int(margins.numel())
+        self._log_scalar(
+            f"{stage}_actor_object_pair_action_margin",
+            margins.mean(),
+            count,
+        )
+        self._log_scalar(
+            f"{stage}_actor_object_pair_action_margin_win_rate",
+            (margins > 0).float().mean(),
+            count,
+        )
+        uselaptop_idx = self._action_index("Uselaptop")
+        if uselaptop_idx is not None:
+            labels_usable = labels_s[usable]
+            uselaptop_mask = labels_usable == int(uselaptop_idx)
+            if uselaptop_mask.any():
+                uselaptop_count = int(uselaptop_mask.sum().item())
+                self._log_scalar(
+                    f"{stage}_actor_object_pair_action_Uselaptop_margin",
+                    margins[uselaptop_mask].mean(),
+                    uselaptop_count,
+                )
+                self._log_scalar(
+                    f"{stage}_actor_object_pair_action_Uselaptop_margin_win_rate",
+                    (margins[uselaptop_mask] > 0).float().mean(),
+                    uselaptop_count,
+                )
+
+        if (
+            not stage.startswith("train")
+            or self.actor_object_pair_action_margin_loss_weight <= 0.0
+        ):
+            return None
+
+        margin_target = margins.new_tensor(float(self.actor_object_pair_action_margin))
+        loss = F.relu(margin_target - margins).mean()
+        self.log(
+            f"{stage}_loss_actor_object_pair_action_margin",
+            loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+        )
+        return loss * self.actor_object_pair_action_margin_loss_weight
+
     def _log_actor_object_relation_metrics(
         self,
         stage,
@@ -2649,13 +2789,16 @@ class HeatmapModule(pl.LightningModule):
             **self._actor_model_object_inputs(object_inputs),
         )
         preds, hm_preds, presence_logits = self._unpack_model_data(data)
-        fusion_delta = getattr(self.model, "last_actor_object_fusion_delta", None)
-        if fusion_delta is not None:
-            fusion_delta = fusion_delta.detach().float()
+        pair_scores = getattr(self.model, "last_actor_object_pair_action_scores", None)
+        pair_allowed = getattr(self.model, "last_actor_object_pair_action_allowed", None)
+        if pair_scores is not None and pair_allowed is not None and pair_allowed.any():
+            pair_scores = pair_scores.detach().float()
+            pair_allowed = pair_allowed.to(device=pair_scores.device, dtype=torch.bool)
+            count = int(pair_allowed.sum().item())
             self._log_scalar(
-                f"{stage}_actor_object_fusion_delta_norm",
-                fusion_delta.norm(dim=-1)[valid.to(device=fusion_delta.device)].mean(),
-                int(valid.sum().item()),
+                f"{stage}_actor_object_pair_action_score_abs",
+                pair_scores[pair_allowed].abs().mean(),
+                count,
             )
 
         loss_action = self._action_loss(preds, actions, loss_fn, valid)
@@ -2696,6 +2839,16 @@ class HeatmapModule(pl.LightningModule):
         )
         if loss_actor_object_relation is not None:
             loss_main_task = loss_main_task + loss_actor_object_relation
+        loss_actor_object_pair_action_margin = (
+            self._actor_object_pair_action_margin_loss(
+                stage,
+                actions,
+                valid,
+                target,
+            )
+        )
+        if loss_actor_object_pair_action_margin is not None:
+            loss_main_task = loss_main_task + loss_actor_object_pair_action_margin
         relation_action_joint_outputs = self._log_relation_action_joint_metrics(
             stage,
             preds,
@@ -4092,14 +4245,30 @@ class HeatmapModule(pl.LightningModule):
                 else None
             )
 
-        def mean_gathered(name):
+        def values_gathered(name):
             values = self._flatten_gathered_validation_tensor(gathered_outputs, name)
             if values is None:
                 return None
             values = values.to(device=labels.device, dtype=torch.float32)
             if values.numel() == 0:
                 return None
+            return values
+
+        def mean_gathered(name):
+            values = values_gathered(name)
+            if values is None:
+                return None
             return values.mean()
+
+        def median_value(values):
+            if values is None:
+                return None
+            return values.median()
+
+        def negative_rate(values):
+            if values is None:
+                return None
+            return (values < 0).float().mean()
 
         relation_action_joint_acc = mean_gathered("relation_action_joint")
         relation_action_joint_exact_acc = mean_gathered("relation_action_joint_exact")
@@ -4133,18 +4302,63 @@ class HeatmapModule(pl.LightningModule):
         object_dropout_joint_uselaptop_acc = mean_gathered(
             "object_dropout_relation_action_joint_missing_Uselaptop"
         )
-        object_present_true_gain = mean_gathered("object_present_true_prob_gain")
-        object_present_true_logit_gain = mean_gathered(
+        object_present_true_gain_values = values_gathered(
+            "object_present_true_prob_gain"
+        )
+        object_present_true_logit_gain_values = values_gathered(
             "object_present_true_logit_gain"
         )
-        object_present_action_margin_gain = mean_gathered(
+        object_present_action_margin_gain_values = values_gathered(
             "object_present_action_margin_gain"
         )
-        object_present_uselaptop_gain = mean_gathered(
+        object_present_uselaptop_gain_values = values_gathered(
             "object_present_Uselaptop_prob_gain"
         )
-        object_present_uselaptop_margin_gain = mean_gathered(
+        object_present_uselaptop_margin_gain_values = values_gathered(
             "object_present_Uselaptop_confuser_margin_gain"
+        )
+        object_present_true_gain = (
+            object_present_true_gain_values.mean()
+            if object_present_true_gain_values is not None
+            else None
+        )
+        object_present_true_logit_gain = (
+            object_present_true_logit_gain_values.mean()
+            if object_present_true_logit_gain_values is not None
+            else None
+        )
+        object_present_action_margin_gain = (
+            object_present_action_margin_gain_values.mean()
+            if object_present_action_margin_gain_values is not None
+            else None
+        )
+        object_present_uselaptop_gain = (
+            object_present_uselaptop_gain_values.mean()
+            if object_present_uselaptop_gain_values is not None
+            else None
+        )
+        object_present_uselaptop_margin_gain = (
+            object_present_uselaptop_margin_gain_values.mean()
+            if object_present_uselaptop_margin_gain_values is not None
+            else None
+        )
+        object_present_true_gain_median = median_value(
+            object_present_true_gain_values
+        )
+        object_present_action_margin_gain_median = median_value(
+            object_present_action_margin_gain_values
+        )
+        object_present_uselaptop_gain_median = median_value(
+            object_present_uselaptop_gain_values
+        )
+        object_present_true_gain_negative_rate = negative_rate(
+            object_present_true_gain_values
+        )
+        object_present_action_margin_gain_negative_rate = negative_rate(
+            object_present_action_margin_gain_values
+        )
+        object_present_uselaptop_gain_negative_rate = negative_rate(
+            object_present_uselaptop_gain_values
         )
         object_present_true_hurt = (
             (-object_present_true_gain).clamp_min(0.0)
@@ -4159,6 +4373,21 @@ class HeatmapModule(pl.LightningModule):
         object_present_margin_hurt = (
             (-object_present_action_margin_gain).clamp_min(0.0)
             if object_present_action_margin_gain is not None
+            else None
+        )
+        object_present_true_median_hurt = (
+            (-object_present_true_gain_median).clamp_min(0.0)
+            if object_present_true_gain_median is not None
+            else None
+        )
+        object_present_margin_median_hurt = (
+            (-object_present_action_margin_gain_median).clamp_min(0.0)
+            if object_present_action_margin_gain_median is not None
+            else None
+        )
+        object_present_uselaptop_median_hurt = (
+            (-object_present_uselaptop_gain_median).clamp_min(0.0)
+            if object_present_uselaptop_gain_median is not None
             else None
         )
 
@@ -4197,8 +4426,14 @@ class HeatmapModule(pl.LightningModule):
                 (hard_object_action_rate, 0.20),
                 (key_action_floor_deficit, 0.15),
                 (object_present_true_hurt, 0.50),
+                (object_present_true_median_hurt, 0.75),
+                (object_present_true_gain_negative_rate, 0.25),
                 (object_present_margin_hurt, 0.75),
+                (object_present_margin_median_hurt, 0.75),
+                (object_present_action_margin_gain_negative_rate, 0.35),
                 (object_present_uselaptop_hurt, 1.00),
+                (object_present_uselaptop_median_hurt, 1.00),
+                (object_present_uselaptop_gain_negative_rate, 0.50),
             ],
         )
         if deploy_score is None:
@@ -4241,6 +4476,14 @@ class HeatmapModule(pl.LightningModule):
                 object_present_true_gain,
             ),
             (
+                "val_deploy_object_present_true_prob_gain_median",
+                object_present_true_gain_median,
+            ),
+            (
+                "val_deploy_object_present_true_prob_gain_negative_rate",
+                object_present_true_gain_negative_rate,
+            ),
+            (
                 "val_deploy_object_present_true_logit_gain",
                 object_present_true_logit_gain,
             ),
@@ -4249,8 +4492,24 @@ class HeatmapModule(pl.LightningModule):
                 object_present_action_margin_gain,
             ),
             (
+                "val_deploy_object_present_action_margin_gain_median",
+                object_present_action_margin_gain_median,
+            ),
+            (
+                "val_deploy_object_present_action_margin_gain_negative_rate",
+                object_present_action_margin_gain_negative_rate,
+            ),
+            (
                 "val_deploy_object_present_Uselaptop_prob_gain",
                 object_present_uselaptop_gain,
+            ),
+            (
+                "val_deploy_object_present_Uselaptop_prob_gain_median",
+                object_present_uselaptop_gain_median,
+            ),
+            (
+                "val_deploy_object_present_Uselaptop_prob_gain_negative_rate",
+                object_present_uselaptop_gain_negative_rate,
             ),
             (
                 "val_deploy_object_present_Uselaptop_confuser_margin_gain",

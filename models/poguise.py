@@ -1,4 +1,5 @@
 import torch.nn as nn
+import torch.nn.functional as F
 import pytorch_lightning as pl
 from argparse import ArgumentParser
 from blocks.poguise import vit_base_patch16_224
@@ -8,7 +9,11 @@ import torch
 import os
 import os.path
 import pickle
-from datasets.object_vocab import NUM_OBJECT_CLASSES
+from datasets.object_vocab import NUM_OBJECT_CLASSES, OBJECT_TO_ID
+from datasets.toyota_action_taxonomy import (
+    toyota_action_names,
+    toyota_action_object_map,
+)
 
 
 def load_state_dict(
@@ -155,11 +160,30 @@ class POGUISE(pl.LightningModule):
         self.actor_relation_action_fusion_enabled = bool(
             self.hparams.get("actor_relation_action_fusion", 0)
         )
-        self.actor_relation_action_fusion_init_scale = float(
-            self.hparams.get("actor_relation_action_fusion_init_scale", 0.0)
+        self.actor_object_pair_action_head_enabled = bool(
+            self.hparams.get("actor_object_pair_action_head", 0)
         )
-        if self.actor_relation_action_fusion_init_scale < 0:
-            raise ValueError("actor_relation_action_fusion_init_scale must be >= 0")
+        self.actor_object_pair_action_hidden_dim = int(
+            self.hparams.get("actor_object_pair_action_hidden_dim", 0)
+        )
+        self.actor_object_pair_action_init_scale = float(
+            self.hparams.get("actor_object_pair_action_init_scale", 0.01)
+        )
+        if self.actor_object_pair_action_hidden_dim < 0:
+            raise ValueError("actor_object_pair_action_hidden_dim must be >= 0")
+        if self.actor_object_pair_action_init_scale < 0:
+            raise ValueError("actor_object_pair_action_init_scale must be >= 0")
+        if self.actor_relation_action_fusion_enabled:
+            raise ValueError(
+                "actor_relation_action_fusion was removed. Use "
+                "--actor_object_pair_action_head 1 so action logits are scored "
+                "from actor-object pairs instead of one soft-selected object memory."
+            )
+        if float(self.hparams.get("actor_relation_action_fusion_init_scale", 0.0)) != 0.0:
+            raise ValueError(
+                "actor_relation_action_fusion_init_scale is stale because "
+                "actor_relation_action_fusion was removed."
+            )
         removed_action_prior_keys = (
             "actor_object_action_prior_weight",
             "actor_object_action_prior_negative_weight",
@@ -177,7 +201,7 @@ class POGUISE(pl.LightningModule):
             raise ValueError(
                 "Manual object-to-action logit priors were removed. The clean "
                 "path is PO-GUISE+ video/heatmap features plus learned HOI-style "
-                "actor-object relation binding and learned relation-action fusion. "
+                "actor-object relation binding and learned pair action scoring. "
                 f"Remove stale hparams: {', '.join(stale_action_prior)}"
             )
         removed_relation_prior_keys = (
@@ -198,7 +222,7 @@ class POGUISE(pl.LightningModule):
                 "Manual actor-object relation logit priors were removed. "
                 "The clean ROI-object path uses object-region visual tokens, "
                 "normalized learned relation pointers, relation CE, and learned "
-                "relation-action fusion. Remove stale hparams: "
+                "pair action scoring. Remove stale hparams: "
                 f"{', '.join(stale_relation_prior)}"
             )
         if bool(self.hparams.get("actor_object_slot_head", 0)):
@@ -256,15 +280,16 @@ class POGUISE(pl.LightningModule):
             raise ValueError(
                 "actor_object_relation_in_transformer requires actor_object_prompt_tokens"
             )
-        if self.actor_object_relation_in_transformer and not self.actor_relation_action_fusion_enabled:
+        if self.actor_object_relation_in_transformer and not self.actor_object_pair_action_head_enabled:
             raise ValueError(
                 "actor_object_relation_in_transformer requires "
-                "actor_relation_action_fusion so the final action head consumes "
-                "the selected object memory."
+                "actor_object_pair_action_head so relation pointers and action "
+                "classification are optimized through the same actor-object pairs."
             )
-        if self.actor_relation_action_fusion_enabled and not self.actor_object_relation_in_transformer:
+        if self.actor_object_pair_action_head_enabled and not self.actor_object_relation_in_transformer:
             raise ValueError(
-                "actor_relation_action_fusion requires actor_object_relation_in_transformer"
+                "actor_object_pair_action_head requires "
+                "actor_object_relation_in_transformer"
             )
         if self.actor_interaction_heatmaps and not self.actor_prompt:
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
@@ -281,6 +306,7 @@ class POGUISE(pl.LightningModule):
                 "semantics come from relation-only runtime object memory."
             )
         self.use_register_tokens = bool(self.hparams.get("use_register_tokens", 0))
+        self._register_actor_object_action_buffers()
         self._create_network()
         # freeze backbone if specified
         if self.hparams.freeze_backbone:
@@ -301,6 +327,85 @@ class POGUISE(pl.LightningModule):
                 f"First stale keys: {preview}"
             )
         return result
+
+    def _register_actor_object_action_buffers(self):
+        num_classes = int(self.hparams.get("num_classes", 0))
+        num_object_classes = int(
+            self.hparams.get("num_object_classes", NUM_OBJECT_CLASSES)
+        )
+        action_object_mask = torch.zeros(
+            num_classes,
+            num_object_classes,
+            dtype=torch.bool,
+        )
+        action_has_object = torch.zeros(num_classes, dtype=torch.bool)
+        if not self.actor_object_pair_action_head_enabled:
+            self.register_buffer(
+                "actor_object_action_mask",
+                action_object_mask,
+                persistent=False,
+            )
+            self.register_buffer(
+                "actor_object_action_has_object",
+                action_has_object,
+                persistent=False,
+            )
+            return
+
+        task_type = self.hparams.get("task_type", "CS")
+        action_taxonomy = self.hparams.get("toyota_action_taxonomy", "toyota_31")
+        action_names = toyota_action_names(task_type, action_taxonomy)
+        if len(action_names) != num_classes:
+            raise ValueError(
+                "actor_object_pair_action_head needs the Toyota action taxonomy "
+                f"to match num_classes. Got {len(action_names)} action names for "
+                f"num_classes={num_classes}."
+            )
+        action_to_index = {name: index for index, name in enumerate(action_names)}
+        action_object_map = toyota_action_object_map(task_type, action_taxonomy)
+        if not action_object_map:
+            raise ValueError(
+                "actor_object_pair_action_head requires a non-empty Toyota "
+                "action-to-object map."
+            )
+
+        missing_objects = []
+        mapped_actions = 0
+        for action_name, object_names in action_object_map.items():
+            action_idx = action_to_index.get(action_name)
+            if action_idx is None:
+                continue
+            for object_name in object_names:
+                object_idx = OBJECT_TO_ID.get(object_name)
+                if object_idx is None or object_idx >= num_object_classes:
+                    missing_objects.append(object_name)
+                    continue
+                action_object_mask[int(action_idx), int(object_idx)] = True
+            if action_object_mask[int(action_idx)].any():
+                action_has_object[int(action_idx)] = True
+                mapped_actions += 1
+        if missing_objects:
+            names = ", ".join(sorted(set(missing_objects)))
+            raise ValueError(
+                "actor_object_pair_action_head found Toyota action-object names "
+                f"missing from object_vocab: {names}"
+            )
+        if mapped_actions == 0:
+            raise ValueError(
+                "actor_object_pair_action_head built zero mapped object actions. "
+                "Check --toyota_action_taxonomy and --num_object_classes."
+            )
+
+        self.register_buffer(
+            "actor_object_action_mask",
+            action_object_mask,
+            persistent=False,
+        )
+        self.register_buffer(
+            "actor_object_action_has_object",
+            action_has_object,
+            persistent=False,
+        )
 
     def _create_network(self):
         n_registers = (
@@ -549,27 +654,32 @@ class POGUISE(pl.LightningModule):
         self.net.head = nn.Identity(self.net.num_features, self.net.num_features)
         self.head = nn.Linear(self.net.num_features, self.hparams.num_classes)
         if self.actor_prompt:
-            self.actor_head = nn.Linear(
-                self.net.num_features,
-                self.hparams.num_classes,
-            )
-            self.actor_relation_action_fusion = None
-            if self.actor_relation_action_fusion_enabled:
-                fusion_dim = self.net.num_features * 3 + 1
-                self.actor_relation_action_fusion = nn.Sequential(
-                    nn.LayerNorm(fusion_dim),
-                    nn.Linear(fusion_dim, self.net.num_features),
-                    nn.GELU(),
-                    nn.Linear(self.net.num_features, self.net.num_features),
+            self.actor_head = None
+            self.actor_object_null_pair_token = None
+            self.actor_object_pair_action_head = None
+            if self.actor_object_pair_action_head_enabled:
+                feature_dim = int(self.net.num_features)
+                pair_dim = feature_dim * 3 + 2
+                hidden_dim = self.actor_object_pair_action_hidden_dim or feature_dim
+                self.actor_object_null_pair_token = nn.Parameter(
+                    torch.zeros(1, 1, 1, feature_dim)
                 )
-                if self.actor_relation_action_fusion_init_scale > 0:
-                    nn.init.trunc_normal_(
-                        self.actor_relation_action_fusion[-1].weight,
-                        std=self.actor_relation_action_fusion_init_scale,
-                    )
-                else:
-                    nn.init.zeros_(self.actor_relation_action_fusion[-1].weight)
-                nn.init.zeros_(self.actor_relation_action_fusion[-1].bias)
+                self.actor_object_pair_action_head = nn.Sequential(
+                    nn.LayerNorm(pair_dim),
+                    nn.Linear(pair_dim, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, self.hparams.num_classes),
+                )
+                nn.init.trunc_normal_(
+                    self.actor_object_pair_action_head[-1].weight,
+                    std=self.actor_object_pair_action_init_scale,
+                )
+                nn.init.zeros_(self.actor_object_pair_action_head[-1].bias)
+            else:
+                self.actor_head = nn.Linear(
+                    self.net.num_features,
+                    self.hparams.num_classes,
+                )
             self.presence_head = (
                 nn.Linear(self.net.num_features, 1)
                 if self.hparams.get("actor_presence_head", 0)
@@ -605,9 +715,11 @@ class POGUISE(pl.LightningModule):
             if self.actor_head is not None:
                 for param in self.actor_head.parameters():
                     param.requires_grad = True
-            if self.actor_relation_action_fusion is not None:
-                for param in self.actor_relation_action_fusion.parameters():
+            if self.actor_object_pair_action_head is not None:
+                for param in self.actor_object_pair_action_head.parameters():
                     param.requires_grad = True
+            if self.actor_object_null_pair_token is not None:
+                self.actor_object_null_pair_token.requires_grad = True
             if hasattr(self.net, "actor_token"):
                 self.net.actor_token.requires_grad = True
             if hasattr(self.net, "actor_slot_embed"):
@@ -650,6 +762,157 @@ class POGUISE(pl.LightningModule):
                 m.eval()
                 for param in m.parameters():
                     param.requires_grad = False
+
+    def _actor_object_pair_allowed_mask(
+        self,
+        object_classes,
+        object_valid,
+        actor_valid,
+        num_actors,
+        num_pairs,
+        num_actions,
+    ):
+        batch_size, num_objects = object_classes.shape
+        device = object_classes.device
+        max_object_class = int(self.actor_object_action_mask.shape[-1]) - 1
+        object_valid = object_valid.to(device=device, dtype=torch.bool)
+        class_in_range = (object_classes >= 0) & (object_classes <= max_object_class)
+        object_valid = object_valid & class_in_range
+        object_classes = object_classes.clamp(0, max_object_class)
+        action_object_mask = self.actor_object_action_mask.to(device=device)
+        action_has_object = self.actor_object_action_has_object.to(device=device)
+        object_compat = action_object_mask.t()[object_classes]
+        object_compat = object_compat & object_valid.unsqueeze(-1)
+        object_compat = object_compat[:, None, :, :].expand(
+            batch_size,
+            num_actors,
+            num_objects,
+            num_actions,
+        )
+        compatible_object_present = object_compat.any(dim=2)
+        null_allowed = (
+            ~action_has_object.view(1, 1, num_actions)
+        ) | ~compatible_object_present
+        allowed = torch.cat([null_allowed.unsqueeze(2), object_compat], dim=2)
+        if allowed.shape[2] != num_pairs:
+            raise RuntimeError(
+                "actor-object pair allowed mask shape mismatch: "
+                f"{allowed.shape[2]} pairs vs expected {num_pairs}"
+            )
+        if actor_valid is not None:
+            actor_valid = actor_valid.to(device=device, dtype=torch.bool)
+            allowed = allowed & actor_valid[:, :, None, None]
+        return allowed
+
+    def _actor_object_pair_action_scores(
+        self,
+        x_actor,
+        relation_logits,
+        object_tokens,
+        object_classes,
+        object_valid,
+        actor_valid,
+    ):
+        if self.actor_object_pair_action_head is None:
+            raise RuntimeError("actor_object_pair_action_head is not initialized")
+        if object_tokens is None or object_classes is None or object_valid is None:
+            raise RuntimeError(
+                "actor_object_pair_action_head requires object prompt tokens, "
+                "object classes, and object_valid."
+            )
+        batch_size, num_actors, feature_dim = x_actor.shape
+        if object_tokens.ndim != 3:
+            raise RuntimeError(
+                "object prompt tokens must have shape [B,O,D], got "
+                f"{tuple(object_tokens.shape)}"
+            )
+        if object_tokens.shape[0] != batch_size or object_tokens.shape[-1] != feature_dim:
+            raise RuntimeError(
+                "object prompt tokens shape does not match actor tokens: "
+                f"{tuple(object_tokens.shape)} vs {tuple(x_actor.shape)}"
+            )
+        num_objects = int(object_tokens.shape[1])
+        num_pairs = num_objects + 1
+        num_actions = int(self.hparams.num_classes)
+        if relation_logits.shape != (batch_size, num_actors, num_pairs):
+            raise RuntimeError(
+                "actor-object relation logits must have shape [B,A,O+1], got "
+                f"{tuple(relation_logits.shape)} for actor/object shapes "
+                f"{tuple(x_actor.shape)}, {tuple(object_tokens.shape)}"
+            )
+        if object_classes.shape != (batch_size, num_objects):
+            raise RuntimeError(
+                "object_classes must have shape [B,O], got "
+                f"{tuple(object_classes.shape)}"
+            )
+        if object_valid.shape != (batch_size, num_objects):
+            raise RuntimeError(
+                "object_valid must have shape [B,O], got "
+                f"{tuple(object_valid.shape)}"
+            )
+
+        object_tokens = object_tokens.to(device=x_actor.device, dtype=x_actor.dtype)
+        null_token = self.actor_object_null_pair_token.to(
+            device=x_actor.device,
+            dtype=x_actor.dtype,
+        ).expand(batch_size, num_actors, 1, feature_dim)
+        object_pair_tokens = object_tokens[:, None, :, :].expand(
+            batch_size,
+            num_actors,
+            num_objects,
+            feature_dim,
+        )
+        pair_tokens = torch.cat([null_token, object_pair_tokens], dim=2)
+        actor_tokens = x_actor[:, :, None, :].expand(
+            batch_size,
+            num_actors,
+            num_pairs,
+            feature_dim,
+        )
+        relation_log_probs = F.log_softmax(relation_logits.float(), dim=-1)
+        valid_pair = torch.cat(
+            [
+                torch.ones(
+                    batch_size,
+                    num_actors,
+                    1,
+                    device=x_actor.device,
+                    dtype=x_actor.dtype,
+                ),
+                object_valid.to(device=x_actor.device, dtype=x_actor.dtype)[
+                    :, None, :
+                ].expand(batch_size, num_actors, num_objects),
+            ],
+            dim=2,
+        )
+        pair_features = torch.cat(
+            [
+                actor_tokens,
+                pair_tokens,
+                actor_tokens * pair_tokens,
+                relation_log_probs.to(dtype=x_actor.dtype).unsqueeze(-1),
+                valid_pair.unsqueeze(-1),
+            ],
+            dim=-1,
+        )
+        pair_logits = self.actor_object_pair_action_head(pair_features).float()
+        pair_scores = pair_logits + relation_log_probs.unsqueeze(-1)
+        allowed = self._actor_object_pair_allowed_mask(
+            object_classes.to(device=x_actor.device, dtype=torch.long),
+            object_valid.to(device=x_actor.device, dtype=torch.bool),
+            actor_valid,
+            num_actors,
+            num_pairs,
+            num_actions,
+        )
+        masked_pair_scores = pair_scores.masked_fill(~allowed, -1.0e4)
+        action_scores = torch.logsumexp(masked_pair_scores, dim=2)
+
+        self.last_actor_object_pair_action_logits = pair_logits
+        self.last_actor_object_pair_action_scores = pair_scores
+        self.last_actor_object_pair_action_allowed = allowed
+        self.last_actor_object_pair_action_log_probs = relation_log_probs
+        return action_scores.to(dtype=x_actor.dtype)
 
     def forward(
         self,
@@ -711,7 +974,10 @@ class POGUISE(pl.LightningModule):
             self.last_actor_object_prompt_valid = None
             self.last_actor_object_relation_context = None
             self.last_actor_object_relation_mass = None
-            self.last_actor_object_fusion_delta = None
+            self.last_actor_object_pair_action_logits = None
+            self.last_actor_object_pair_action_scores = None
+            self.last_actor_object_pair_action_allowed = None
+            self.last_actor_object_pair_action_log_probs = None
             self.last_actor_action_tokens = None
             self.last_actor_object_relation_aux = getattr(
                 self.net,
@@ -750,70 +1016,35 @@ class POGUISE(pl.LightningModule):
                     self.last_actor_object_prompt_classes = prompt_classes
                     self.last_actor_object_prompt_tokens = x_object_prompt
                     self.last_actor_object_prompt_valid = prompt_valid
-            relation_context = None
-            relation_mass = None
-            if self.last_actor_object_relation_aux:
+            x_action = x_actor
+            self.last_actor_action_tokens = x_action
+            if self.actor_object_pair_action_head is not None:
+                if not self.last_actor_object_relation_aux:
+                    raise RuntimeError(
+                        "actor_object_pair_action_head requires relation logits"
+                    )
                 last_block = sorted(
                     self.last_actor_object_relation_aux.keys(),
                     key=lambda value: int(value),
                 )[-1]
                 last_relation_aux = self.last_actor_object_relation_aux[last_block]
-                useful_mass = last_relation_aux.get("useful_mass")
-                if useful_mass is not None:
-                    relation_mass = useful_mass.to(
-                        device=x_actor.device,
-                        dtype=x_actor.dtype,
-                    ).unsqueeze(-1)
-                selected_object_memory = last_relation_aux.get("selected_object_memory")
-                if selected_object_memory is not None:
-                    # Use the selected object memory produced by the final relation
-                    # block itself. This keeps relation CE and action CE tied to the
-                    # same object distribution and the same object representation.
-                    relation_context = selected_object_memory.to(
-                        device=x_actor.device,
-                        dtype=x_actor.dtype,
-                    )
-                    if tuple(relation_context.shape) != tuple(x_actor.shape):
-                        raise RuntimeError(
-                            "selected_object_memory shape "
-                            f"{tuple(relation_context.shape)} does not match actor "
-                            f"tokens {tuple(x_actor.shape)}"
-                        )
-                    if relation_mass is None:
-                        raise RuntimeError(
-                            "useful_mass is required for actor_relation_action_fusion"
-                        )
-                    self.last_actor_object_relation_context = relation_context
-                    self.last_actor_object_relation_mass = relation_mass
-            x_action = x_actor
-            if self.actor_relation_action_fusion is not None:
-                if relation_context is None or relation_mass is None:
+                relation_logits = last_relation_aux.get("logits")
+                if relation_logits is None:
                     raise RuntimeError(
-                        "actor_relation_action_fusion requires final relation "
-                        "selected object memory"
+                        "actor_object_pair_action_head requires final relation logits"
                     )
-                if valid is not None:
-                    valid_mask = valid.to(
-                        device=x_actor.device,
-                        dtype=x_actor.dtype,
-                    ).unsqueeze(-1)
-                    relation_context = relation_context * valid_mask
-                    relation_mass = relation_mass * valid_mask
-                fusion_in = torch.cat(
-                    [
-                        x_actor,
-                        relation_context,
-                        x_actor * relation_context,
-                        relation_mass,
-                    ],
-                    dim=-1,
+                action_scores = self._actor_object_pair_action_scores(
+                    x_actor,
+                    relation_logits.to(device=x_actor.device),
+                    x_object_prompt,
+                    self.last_actor_object_prompt_classes,
+                    prompt_valid,
+                    valid,
                 )
-                fusion_delta = self.actor_relation_action_fusion(fusion_in)
-                fusion_delta = fusion_delta * relation_mass
-                self.last_actor_object_fusion_delta = fusion_delta
-                x_action = x_actor + fusion_delta
-            self.last_actor_action_tokens = x_action
-            action_scores = self.actor_head(x_action)
+            else:
+                if self.actor_head is None:
+                    raise RuntimeError("actor_head is not initialized")
+                action_scores = self.actor_head(x_action)
             self.last_actor_action_logits = action_scores
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
@@ -913,6 +1144,17 @@ class POGUISE(pl.LightningModule):
             "--actor_relation_action_fusion_init_scale",
             type=float,
             default=0.0,
+        )
+        parser.add_argument("--actor_object_pair_action_head", type=int, default=0)
+        parser.add_argument(
+            "--actor_object_pair_action_hidden_dim",
+            type=int,
+            default=0,
+        )
+        parser.add_argument(
+            "--actor_object_pair_action_init_scale",
+            type=float,
+            default=0.01,
         )
         parser.add_argument(
             "--actor_object_relation_null_logit_init",

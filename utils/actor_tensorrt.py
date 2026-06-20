@@ -114,10 +114,10 @@ class TensorRTActorEngine:
                 ),
             )
         )
-        self.actor_relation_action_fusion = bool(
+        self.actor_object_pair_action_head = bool(
             export_hparams.get(
-                "actor_relation_action_fusion",
-                self.metadata.get("actor_relation_action_fusion", False),
+                "actor_object_pair_action_head",
+                self.metadata.get("actor_object_pair_action_head", False),
             )
         )
         if bool(
@@ -163,12 +163,12 @@ class TensorRTActorEngine:
             )
         if self.actor_object_prompt_tokens and (
             not self.actor_object_relation_in_transformer
-            or not self.actor_relation_action_fusion
+            or not self.actor_object_pair_action_head
         ):
             raise RuntimeError(
                 "Object-proposal TensorRT engines must use the single supported "
                 "path: actor_object_relation_in_transformer=1 and "
-                "actor_relation_action_fusion=1."
+                "actor_object_pair_action_head=1."
             )
         if "object_selection" in output_set:
             raise RuntimeError(

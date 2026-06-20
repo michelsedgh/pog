@@ -46,11 +46,12 @@ update_strength  = learned_gate * non_null_mass * actor_valid
 actor_token'     = actor_token + update_strength * update(actor_token, object_context)
 ```
 
-The real action prediction remains:
+The real action prediction is aggregated from pair scores:
 
 ```text
-action_logits = actor_head(actor_token')
-L_action      = CE(action_logits, action_label)
+pair_score[pair, action] = pair_head(actor_token', object_pair, actor_token' * object_pair, relation_log_prob, pair_valid)
+action_logits[action]    = logsumexp(pair_score[allowed_pairs_for_action, action])
+L_action                 = CE(action_logits, action_label)
 ```
 
 The update uses `actor_token`, `object_context`, and their elementwise product,
@@ -59,12 +60,12 @@ generic object vector. Runtime object detections are relation-only memory, not
 ordinary transformer prefix tokens, so object presence cannot bypass relation
 selection through generic self-attention. The same relation module runs inside
 the transformer before pruning stages and once more immediately before
-`actor_head`.
+pair action scoring.
 
 So the causal path is:
 
 ```text
-object-region memory -> relation distribution -> object context -> actor token -> action head
+object-region memory -> relation distribution -> actor-object pair scores -> action logits
 ```
 
 ## Important Weights
@@ -123,27 +124,26 @@ Caps how strongly relation updates can change actor tokens. In the default
 object run the actual strength is learned per relation block from
 `actor_object_relation_layer_scale_init`; `max_scale` is only the upper bound.
 
-`actor_relation_action_fusion`
+`actor_object_pair_action_head`
 
-Enables the final action input fusion:
+Enables the learned pair action scorer:
 
 ```text
-fuse(actor_token, selected_object_context, actor_token * selected_object_context, object_mass)
+score(actor_token, object_pair_token, actor_token * object_pair_token, relation_log_prob, pair_valid)
 ```
 
-This keeps the same action CE target while making the selected object context
-explicitly available to `actor_head`.
-The selected object context is the full selected object identity; the learned
-fusion residual is multiplied by `object_mass`, so `NULL` and detector-missing
-windows preserve the actor-only fallback.
+Final action logits aggregate compatible pair scores with relation log-prob
+gating. This makes action CE push both the action scorer and the relation pointer:
+when Uselaptop needs the laptop pair, relation mass on the wrong object lowers the
+Uselaptop score instead of being hidden behind a separately fused actor token.
+`NULL` is the same scorer's fallback pair for objectless and detector-missing
+windows.
 
-`actor_relation_action_fusion_init_scale`
+`actor_object_pair_action_init_scale`
 
-Initializes the final fusion residual with a small nonzero weight. A fully zero
-final layer can make the action head start actor-only and delay object-action
-gradients into the selected-object path. A small value keeps the pretrained actor
-path dominant while proving, via `val_actor_object_fusion_delta_norm`, that the
-learned object path is active.
+Initializes the final pair-action layer with a small nonzero weight. This keeps
+early training conservative while still letting action CE and pair-margin loss
+move the actor-object scoring path immediately.
 
 `actor_object_present_margin_loss_weight` and
 `actor_object_present_margin`
@@ -199,6 +199,6 @@ val_interaction_heatmap_center_l2
 If relation metrics are good but live action remains wrong after this change, the
 first checks are `val_deploy_object_present_action_margin_gain`,
 `val_deploy_object_present_*_gain`, and
-`val_actor_object_fusion_delta_norm`. Only after those agree with the saved/live
+`val_actor_object_pair_action_margin_win_rate`. Only after those agree with the saved/live
 probe should the next suspect be data/domain coverage or detector/object proposal
 quality.

@@ -11,9 +11,9 @@ For each actor:
 ```text
 actor token + visual relation-only object memory + interaction heatmap features
     -> relation logits over NULL plus object slots
-    -> object context
-    -> updated actor token inside the transformer and before the action head
-    -> actor_head action logits
+    -> updated actor token inside the transformer
+    -> actor-object pair action scores over NULL plus valid object slots
+    -> action logits
 ```
 
 Heatmaps do not directly predict the action. They help localize the interaction
@@ -37,7 +37,7 @@ The launcher uses:
 --actor_object_region_visual_tokens 1
 --actor_object_relation_in_transformer 1
 --actor_object_relation_blocks 2,5,8
---actor_relation_action_fusion 1
+--actor_object_pair_action_head 1
 --actor_object_relation_loss_weight 1.00
 --poguiseplus_interaction_heatmap_weight 3.0
 ```

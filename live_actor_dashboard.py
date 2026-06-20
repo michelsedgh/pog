@@ -65,6 +65,12 @@ def parse_args():
         default="fp32",
         help="PyTorch actor dtype. Ignored when --actor-engine is set.",
     )
+    parser.add_argument(
+        "--actor-device",
+        choices=("cuda", "cpu"),
+        default="cuda",
+        help="PyTorch actor device. Ignored when --actor-engine is set.",
+    )
     parser.add_argument("--camera", type=str, default="0")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=7860)
@@ -834,26 +840,45 @@ def actor_relation_debug_payload(actor, slot, packed_objects, object_inputs):
     if not blocks:
         return None
     payload = {"blocks": blocks}
-    action_context = getattr(model, "last_actor_object_relation_context", None)
+    pair_scores = getattr(model, "last_actor_object_pair_action_scores", None)
+    pair_allowed = getattr(model, "last_actor_object_pair_action_allowed", None)
     if (
-        torch.is_tensor(action_context)
-        and action_context.ndim == 3
-        and slot < action_context.shape[1]
+        torch.is_tensor(pair_scores)
+        and torch.is_tensor(pair_allowed)
+        and pair_scores.ndim == 4
+        and pair_allowed.ndim == 4
+        and slot < pair_scores.shape[1]
     ):
-        payload["action_relation_context_norm"] = float(
-            torch.linalg.vector_norm(
-                action_context[0, slot].detach().float().cpu()
-            ).item()
-        )
-    action_mass = getattr(model, "last_actor_object_relation_mass", None)
-    if (
-        torch.is_tensor(action_mass)
-        and action_mass.ndim == 3
-        and slot < action_mass.shape[1]
-    ):
-        payload["action_relation_mass"] = float(
-            action_mass[0, slot, 0].detach().float().cpu().item()
-        )
+        scores = pair_scores[0, slot].detach().float().cpu()
+        allowed = pair_allowed[0, slot].detach().bool().cpu()
+        masked_scores = scores.masked_fill(~allowed, -1.0e4)
+        flat_scores = masked_scores.reshape(-1)
+        top_count = min(5, int(flat_scores.numel()))
+        top_indices = torch.argsort(flat_scores, descending=True)[:top_count].tolist()
+        top_pair_actions = []
+        num_actions = int(scores.shape[-1])
+        for flat_index in top_indices:
+            score = float(flat_scores[flat_index].item())
+            if score <= -9999.0:
+                continue
+            pair_index = int(flat_index // num_actions)
+            action_index = int(flat_index % num_actions)
+            object_slot = pair_index - 1
+            item = packed_by_slot.get(object_slot, {}) if object_slot >= 0 else {}
+            action_name = (
+                ACTION_CLASSES[action_index]
+                if 0 <= action_index < len(ACTION_CLASSES)
+                else str(action_index)
+            )
+            top_pair_actions.append(
+                {
+                    "pair": "NULL" if pair_index == 0 else object_slot,
+                    "label": None if pair_index == 0 else item.get("label"),
+                    "action": action_name,
+                    "score": score,
+                }
+            )
+        payload["top_pair_actions"] = top_pair_actions
     return payload
 
 
@@ -900,12 +925,14 @@ class ActionTrack:
 
 
 class TorchActorBackend:
-    def __init__(self, checkpoint_path, actor_dtype="fp32"):
+    def __init__(self, checkpoint_path, actor_dtype="fp32", actor_device="cuda"):
         from utils.actor_model import load_actor_model
 
-        if not torch.cuda.is_available():
+        if actor_device == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("Live actor inference requires CUDA.")
-        self.device = torch.device("cuda")
+        if actor_device == "cpu" and actor_dtype != "fp32":
+            raise RuntimeError("CPU PyTorch actor inference only supports --actor-dtype fp32.")
+        self.device = torch.device(actor_device)
         if actor_dtype == "fp32":
             dtype = torch.float32
         elif actor_dtype == "fp16":
@@ -945,8 +972,8 @@ class TorchActorBackend:
         self.actor_object_relation_in_transformer = bool(
             self.hparams.get("actor_object_relation_in_transformer", 0)
         )
-        self.actor_relation_action_fusion = bool(
-            self.hparams.get("actor_relation_action_fusion", 0)
+        self.actor_object_pair_action_head = bool(
+            self.hparams.get("actor_object_pair_action_head", 0)
         )
         self.actor_interaction_heatmaps = bool(
             self.hparams.get("actor_interaction_heatmaps", 0)
@@ -971,12 +998,12 @@ class TorchActorBackend:
             )
         if self.actor_object_prompt_tokens and (
             not self.actor_object_relation_in_transformer
-            or not self.actor_relation_action_fusion
+            or not self.actor_object_pair_action_head
         ):
             raise RuntimeError(
                 "Object-proposal checkpoints must use the single supported live "
                 "path: actor_object_relation_in_transformer=1 and "
-                "actor_relation_action_fusion=1."
+                "actor_object_pair_action_head=1."
             )
         self.uses_object_proposals = self.actor_object_prompt_tokens
         self.num_scene_object_tokens = (
@@ -1096,7 +1123,11 @@ class TensorRTLiveActorBackend:
 def load_actor_backend(args):
     if args.actor_engine:
         return TensorRTLiveActorBackend(args.actor_engine)
-    return TorchActorBackend(args.checkpoint, actor_dtype=args.actor_dtype)
+    return TorchActorBackend(
+        args.checkpoint,
+        actor_dtype=args.actor_dtype,
+        actor_device=args.actor_device,
+    )
 
 
 def run_actor_smoke(args, actor):

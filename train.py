@@ -197,6 +197,19 @@ def _validate_active_actor_action_path(module):
     if not getattr(model, "actor_prompt", False):
         return
     actor_head = getattr(model, "actor_head", None)
+    pair_head = getattr(model, "actor_object_pair_action_head", None)
+    if getattr(model, "actor_object_relation_in_transformer", False):
+        if pair_head is None:
+            raise RuntimeError(
+                "Runtime object training requires actor_object_pair_action_head. "
+                "The removed selected-memory fusion path must not be active."
+            )
+        if actor_head is not None:
+            raise RuntimeError(
+                "Runtime object training must use one action path. actor_head "
+                "should be disabled when actor_object_pair_action_head is active."
+            )
+        return
     if not isinstance(actor_head, torch.nn.Linear):
         raise RuntimeError(
             "Actor action path must be a plain nn.Linear over actor tokens. "
@@ -432,6 +445,16 @@ def build_parser():
         default=0.5,
     )
     parser.add_argument(
+        "--actor_object_pair_action_margin_loss_weight",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--actor_object_pair_action_margin",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
         "--actor_object_detector_dropout_prob",
         type=float,
         default=0.0,
@@ -564,18 +587,23 @@ def main():
                 "actor_object_relation_in_transformer requires "
                 "--actor_interaction_heatmaps 1"
             )
-        if not getattr(hparams, "actor_relation_action_fusion", 0):
+        if getattr(hparams, "actor_relation_action_fusion", 0):
+            raise ValueError(
+                "actor_relation_action_fusion was removed. Use "
+                "--actor_object_pair_action_head 1."
+            )
+        if not getattr(hparams, "actor_object_pair_action_head", 0):
             raise ValueError(
                 "actor_object_relation_in_transformer requires "
-                "--actor_relation_action_fusion 1 so selected object memory reaches "
-                "the final action head"
+                "--actor_object_pair_action_head 1 so action CE trains the same "
+                "actor-object pairs as relation CE"
             )
     elif getattr(hparams, "actor_object_prompt_tokens", 0):
         raise ValueError(
             "actor_object_prompt_tokens now has one supported training path: "
             "--actor_object_relation_in_transformer 1 with "
-            "--actor_relation_action_fusion 1. This prevents passive object "
-            "prompt tokens from being trained without action coupling."
+            "--actor_object_pair_action_head 1. This prevents passive object "
+            "prompt tokens from being trained without pair/action coupling."
         )
     if (
         hparams.actor_object_prompt_tokens

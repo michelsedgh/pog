@@ -263,35 +263,6 @@ if "REPO_DIR" not in globals():
 
 os.chdir(REPO_DIR)
 
-def run_checked(cmd, label=None):
-    print("\n" + "=" * 100, flush=True)
-    if label:
-        print(label, flush=True)
-    print("$ " + " ".join(shlex.quote(str(x)) for x in cmd), flush=True)
-    print("=" * 100, flush=True)
-    subprocess.run(cmd, cwd=REPO_DIR, check=True)
-
-run_checked([
-    sys.executable, "-m", "py_compile",
-    "blocks/poguise.py",
-    "datasets/object_vocab.py",
-    "datasets/toyota_action_taxonomy.py",
-    "datasets/toyotasm.py",
-    "models/poguise.py",
-    "modules/heatmap_module.py",
-    "losses/poguiseplus_losses.py",
-    "train.py",
-    "summarize_interaction_metrics.py",
-    "live_actor_dashboard.py",
-    "object_actor_live/probe_saved_video.py",
-    "object_actor_live/analyze_live_checkpoint_sweep.py",
-    "utils/actor_tensorrt.py",
-    "utils/bisect_actor_tensorrt.py",
-    "utils/check_actor_tensorrt.py",
-    "utils/export_actor_tensorrt.py",
-    "utils/actor_model.py",
-], "Compile check")
-
 def latest_metrics_path(run_dir):
     paths = sorted(Path(run_dir).glob("version_*/metrics.csv"), key=lambda p: p.stat().st_mtime)
     return paths[-1] if paths else None
@@ -419,20 +390,10 @@ def parse_launcher_args(argv):
         raise SystemExit("--epochs must be positive")
     return epochs
 
-def set_cmd_arg(cmd, key, value):
-    value = str(value)
-    if key in cmd:
-        idx = cmd.index(key)
-        if idx + 1 >= len(cmd):
-            raise RuntimeError(f"{key} is missing a value")
-        cmd[idx + 1] = value
-    else:
-        cmd.extend([key, value])
-
 REQUESTED_EPOCHS = parse_launcher_args(sys.argv)
 TS = datetime.now().strftime("%Y%m%d_%H%M%S")
 RUN_EPOCHS = REQUESTED_EPOCHS or 10
-RUN_NAME = f"actor_object_regionroi_learnedhoi_aug_{RUN_EPOCHS}ep_{TS}"
+RUN_NAME = f"actor_object_pairhoi_regionroi_aug_{RUN_EPOCHS}ep_{TS}"
 EPOCH_DIR = str(Path(DATA_DIR) / "checkpoints" / RUN_NAME / "epoch_checkpoints")
 
 cmd = [
@@ -470,10 +431,9 @@ cmd = [
 
     "--actor_interaction_heatmaps", "1",
 
-    # Runtime detections are relation-only object memory. Detector thresholds
-    # decide whether an object exists; object-action coupling is learned through
-    # object-region visual memory selected by relation binding and consumed by
-    # the final actor action head.
+    # Runtime detections are ROI object memory. Detector thresholds decide
+    # whether an object exists; action CE scores actor-object pairs gated by
+    # learned relation pointers instead of using hand-written action priors.
     "--actor_object_prompt_tokens", "1",
     "--actor_object_region_visual_tokens", "1",
     "--actor_object_relation_in_transformer", "1",
@@ -485,8 +445,9 @@ cmd = [
     "--actor_object_relation_max_scale", "1.5",
     "--actor_object_relation_learned_scale", "1",
     "--actor_object_relation_layer_scale_init", "0.25",
-    "--actor_relation_action_fusion", "1",
-    "--actor_relation_action_fusion_init_scale", "0.01",
+    "--actor_object_pair_action_head", "1",
+    "--actor_object_pair_action_hidden_dim", "0",
+    "--actor_object_pair_action_init_scale", "0.01",
     "--token_selection_cls_weight", "0.15",
     "--token_selection_actor_weight", "0.25",
     "--token_selection_heatmap_weight", "0.30",
@@ -524,6 +485,8 @@ cmd = [
 
     "--actor_object_relation_loss_weight", "1.00",
     "--actor_object_relation_null_loss_weight", "0.75",
+    "--actor_object_pair_action_margin_loss_weight", "0.25",
+    "--actor_object_pair_action_margin", "0.50",
     "--actor_object_detector_dropout_prob", "0.45",
     "--actor_object_detector_dropout_action_loss_weight", "0.20",
     "--actor_object_detector_dropout_relation_loss_weight", "0.10",
@@ -580,8 +543,8 @@ print(
     "actor-object relation: one CE over NULL plus detected object slots, "
     "ORViT-style object-region visual memory pooled from proposal boxes, "
     "HOTR-style normalized learned relation pointers, "
-    "learned object-context action fusion, "
-    "moderate detector-miss auxiliary training, relation-only object memory, "
+    "learned actor-object pair action scoring, "
+    "moderate detector-miss auxiliary training, ROI object memory, "
     "and PO-GUISE+ heatmap auxiliary supervision",
     flush=True,
 )
