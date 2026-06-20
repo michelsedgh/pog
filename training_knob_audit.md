@@ -19,7 +19,7 @@ pose/interacted-object heatmaps, and token-selection pressure. The object branch
 adds detected object candidates as relation-only memory, then learns:
 
 ```text
-actor token + visual object-region candidates + heatmap/geometry context
+actor token + visual object-region candidates + PO-GUISE+ video/heatmap context
     -> relation over NULL + object slots
     -> selected object context
     -> learned actor/action fusion
@@ -58,10 +58,6 @@ Relation:
 --actor_object_relation_normalize_pointers 1
 --actor_object_relation_logit_scale_init 6.0
 --actor_object_relation_learned_logit_scale 1
---actor_object_relation_valid_logit_bonus 0.0
---actor_object_relation_learned_valid_bonus 0
---actor_object_relation_geometry_bias_weight 1.0
---actor_object_relation_heatmap_bias_weight 2.0
 --actor_object_relation_max_scale 1.5
 --actor_object_relation_learned_scale 1
 --actor_object_relation_layer_scale_init 0.25
@@ -79,7 +75,6 @@ Object memory and token selection:
 --object_conf_threshold 0.25
 --token_selection_cls_weight 0.15
 --token_selection_actor_weight 0.25
---token_selection_object_weight 0.00
 --token_selection_heatmap_weight 0.30
 --actor_object_prompt_box_prior_weight 0.20
 --actor_object_prompt_box_prior_expand 1.50

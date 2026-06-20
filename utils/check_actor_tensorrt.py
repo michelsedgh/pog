@@ -208,9 +208,6 @@ def main():
     actor_object_relation_normalize_pointers = bool(
         hparams.get("actor_object_relation_normalize_pointers", 0)
     )
-    actor_object_relation_learned_valid_bonus = bool(
-        hparams.get("actor_object_relation_learned_valid_bonus", 0)
-    )
     actor_relation_action_fusion = bool(
         hparams.get("actor_relation_action_fusion", 0)
     )
@@ -274,14 +271,6 @@ def main():
             "Checkpoint/engine relation normalized-pointer mismatch: "
             f"checkpoint={actor_object_relation_normalize_pointers}, "
             f"engine={engine.actor_object_relation_normalize_pointers}"
-        )
-    if actor_object_relation_learned_valid_bonus != bool(
-        getattr(engine, "actor_object_relation_learned_valid_bonus", False)
-    ):
-        raise RuntimeError(
-            "Checkpoint/engine relation learned-valid-bonus mismatch: "
-            f"checkpoint={actor_object_relation_learned_valid_bonus}, "
-            f"engine={engine.actor_object_relation_learned_valid_bonus}"
         )
     if actor_relation_action_fusion != bool(
         getattr(engine, "actor_relation_action_fusion", False)

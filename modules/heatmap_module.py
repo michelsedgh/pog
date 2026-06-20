@@ -431,8 +431,6 @@ class HeatmapModule(pl.LightningModule):
                 "model.net.object_valid_embed",
                 "model.net.actor_object_relation_updates",
                 "model.net.actor_object_final_relation_update",
-                "model.net.relation_heatmap_norm",
-                "model.net.relation_heatmap_proj",
                 "model.actor_head",
                 "model.actor_relation_action_fusion",
                 "model.presence_head",
@@ -499,8 +497,6 @@ class HeatmapModule(pl.LightningModule):
                 "object_valid_embed",
                 "actor_object_relation_updates",
                 "actor_object_final_relation_update",
-                "relation_heatmap_norm",
-                "relation_heatmap_proj",
             )
         )
 
@@ -1645,13 +1641,6 @@ class HeatmapModule(pl.LightningModule):
         if not relation_aux:
             return None
         last_block_name = sorted(relation_aux.keys(), key=lambda value: int(value))[-1]
-        valid_bonus = relation_aux[last_block_name].get("valid_object_logit_bonus")
-        if valid_bonus is not None:
-            self._log_scalar(
-                f"{stage}_relation_valid_object_logit_bonus",
-                valid_bonus.float(),
-                1,
-            )
         relation_logit_scale = relation_aux[last_block_name].get("relation_logit_scale")
         if relation_logit_scale is not None:
             self._log_scalar(

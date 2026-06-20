@@ -106,46 +106,16 @@ raw unnormalized feature magnitudes. The current launcher uses
 the learned relation with a hard prior; `learned_logit_scale=1` lets training
 soften or sharpen it.
 
-`actor_object_relation_valid_logit_bonus`
-
-Initial existence evidence for threshold-passing detector proposals. This is not
-an action rule: it only competes with `NULL` inside the relation distribution.
-The current ROI-object launcher sets this to `0.0` and disables the learned
-valid bonus because object slots now carry true visual region features. Detector
-thresholding still controls `object_valid`; the model learns whether that valid
-visual object is the interacted object through relation CE.
-
-With one valid object and no learned/bias evidence, the initial object mass is
-approximately:
-
-```text
-sigmoid(valid_logit_bonus - null_logit_init)
-```
-
-The current launcher uses `null_logit_init=1.5` and
-`valid_logit_bonus=0.0`, so a lone valid object starts around 0.18 non-NULL
-mass before geometry, heatmap, visual ROI, and learned actor/object
-compatibility terms. That gives the object path gradient early without
-hard-coding that every valid object should beat `NULL`.
-
-If this bonus is intentionally re-enabled for a future experiment,
-`val_relation_valid_object_logit_bonus` reports where training moved it. It
-should not be needed for the current ROI visual object path.
-
 `val_relation_logit_scale` reports where training moved the normalized pointer
 scale. If it collapses, actor/object compatibility is not being used. If it
 explodes while object-present gains stay bad, the selector is becoming
 overconfident without helping action classification.
 
-`actor_object_relation_geometry_bias_weight`
-
-Adds actor/object geometry prior into relation logits. This should help choose
-nearby/intersecting objects without becoming a hard rule.
-
-`actor_object_relation_heatmap_bias_weight`
-
-Adds interaction heatmap evidence into relation logits. This connects PO-GUISE+
-heatmap localization with object slot selection.
+The current ROI-object path deliberately has no valid-object, geometry, or
+heatmap logit bonus inside the relation pointer. Actor/object geometry and
+PO-GUISE+ heatmap evidence still affect the model through video tokens, object
+ROI visual memory, token-selection pressure, and heatmap supervision, but the
+relation distribution itself is a learned normalized pointer plus `NULL`.
 
 `actor_object_relation_max_scale`
 

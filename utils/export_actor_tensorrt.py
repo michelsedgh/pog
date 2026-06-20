@@ -412,9 +412,6 @@ def checkpoint_payload(checkpoint_path, hparam_overrides=None):
         "actor_object_relation_normalize_pointers": int(
             hparams.get("actor_object_relation_normalize_pointers", 0)
         ),
-        "actor_object_relation_learned_valid_bonus": int(
-            hparams.get("actor_object_relation_learned_valid_bonus", 0)
-        ),
         "actor_object_relation_layer_scale_init": float(
             hparams.get("actor_object_relation_layer_scale_init", 0.25)
         ),
@@ -678,9 +675,6 @@ def main():
             ),
             "actor_object_relation_normalize_pointers": int(
                 hparams.get("actor_object_relation_normalize_pointers", 0)
-            ),
-            "actor_object_relation_learned_valid_bonus": int(
-                hparams.get("actor_object_relation_learned_valid_bonus", 0)
             ),
             "actor_object_relation_layer_scale_init": float(
                 hparams.get("actor_object_relation_layer_scale_init", 0.25)

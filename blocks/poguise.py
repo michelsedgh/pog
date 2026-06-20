@@ -909,8 +909,6 @@ class ActorObjectRelationUpdate(nn.Module):
         relation_logit_scale_init=1.0,
         learned_relation_logit_scale=False,
         normalize_relation_pointers=False,
-        valid_object_logit_bonus=0.0,
-        learned_valid_object_logit_bonus=False,
         learned_scale=False,
         layer_scale_init=0.25,
     ):
@@ -943,25 +941,6 @@ class ActorObjectRelationUpdate(nn.Module):
             self.register_buffer(
                 "relation_logit_scale",
                 torch.tensor(relation_logit_scale_init),
-                persistent=False,
-            )
-        valid_object_logit_bonus = float(valid_object_logit_bonus)
-        if valid_object_logit_bonus < 0:
-            raise ValueError("valid_object_logit_bonus must be >= 0")
-        self.learned_valid_object_logit_bonus = bool(learned_valid_object_logit_bonus)
-        if self.learned_valid_object_logit_bonus:
-            raw_init = math.log(math.expm1(max(valid_object_logit_bonus, 1.0e-6)))
-            self.valid_object_logit_bonus_raw = nn.Parameter(torch.tensor(raw_init))
-            self.register_buffer(
-                "valid_object_logit_bonus",
-                torch.empty(0),
-                persistent=False,
-            )
-        else:
-            self.valid_object_logit_bonus_raw = None
-            self.register_buffer(
-                "valid_object_logit_bonus",
-                torch.tensor(valid_object_logit_bonus),
                 persistent=False,
             )
 
@@ -1004,13 +983,6 @@ class ActorObjectRelationUpdate(nn.Module):
         nn.init.zeros_(self.out[-1].weight)
         nn.init.zeros_(self.out[-1].bias)
 
-    def _valid_object_logit_bonus(self, device, dtype):
-        if self.valid_object_logit_bonus_raw is not None:
-            return F.softplus(
-                self.valid_object_logit_bonus_raw.to(device=device, dtype=dtype)
-            )
-        return self.valid_object_logit_bonus.to(device=device, dtype=dtype)
-
     def _relation_logit_scale(self, device, dtype):
         if self.relation_logit_scale_raw is not None:
             return F.softplus(
@@ -1024,7 +996,6 @@ class ActorObjectRelationUpdate(nn.Module):
         object_tokens,
         actor_valid,
         object_valid,
-        relation_bias=None,
     ):
         B, A, _ = actor_tokens.shape
 
@@ -1050,28 +1021,6 @@ class ActorObjectRelationUpdate(nn.Module):
                 f"{tuple(actor_tokens.shape[:2])}, got {tuple(actor_valid.shape)}"
             )
         object_valid = object_valid.to(device=obj_scores.device, dtype=torch.bool)
-        valid_object_logit_bonus = self._valid_object_logit_bonus(
-            obj_scores.device,
-            obj_scores.dtype,
-        )
-        obj_scores = (
-            obj_scores
-            + object_valid[:, None, :].to(dtype=obj_scores.dtype)
-            * valid_object_logit_bonus
-        )
-
-        if relation_bias is not None:
-            relation_bias = relation_bias.to(
-                device=obj_scores.device,
-                dtype=obj_scores.dtype,
-            )
-            if tuple(relation_bias.shape) != tuple(obj_scores.shape):
-                raise ValueError(
-                    "relation_bias must have shape "
-                    f"{tuple(obj_scores.shape)}, got {tuple(relation_bias.shape)}"
-                )
-            obj_scores = obj_scores + relation_bias
-
         obj_scores = obj_scores.masked_fill(~object_valid[:, None, :], -1.0e4)
 
         null_score = self.null_logit.to(
@@ -1139,7 +1088,6 @@ class ActorObjectRelationUpdate(nn.Module):
             "scale": scale.detach(),
             "gate": gate.detach(),
             "update_strength": update_strength.detach(),
-            "valid_object_logit_bonus": valid_object_logit_bonus.detach(),
         }
         return actor_tokens, aux
 
@@ -1256,7 +1204,6 @@ class VisionTransformer(nn.Module):
         token_selection_cls_weight=0.25,
         token_selection_actor_weight=0.25,
         token_selection_register_weight=0.0,
-        token_selection_object_weight=0.0,
         token_selection_heatmap_weight=0.35,
         actor_object_relation_in_transformer=0,
         actor_object_relation_blocks="2,5,8",
@@ -1267,10 +1214,6 @@ class VisionTransformer(nn.Module):
         actor_object_relation_logit_scale_init=1.0,
         actor_object_relation_learned_logit_scale=False,
         actor_object_relation_normalize_pointers=False,
-        actor_object_relation_valid_logit_bonus=0.0,
-        actor_object_relation_learned_valid_bonus=False,
-        actor_object_relation_geometry_bias_weight=0.5,
-        actor_object_relation_heatmap_bias_weight=1.0,
         actor_object_relation_learned_scale=False,
         actor_object_relation_layer_scale_init=0.25,
         return_heatmap_features=False,
@@ -1340,14 +1283,7 @@ class VisionTransformer(nn.Module):
         self.token_selection_cls_weight = float(token_selection_cls_weight)
         self.token_selection_actor_weight = float(token_selection_actor_weight)
         self.token_selection_register_weight = float(token_selection_register_weight)
-        self.token_selection_object_weight = float(token_selection_object_weight)
         self.token_selection_heatmap_weight = float(token_selection_heatmap_weight)
-        if self.actor_object_prompt_tokens and self.token_selection_object_weight != 0:
-            raise ValueError(
-                "token_selection_object_weight is not used with relation-only "
-                "runtime object memory. Set it to 0 and use "
-                "actor_object_prompt_box_prior_weight for object-box pruning guidance."
-            )
         self.actor_object_relation_in_transformer = bool(
             actor_object_relation_in_transformer
         )
@@ -1377,18 +1313,6 @@ class VisionTransformer(nn.Module):
         self.actor_object_relation_normalize_pointers = bool(
             actor_object_relation_normalize_pointers
         )
-        self.actor_object_relation_valid_logit_bonus = float(
-            actor_object_relation_valid_logit_bonus
-        )
-        self.actor_object_relation_learned_valid_bonus = bool(
-            actor_object_relation_learned_valid_bonus
-        )
-        self.actor_object_relation_geometry_bias_weight = float(
-            actor_object_relation_geometry_bias_weight
-        )
-        self.actor_object_relation_heatmap_bias_weight = float(
-            actor_object_relation_heatmap_bias_weight
-        )
         self.actor_object_relation_learned_scale = bool(
             actor_object_relation_learned_scale
         )
@@ -1403,12 +1327,6 @@ class VisionTransformer(nn.Module):
             raise ValueError("actor_object_relation_max_scale must be non-negative")
         if self.actor_object_relation_logit_scale_init <= 0:
             raise ValueError("actor_object_relation_logit_scale_init must be > 0")
-        if self.actor_object_relation_valid_logit_bonus < 0:
-            raise ValueError("actor_object_relation_valid_logit_bonus must be >= 0")
-        if self.actor_object_relation_geometry_bias_weight < 0:
-            raise ValueError("actor_object_relation_geometry_bias_weight must be >= 0")
-        if self.actor_object_relation_heatmap_bias_weight < 0:
-            raise ValueError("actor_object_relation_heatmap_bias_weight must be >= 0")
         if self.actor_object_relation_layer_scale_init <= 0:
             raise ValueError("actor_object_relation_layer_scale_init must be positive")
         if "interaction_object_classes" in kwargs:
@@ -1535,12 +1453,6 @@ class VisionTransformer(nn.Module):
                         normalize_relation_pointers=(
                             self.actor_object_relation_normalize_pointers
                         ),
-                        valid_object_logit_bonus=(
-                            self.actor_object_relation_valid_logit_bonus
-                        ),
-                        learned_valid_object_logit_bonus=(
-                            self.actor_object_relation_learned_valid_bonus
-                        ),
                         learned_scale=self.actor_object_relation_learned_scale,
                         layer_scale_init=self.actor_object_relation_layer_scale_init,
                     )
@@ -1561,10 +1473,6 @@ class VisionTransformer(nn.Module):
                 ),
                 normalize_relation_pointers=(
                     self.actor_object_relation_normalize_pointers
-                ),
-                valid_object_logit_bonus=self.actor_object_relation_valid_logit_bonus,
-                learned_valid_object_logit_bonus=(
-                    self.actor_object_relation_learned_valid_bonus
                 ),
                 learned_scale=self.actor_object_relation_learned_scale,
                 layer_scale_init=self.actor_object_relation_layer_scale_init,
@@ -1625,6 +1533,25 @@ class VisionTransformer(nn.Module):
             self.object_valid_embed = nn.Embedding(2, self.num_features)
             self.object_region_norm = nn.LayerNorm(self.num_features)
             self.object_region_proj = nn.Linear(self.num_features, self.num_features)
+            object_grid_h = self.patch_embed.img_size[0] // self.patch_embed.patch_size[0]
+            object_grid_w = self.patch_embed.img_size[1] // self.patch_embed.patch_size[1]
+            y_centers = (torch.arange(object_grid_h, dtype=torch.float32) + 0.5) / float(
+                object_grid_h
+            )
+            x_centers = (torch.arange(object_grid_w, dtype=torch.float32) + 0.5) / float(
+                object_grid_w
+            )
+            grid_y, grid_x = torch.meshgrid(y_centers, x_centers, indexing="ij")
+            self.register_buffer(
+                "object_region_grid_x",
+                grid_x.reshape(1, 1, -1),
+                persistent=False,
+            )
+            self.register_buffer(
+                "object_region_grid_y",
+                grid_y.reshape(1, 1, -1),
+                persistent=False,
+            )
             trunc_normal_(self.object_class_embed.weight, std=0.02)
             nn.init.zeros_(self.object_slot_embed)
             nn.init.zeros_(self.object_valid_embed.weight)
@@ -1643,18 +1570,6 @@ class VisionTransformer(nn.Module):
                 deconv_out_channels=(224, 224),
                 deconv_kernel_sizes=(4, 4),
             )
-            if (
-                self.actor_object_relation_in_transformer
-                and self.actor_interaction_heatmaps
-                and self.actor_object_relation_heatmap_bias_weight > 0
-            ):
-                self.relation_heatmap_norm = nn.LayerNorm(embed_dim)
-                self.relation_heatmap_proj = nn.Linear(
-                    embed_dim,
-                    self.n_actor_tokens,
-                )
-                nn.init.zeros_(self.relation_heatmap_proj.weight)
-                nn.init.zeros_(self.relation_heatmap_proj.bias)
         if self.n_registers > 0:
             self.register_tokens = nn.Parameter(
                 torch.randn(1, self.n_registers, self.num_features)
@@ -1785,11 +1700,13 @@ class VisionTransformer(nn.Module):
         device = visual_tokens.device
         boxes = object_boxes.to(device=device, dtype=dtype).clamp(0.0, 1.0)
         valid = object_valid.to(device=device, dtype=torch.bool)
-        y_centers = (torch.arange(height, device=device, dtype=dtype) + 0.5) / height
-        x_centers = (torch.arange(width, device=device, dtype=dtype) + 0.5) / width
-        grid_y, grid_x = torch.meshgrid(y_centers, x_centers, indexing="ij")
-        grid_x = grid_x.reshape(1, 1, height * width)
-        grid_y = grid_y.reshape(1, 1, height * width)
+        grid_x = self.object_region_grid_x.to(device=device, dtype=dtype)
+        grid_y = self.object_region_grid_y.to(device=device, dtype=dtype)
+        if int(grid_x.shape[-1]) != height * width:
+            raise ValueError(
+                "object ROI grid does not match patch grid: "
+                f"buffer={grid_x.shape[-1]}, forward={height * width}"
+            )
 
         mins = boxes[..., :2]
         maxs = boxes[..., 2:]
@@ -1843,168 +1760,6 @@ class VisionTransformer(nn.Module):
         if not priors:
             return None
         return torch.stack(priors, dim=0).sum(dim=0).clamp(0.0, 1.0)
-
-    def _relation_heatmap_from_tokens(self, heatmap_tokens, batch_size):
-        if not (
-            hasattr(self, "relation_heatmap_norm")
-            and hasattr(self, "relation_heatmap_proj")
-        ):
-            return None
-        heatmap_tokens = self.relation_heatmap_norm(heatmap_tokens)
-        raw = self.relation_heatmap_proj(heatmap_tokens)
-        raw = raw.transpose(1, 2).reshape(
-            batch_size,
-            self.n_actor_tokens,
-            self.HW_OUT_CONV[0],
-            self.HW_OUT_CONV[1],
-        )
-        return (torch.sigmoid(raw) - 0.5).clamp_min(0.0) * 2.0
-
-    def _actor_object_relation_geometry_bias(
-        self,
-        actor_boxes,
-        object_boxes,
-        actor_valid,
-        object_valid,
-        device,
-        dtype,
-    ):
-        if self.actor_object_relation_geometry_bias_weight <= 0:
-            return None
-        if (
-            actor_boxes is None
-            or object_boxes is None
-            or actor_valid is None
-            or object_valid is None
-        ):
-            return None
-
-        actor_boxes = actor_boxes.to(device=device, dtype=dtype).clamp(0.0, 1.0)
-        object_boxes = object_boxes.to(device=device, dtype=dtype).clamp(0.0, 1.0)
-        actor_valid = actor_valid.to(device=device, dtype=torch.bool)
-        object_valid = object_valid.to(device=device, dtype=torch.bool)
-
-        actor_center = (actor_boxes[..., :2] + actor_boxes[..., 2:]) * 0.5
-        object_center = (object_boxes[..., :2] + object_boxes[..., 2:]) * 0.5
-        actor_size = (actor_boxes[..., 2:] - actor_boxes[..., :2]).clamp_min(1.0e-4)
-
-        delta = object_center[:, None, :, :] - actor_center[:, :, None, :]
-        dx = delta[..., 0].abs() / actor_size[:, :, None, 0]
-        dy = delta[..., 1].abs() / actor_size[:, :, None, 1]
-        dist = torch.sqrt(dx.square() + dy.square()).clamp(0.0, 8.0)
-
-        expanded_actor = self._expand_boxes(actor_boxes, self.actor_bbox_prior_expand)
-        mins = expanded_actor[:, :, None, :2]
-        maxs = expanded_actor[:, :, None, 2:]
-        center = object_center[:, None, :, :]
-        inside = (
-            (center[..., 0] >= mins[..., 0])
-            & (center[..., 0] <= maxs[..., 0])
-            & (center[..., 1] >= mins[..., 1])
-            & (center[..., 1] <= maxs[..., 1])
-        )
-        pair_valid = actor_valid[:, :, None] & object_valid[:, None, :]
-        score = -dist + 0.5 * inside.to(dtype=dtype)
-        score = score.clamp(-4.0, 2.0)
-        score = score * self.actor_object_relation_geometry_bias_weight
-        return score.masked_fill(~pair_valid, 0.0)
-
-    def _actor_object_relation_heatmap_bias(
-        self,
-        relation_heatmap,
-        object_boxes,
-        actor_valid,
-        object_valid,
-        dtype,
-    ):
-        if self.actor_object_relation_heatmap_bias_weight <= 0:
-            return None
-        if (
-            relation_heatmap is None
-            or object_boxes is None
-            or actor_valid is None
-            or object_valid is None
-        ):
-            return None
-
-        relation_heatmap = relation_heatmap.to(dtype=dtype).clamp(0.0, 1.0)
-        object_boxes = object_boxes.to(
-            device=relation_heatmap.device,
-            dtype=dtype,
-        ).clamp(0.0, 1.0)
-        actor_valid = actor_valid.to(device=relation_heatmap.device, dtype=torch.bool)
-        object_valid = object_valid.to(device=relation_heatmap.device, dtype=torch.bool)
-        B, A, H, W = relation_heatmap.shape
-        K = int(object_boxes.shape[1])
-        flat_heatmap = relation_heatmap.reshape(B, A, H * W)
-
-        y_centers = (torch.arange(H, device=relation_heatmap.device, dtype=dtype) + 0.5) / H
-        x_centers = (torch.arange(W, device=relation_heatmap.device, dtype=dtype) + 0.5) / W
-        grid_y, grid_x = torch.meshgrid(y_centers, x_centers, indexing="ij")
-        grid_x = grid_x.reshape(1, 1, H * W)
-        grid_y = grid_y.reshape(1, 1, H * W)
-
-        mins = object_boxes[..., :2]
-        maxs = object_boxes[..., 2:]
-        inside = (
-            (grid_x >= mins[..., 0:1])
-            & (grid_x <= maxs[..., 0:1])
-            & (grid_y >= mins[..., 1:2])
-            & (grid_y <= maxs[..., 1:2])
-            & object_valid[:, :, None]
-        )
-        heat_for_objects = flat_heatmap[:, :, None, :].expand(B, A, K, H * W)
-        masked_heat = heat_for_objects.masked_fill(~inside[:, None, :, :], -1.0)
-        max_score = masked_heat.amax(dim=-1).clamp_min(0.0)
-
-        object_center = (mins + maxs) * 0.5
-        center_x = torch.floor(object_center[..., 0] * W).long().clamp(0, W - 1)
-        center_y = torch.floor(object_center[..., 1] * H).long().clamp(0, H - 1)
-        center_index = center_y * W + center_x
-        center_score = heat_for_objects.gather(
-            dim=-1,
-            index=center_index[:, None, :, None].expand(B, A, K, 1),
-        ).squeeze(-1)
-
-        has_box_pixels = inside.any(dim=-1)[:, None, :]
-        score = torch.where(has_box_pixels, max_score, center_score)
-        pair_valid = actor_valid[:, :, None] & object_valid[:, None, :]
-        score = score * self.actor_object_relation_heatmap_bias_weight
-        return score.masked_fill(~pair_valid, 0.0)
-
-    def _actor_object_relation_bias(
-        self,
-        actor_boxes,
-        object_boxes,
-        actor_valid,
-        object_valid,
-        relation_heatmap,
-        device,
-        dtype,
-    ):
-        biases = []
-        geometry_bias = self._actor_object_relation_geometry_bias(
-            actor_boxes,
-            object_boxes,
-            actor_valid,
-            object_valid,
-            device,
-            dtype,
-        )
-        if geometry_bias is not None:
-            biases.append(geometry_bias)
-        heatmap_bias = self._actor_object_relation_heatmap_bias(
-            relation_heatmap,
-            object_boxes,
-            actor_valid,
-            object_valid,
-            dtype,
-        )
-        if heatmap_bias is not None:
-            biases.append(heatmap_bias)
-        if not biases:
-            return None
-        return torch.stack(biases, dim=0).sum(dim=0).clamp(-8.0, 6.0)
 
     def forward(
         self,
@@ -2185,22 +1940,6 @@ class VisionTransformer(nn.Module):
                 key_padding_mask=token_key_padding_mask,
             )
             if self.actor_object_relation_in_transformer and i in self.actor_object_relation_blocks:
-                relation_heatmap = None
-                if self.n_heatmap_tokens > 0:
-                    heatmap_tokens = x[:, heatmap_start:heatmap_end, :]
-                    relation_heatmap = self._relation_heatmap_from_tokens(
-                        heatmap_tokens,
-                        B,
-                    )
-                relation_bias = self._actor_object_relation_bias(
-                    boxes,
-                    object_boxes,
-                    valid,
-                    object_valid,
-                    relation_heatmap,
-                    x.device,
-                    x.dtype,
-                )
                 actor_tokens = x[:, actor_start:actor_end, :]
                 object_tokens = object_memory_tokens
                 actor_tokens, relation_aux = self.actor_object_relation_updates[str(i)](
@@ -2208,7 +1947,6 @@ class VisionTransformer(nn.Module):
                     object_tokens,
                     valid,
                     object_valid,
-                    relation_bias=relation_bias,
                 )
                 x = torch.cat(
                     [
@@ -2217,9 +1955,6 @@ class VisionTransformer(nn.Module):
                         x[:, actor_end:, :],
                     ],
                     dim=1,
-                )
-                relation_aux["relation_bias"] = (
-                    None if relation_bias is None else relation_bias.detach()
                 )
                 self.last_actor_object_relation_aux[str(i)] = relation_aux
 
@@ -2271,30 +2006,11 @@ class VisionTransformer(nn.Module):
             and self.n_actor_tokens > 0
             and x_object is not None
         ):
-            relation_heatmap = None
-            if self.n_heatmap_tokens > 0:
-                relation_heatmap = self._relation_heatmap_from_tokens(
-                    x_heatmap,
-                    B,
-                )
-            relation_bias = self._actor_object_relation_bias(
-                boxes,
-                object_boxes,
-                valid,
-                object_valid,
-                relation_heatmap,
-                x_actor.device,
-                x_actor.dtype,
-            )
             x_actor, relation_aux = self.actor_object_final_relation_update(
                 x_actor,
                 x_object,
                 valid,
                 object_valid,
-                relation_bias=relation_bias,
-            )
-            relation_aux["relation_bias"] = (
-                None if relation_bias is None else relation_bias.detach()
             )
             self.last_actor_object_relation_aux[str(self.depth)] = relation_aux
         x_class = self.head_dropout(x_class)

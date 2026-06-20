@@ -111,7 +111,6 @@ CORE_COLUMNS = [
     "val_relation_null_prob_missing_objectful",
     "val_relation_useful_mass_missing_objectful",
     "val_relation_logit_scale",
-    "val_relation_valid_object_logit_bonus",
     "val_relation_action_joint_balanced_acc",
     "val_relation_action_joint_acc",
     "val_relation_action_joint_exact_acc",
@@ -386,7 +385,6 @@ def print_compact_epoch_summary(epoch_df):
         "val_relation_null_prob_missing_objectful",
         "val_relation_useful_mass_missing_objectful",
         "val_relation_logit_scale",
-        "val_relation_valid_object_logit_bonus",
         "val_object_region_visual_feature_norm",
         "val_relation_action_joint_balanced_acc",
         "val_relation_action_joint_acc",
@@ -559,7 +557,6 @@ def print_compact_best(epoch_df):
         "val_relation_null_prob_missing_objectful",
         "val_relation_useful_mass_missing_objectful",
         "val_relation_logit_scale",
-        "val_relation_valid_object_logit_bonus",
         "val_object_region_visual_feature_norm",
         "val_relation_action_joint_balanced_acc",
         "val_relation_action_joint_acc",
@@ -659,7 +656,6 @@ def print_decision(epoch_df):
         latest,
         "val_relation_useful_mass_missing_objectful",
     )
-    relation_valid_bonus = metric(latest, "val_relation_valid_object_logit_bonus")
     relation_logit_scale = metric(latest, "val_relation_logit_scale")
     joint_balanced = metric(latest, "val_relation_action_joint_balanced_acc")
     joint_acc = metric(latest, "val_relation_action_joint_acc")
@@ -855,7 +851,6 @@ def print_decision(epoch_df):
             f"null_prob_missing {fmt(relation_null_prob_missing)}, "
             f"useful_missing {fmt(relation_useful_missing)}, "
             f"logit_scale {fmt(relation_logit_scale)}, "
-            f"valid_bonus {fmt(relation_valid_bonus)}, "
             f"tokens {fmt(prompt_tokens, 0)}"
         )
     if pd.notna(joint_acc) or pd.notna(joint_exact):
@@ -1065,8 +1060,6 @@ def print_row(title, row):
         f"{metric(row, 'val_relation_null_rate_missing_objectful'):.4f}, "
         "logit_scale "
         f"{metric(row, 'val_relation_logit_scale'):.4f}, "
-        "valid_bonus "
-        f"{metric(row, 'val_relation_valid_object_logit_bonus'):.4f}, "
         "roi_norm "
         f"{metric(row, 'val_object_region_visual_feature_norm'):.4f}"
     )

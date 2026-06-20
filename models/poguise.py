@@ -180,6 +180,27 @@ class POGUISE(pl.LightningModule):
                 "actor-object relation binding and learned relation-action fusion. "
                 f"Remove stale hparams: {', '.join(stale_action_prior)}"
             )
+        removed_relation_prior_keys = (
+            "actor_object_relation_valid_logit_bonus",
+            "actor_object_relation_learned_valid_bonus",
+            "actor_object_relation_geometry_bias_weight",
+            "actor_object_relation_heatmap_bias_weight",
+            "token_selection_object_weight",
+        )
+        stale_relation_prior = [
+            key
+            for key in removed_relation_prior_keys
+            if key in self.hparams
+            and self.hparams.get(key) not in (None, 0, 0.0, "0", "0.0")
+        ]
+        if stale_relation_prior:
+            raise ValueError(
+                "Manual actor-object relation logit priors were removed. "
+                "The clean ROI-object path uses object-region visual tokens, "
+                "normalized learned relation pointers, relation CE, and learned "
+                "relation-action fusion. Remove stale hparams: "
+                f"{', '.join(stale_relation_prior)}"
+            )
         if bool(self.hparams.get("actor_object_slot_head", 0)):
             raise ValueError(
                 "actor_object_slot_head was replaced by "
@@ -350,10 +371,6 @@ class POGUISE(pl.LightningModule):
                     "token_selection_register_weight",
                     0.0,
                 ),
-                token_selection_object_weight=self.hparams.get(
-                    "token_selection_object_weight",
-                    0.0,
-                ),
                 token_selection_heatmap_weight=self.hparams.get(
                     "token_selection_heatmap_weight",
                     0.35,
@@ -390,22 +407,6 @@ class POGUISE(pl.LightningModule):
                 actor_object_relation_normalize_pointers=self.hparams.get(
                     "actor_object_relation_normalize_pointers",
                     0,
-                ),
-                actor_object_relation_valid_logit_bonus=self.hparams.get(
-                    "actor_object_relation_valid_logit_bonus",
-                    0.0,
-                ),
-                actor_object_relation_learned_valid_bonus=self.hparams.get(
-                    "actor_object_relation_learned_valid_bonus",
-                    0,
-                ),
-                actor_object_relation_geometry_bias_weight=self.hparams.get(
-                    "actor_object_relation_geometry_bias_weight",
-                    0.5,
-                ),
-                actor_object_relation_heatmap_bias_weight=self.hparams.get(
-                    "actor_object_relation_heatmap_bias_weight",
-                    1.0,
                 ),
                 actor_object_relation_learned_scale=self.hparams.get(
                     "actor_object_relation_learned_scale",
@@ -477,10 +478,6 @@ class POGUISE(pl.LightningModule):
                     "token_selection_register_weight",
                     0.0,
                 ),
-                token_selection_object_weight=self.hparams.get(
-                    "token_selection_object_weight",
-                    0.0,
-                ),
                 token_selection_heatmap_weight=self.hparams.get(
                     "token_selection_heatmap_weight",
                     0.35,
@@ -517,22 +514,6 @@ class POGUISE(pl.LightningModule):
                 actor_object_relation_normalize_pointers=self.hparams.get(
                     "actor_object_relation_normalize_pointers",
                     0,
-                ),
-                actor_object_relation_valid_logit_bonus=self.hparams.get(
-                    "actor_object_relation_valid_logit_bonus",
-                    0.0,
-                ),
-                actor_object_relation_learned_valid_bonus=self.hparams.get(
-                    "actor_object_relation_learned_valid_bonus",
-                    0,
-                ),
-                actor_object_relation_geometry_bias_weight=self.hparams.get(
-                    "actor_object_relation_geometry_bias_weight",
-                    0.5,
-                ),
-                actor_object_relation_heatmap_bias_weight=self.hparams.get(
-                    "actor_object_relation_heatmap_bias_weight",
-                    1.0,
                 ),
                 actor_object_relation_learned_scale=self.hparams.get(
                     "actor_object_relation_learned_scale",
@@ -915,7 +896,6 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--token_selection_cls_weight", type=float, default=0.25)
         parser.add_argument("--token_selection_actor_weight", type=float, default=0.25)
         parser.add_argument("--token_selection_register_weight", type=float, default=0.0)
-        parser.add_argument("--token_selection_object_weight", type=float, default=0.0)
         parser.add_argument("--token_selection_heatmap_weight", type=float, default=0.35)
         parser.add_argument("--actor_object_relation_in_transformer", type=int, default=0)
         parser.add_argument("--actor_object_relation_blocks", type=str, default="2,5,8")
@@ -940,11 +920,6 @@ class POGUISE(pl.LightningModule):
             default=4.0,
         )
         parser.add_argument(
-            "--actor_object_relation_valid_logit_bonus",
-            type=float,
-            default=0.0,
-        )
-        parser.add_argument(
             "--actor_object_relation_logit_scale_init",
             type=float,
             default=1.0,
@@ -958,21 +933,6 @@ class POGUISE(pl.LightningModule):
             "--actor_object_relation_normalize_pointers",
             type=int,
             default=0,
-        )
-        parser.add_argument(
-            "--actor_object_relation_learned_valid_bonus",
-            type=int,
-            default=0,
-        )
-        parser.add_argument(
-            "--actor_object_relation_geometry_bias_weight",
-            type=float,
-            default=0.5,
-        )
-        parser.add_argument(
-            "--actor_object_relation_heatmap_bias_weight",
-            type=float,
-            default=1.0,
         )
         parser.add_argument("--trt_safe_attention", type=int, default=0)
         parser.add_argument("--ret_feat", type=int, default=0)

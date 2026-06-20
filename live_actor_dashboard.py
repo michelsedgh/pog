@@ -765,7 +765,6 @@ def actor_relation_debug_payload(actor, slot, packed_objects, object_inputs):
         aux = relation_aux[block_name]
         attention = aux.get("object_attention")
         attention_norm = aux.get("object_attention_norm", attention)
-        relation_bias = aux.get("relation_bias")
         if not torch.is_tensor(attention) or attention.ndim != 3:
             continue
         if slot >= attention.shape[1]:
@@ -793,12 +792,6 @@ def actor_relation_debug_payload(actor, slot, packed_objects, object_inputs):
                     "detector_max_conf": item.get("detector_max_conf"),
                     "attention": float(attn_row[object_slot].item()),
                     "attention_norm": float(norm_row[object_slot].item()),
-                    "relation_bias": _debug_tensor_item(
-                        relation_bias,
-                        0,
-                        slot,
-                        object_slot,
-                    ),
                 }
             )
 

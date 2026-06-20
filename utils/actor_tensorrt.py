@@ -114,15 +114,6 @@ class TensorRTActorEngine:
                 ),
             )
         )
-        self.actor_object_relation_learned_valid_bonus = bool(
-            export_hparams.get(
-                "actor_object_relation_learned_valid_bonus",
-                self.metadata.get(
-                    "actor_object_relation_learned_valid_bonus",
-                    False,
-                ),
-            )
-        )
         self.actor_relation_action_fusion = bool(
             export_hparams.get(
                 "actor_relation_action_fusion",
