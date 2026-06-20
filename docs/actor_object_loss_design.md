@@ -27,6 +27,46 @@ L_relation = CE(relation_logits[B,A,1+K], relation_target[B,A])
 This teaches exactly one thing: for this actor, which object slot, if any, is
 the interacted object.
 
+## Architecture Contract
+
+The clean object design is:
+
+```text
+PO-GUISE+ video/pose/interacted-object heatmap backbone
+        + learned HOI-style actor-object binding
+        + missing-detector robustness training
+```
+
+It is not a manual object-action rule. Runtime detector objects are candidate
+memory. Each candidate contains class/box/valid metadata and a visual descriptor
+pooled from the video patch tokens inside the detector box. The detector
+threshold decides whether a proposal exists; the relation module learns which
+valid proposal, if any, is the interacted object for each actor slot. The action
+head then learns how the selected object-region context, actor
+motion/pose/appearance, and interaction heatmap evidence combine into the final
+action.
+
+The current implementation follows the HOI-query idea in actor-slot form:
+
+- the actor slot is the fixed human query
+- valid detector objects are object candidates
+- each object candidate contains an ORViT-style visual region descriptor pooled
+  from the proposal box
+- normalized actor/object relation projections produce pointer logits
+- relation CE supervises the pointer over `NULL + object slots`
+- the final actor action head consumes a composed interaction representation
+  from actor token, selected object token, actor/object product, and relation
+  mass
+- relation mass gates the object-conditioned residual, so missing/NULL cases
+  fall back to actor-only features
+
+This is why there is no fixed `laptop -> Uselaptop` logit boost. The desired
+behavior is still that a selected laptop strongly supports `Uselaptop`, but that
+support must be learned through the selected object context and action CE. The
+object-present margin loss is the guardrail that prevents a checkpoint from
+looking good on relation metrics while valid object evidence hurts the true
+action margin.
+
 ## Active Training Objectives
 
 The active objectives are:
@@ -35,15 +75,19 @@ The active objectives are:
 - actor presence BCE when actor prompts are enabled
 - side-by-side actor-pair training when `actor_pair_train_weight > 0`
 - relation CE over NULL plus object slots
+- detector-dropout action/relation auxiliary training for object-missing fallback
+- object-present action-margin gain training for exact objectful examples
 - PO-GUISE+ pose and interaction heatmap losses
 
 The final action still comes from one actor action head. Runtime detections are
 encoded as relation-only object memory, not ordinary transformer prefix tokens.
 They modify actor tokens through the actor-object relation update inside the
 transformer and once more immediately before classification. The classifier input
-is then refined by a zero-initialized learned fusion of actor token, selected
+is then refined by a small-initialized learned fusion of actor token, selected
 object context, actor/object product, and object mass. There is no late logit
-residual and no separate object-action classifier.
+residual and no separate object-action classifier. Object proposal checkpoints
+must use this relation-plus-fusion path; passive object prompt tokens without
+action coupling are intentionally rejected.
 
 ## Code Evidence
 
@@ -53,9 +97,10 @@ The active relation path is:
   computes relation logits, object attention, object context, and a gated actor
   token update.
 - `blocks/poguise.py::VisionTransformer.forward`
-  keeps runtime detections as relation-only object memory, applies relation
-  updates at the configured transformer blocks, and applies a final pre-head
-  relation update keyed by the model depth, for example `12` on the base model.
+  pools object-region visual descriptors from the video patch tokens, keeps
+  runtime detections as relation-only object memory, applies relation updates at
+  the configured transformer blocks, and applies a final pre-head relation
+  update keyed by the model depth, for example `12` on the base model.
 - `models/poguise.py::POGUISE.forward`
   builds the final actor action input from actor tokens and the last selected
   relation context, then exposes `last_actor_object_relation_aux` and the final
@@ -77,7 +122,8 @@ old checkpoints containing the removed side-head keys.
 | Pose/interaction heatmap losses | Yes | This is the PO-GUISE/PO-GUISE+ auxiliary task family used for token selection and localization. |
 | Engagement/state CE | No | Its labels were deterministic copies of action labels, not independent annotations. It could be satisfied by a side head while `actor_head` still predicted the wrong action. |
 | Prompt-grounding CE | No | It duplicated relation CE by separately teaching an actor-to-object slot distribution. |
-| Object counterfactual CE/margin | No | Swapping/removing object tokens does not create a ground-truth action label. Training on fake labels risks teaching artifacts instead of the dataset task. |
+| Object counterfactual CE with fake labels | No | Swapping/removing object tokens does not create a new ground-truth action label. Training on fake labels risks teaching artifacts instead of the dataset task. |
+| Object-present margin gain | Yes | It compares the real object-present pass with the compatible-object-hidden pass for the same ground-truth action and requires detected object evidence to improve the correct-vs-hardest-wrong action margin. |
 | Inference logit override | No | It hides model failure and bypasses the actor action path. |
 
 ## Why One Relation Objective
@@ -156,6 +202,25 @@ shape:
   interacting object, and leverages object interaction plus pose for token
   selection. Public reference:
   https://arxiv.org/abs/2407.13750
+- HOI transformer work such as HOTR and QPIC frames the problem as learned
+  human/object/interaction binding with transformer context. HOTR predicts
+  human/object pointers and action from interaction queries; QPIC predicts
+  object class, subject box, object box, and verb logits from the same query
+  representation. These are learned heads, not hand-coded object-to-action
+  rules. Public references:
+  https://github.com/kakaobrain/HOTR and https://arxiv.org/abs/2103.05399
+- Object-aware video transformer work such as ORViT injects detected object
+  region representations into video transformer layers so object evidence can
+  shape action features directly. Our implementation now uses the same essential
+  object-region idea for runtime detector candidates: each relation-bound object
+  memory slot includes a visual descriptor pooled from the proposal box, then
+  actor-object relation binding selects among those visual object memories.
+  Public reference:
+  https://arxiv.org/abs/2110.06915
+- Missing-modality action-recognition work trains the model under absent inputs
+  instead of assuming it will generalize when a modality disappears. That is the
+  reason for detector-dropout auxiliary training. Public reference:
+  https://ojs.aaai.org/index.php/AAAI/article/view/25378
 - The PO-GUISE+ loss section in `po-guise+.md` defines classification CE plus
   heatmap MSE/log-MSE. It does not define an engagement/state classifier or a
   counterfactual object-action loss.

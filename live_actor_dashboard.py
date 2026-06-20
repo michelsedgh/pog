@@ -946,6 +946,15 @@ class TorchActorBackend:
         self.actor_object_prompt_tokens = bool(
             self.hparams.get("actor_object_prompt_tokens", 0)
         )
+        self.actor_object_region_visual_tokens = bool(
+            self.hparams.get("actor_object_region_visual_tokens", 0)
+        )
+        self.actor_object_relation_in_transformer = bool(
+            self.hparams.get("actor_object_relation_in_transformer", 0)
+        )
+        self.actor_relation_action_fusion = bool(
+            self.hparams.get("actor_relation_action_fusion", 0)
+        )
         self.actor_interaction_heatmaps = bool(
             self.hparams.get("actor_interaction_heatmaps", 0)
         )
@@ -953,13 +962,28 @@ class TorchActorBackend:
             raise RuntimeError(
                 "actor_object_residual_head checkpoints use the removed late "
                 "object-action path. Re-export a checkpoint with "
-                "actor_object_prompt_tokens and optional "
+                "actor_object_prompt_tokens and "
                 "actor_object_relation_in_transformer."
             )
         if self.actor_object_prompt_tokens and not self.actor_interaction_heatmaps:
             raise RuntimeError(
                 "actor_object_prompt_tokens checkpoints require "
                 "actor_interaction_heatmaps in the clean PO-GUISE+ object path."
+            )
+        if self.actor_object_prompt_tokens and not self.actor_object_region_visual_tokens:
+            raise RuntimeError(
+                "Object-proposal checkpoints must use "
+                "actor_object_region_visual_tokens=1 so runtime object memory "
+                "contains visual patch features from each object box."
+            )
+        if self.actor_object_prompt_tokens and (
+            not self.actor_object_relation_in_transformer
+            or not self.actor_relation_action_fusion
+        ):
+            raise RuntimeError(
+                "Object-proposal checkpoints must use the single supported live "
+                "path: actor_object_relation_in_transformer=1 and "
+                "actor_relation_action_fusion=1."
             )
         self.uses_object_proposals = self.actor_object_prompt_tokens
         self.num_scene_object_tokens = (
@@ -1047,6 +1071,9 @@ class TensorRTLiveActorBackend:
         self.actor_object_prompt_tokens = bool(
             getattr(self.engine, "actor_object_prompt_tokens", False)
         )
+        self.actor_object_region_visual_tokens = bool(
+            getattr(self.engine, "actor_object_region_visual_tokens", False)
+        )
         self.uses_object_proposals = bool(
             getattr(self.engine, "uses_object_proposals", False)
         )
@@ -1133,6 +1160,9 @@ def run_actor_smoke(args, actor):
             "device": str(actor.device),
             "actor_object_prompt_tokens": bool(
                 getattr(actor, "actor_object_prompt_tokens", False)
+            ),
+            "actor_object_region_visual_tokens": bool(
+                getattr(actor, "actor_object_region_visual_tokens", False)
             ),
             "uses_object_proposals": bool(
                 getattr(actor, "uses_object_proposals", False)
@@ -1342,6 +1372,9 @@ class LiveRunner:
             actor_device=str(self.actor.device),
             actor_object_prompt_tokens=bool(
                 getattr(self.actor, "actor_object_prompt_tokens", False)
+            ),
+            actor_object_region_visual_tokens=bool(
+                getattr(self.actor, "actor_object_region_visual_tokens", False)
             ),
             uses_object_proposals=bool(
                 getattr(self.actor, "uses_object_proposals", False)

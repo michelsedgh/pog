@@ -906,7 +906,11 @@ class ActorObjectRelationUpdate(nn.Module):
         hidden_dim=512,
         max_scale=1.0,
         null_logit_init=None,
+        relation_logit_scale_init=1.0,
+        learned_relation_logit_scale=False,
+        normalize_relation_pointers=False,
         valid_object_logit_bonus=0.0,
+        learned_valid_object_logit_bonus=False,
         learned_scale=False,
         layer_scale_init=0.25,
     ):
@@ -921,9 +925,45 @@ class ActorObjectRelationUpdate(nn.Module):
         self.object_v = nn.Linear(dim, dim, bias=False)
 
         self.null_logit = nn.Parameter(torch.tensor(float(null_logit_init)))
-        self.valid_object_logit_bonus = float(valid_object_logit_bonus)
-        if self.valid_object_logit_bonus < 0:
+        relation_logit_scale_init = float(relation_logit_scale_init)
+        if relation_logit_scale_init <= 0:
+            raise ValueError("relation_logit_scale_init must be > 0")
+        self.normalize_relation_pointers = bool(normalize_relation_pointers)
+        self.learned_relation_logit_scale = bool(learned_relation_logit_scale)
+        if self.learned_relation_logit_scale:
+            raw_init = math.log(math.expm1(max(relation_logit_scale_init, 1.0e-6)))
+            self.relation_logit_scale_raw = nn.Parameter(torch.tensor(raw_init))
+            self.register_buffer(
+                "relation_logit_scale",
+                torch.empty(0),
+                persistent=False,
+            )
+        else:
+            self.relation_logit_scale_raw = None
+            self.register_buffer(
+                "relation_logit_scale",
+                torch.tensor(relation_logit_scale_init),
+                persistent=False,
+            )
+        valid_object_logit_bonus = float(valid_object_logit_bonus)
+        if valid_object_logit_bonus < 0:
             raise ValueError("valid_object_logit_bonus must be >= 0")
+        self.learned_valid_object_logit_bonus = bool(learned_valid_object_logit_bonus)
+        if self.learned_valid_object_logit_bonus:
+            raw_init = math.log(math.expm1(max(valid_object_logit_bonus, 1.0e-6)))
+            self.valid_object_logit_bonus_raw = nn.Parameter(torch.tensor(raw_init))
+            self.register_buffer(
+                "valid_object_logit_bonus",
+                torch.empty(0),
+                persistent=False,
+            )
+        else:
+            self.valid_object_logit_bonus_raw = None
+            self.register_buffer(
+                "valid_object_logit_bonus",
+                torch.tensor(valid_object_logit_bonus),
+                persistent=False,
+            )
 
         fusion_dim = 3 * dim
         self.out = nn.Sequential(
@@ -964,6 +1004,20 @@ class ActorObjectRelationUpdate(nn.Module):
         nn.init.zeros_(self.out[-1].weight)
         nn.init.zeros_(self.out[-1].bias)
 
+    def _valid_object_logit_bonus(self, device, dtype):
+        if self.valid_object_logit_bonus_raw is not None:
+            return F.softplus(
+                self.valid_object_logit_bonus_raw.to(device=device, dtype=dtype)
+            )
+        return self.valid_object_logit_bonus.to(device=device, dtype=dtype)
+
+    def _relation_logit_scale(self, device, dtype):
+        if self.relation_logit_scale_raw is not None:
+            return F.softplus(
+                self.relation_logit_scale_raw.to(device=device, dtype=dtype)
+            )
+        return self.relation_logit_scale.to(device=device, dtype=dtype)
+
     def forward(
         self,
         actor_tokens,
@@ -978,8 +1032,16 @@ class ActorObjectRelationUpdate(nn.Module):
         k = self.object_k(self.object_norm(object_tokens))
         v = self.object_v(object_tokens)
 
-        obj_scores = torch.matmul(q, k.transpose(1, 2))
-        obj_scores = obj_scores / (q.shape[-1] ** 0.5)
+        relation_logit_scale = self._relation_logit_scale(q.device, q.dtype)
+        if self.normalize_relation_pointers:
+            q_scores = F.normalize(q.float(), p=2, dim=-1).to(dtype=q.dtype)
+            k_scores = F.normalize(k.float(), p=2, dim=-1).to(dtype=k.dtype)
+            obj_scores = torch.matmul(q_scores, k_scores.transpose(1, 2))
+            obj_scores = obj_scores * relation_logit_scale
+        else:
+            obj_scores = torch.matmul(q, k.transpose(1, 2))
+            obj_scores = obj_scores / (q.shape[-1] ** 0.5)
+            obj_scores = obj_scores * relation_logit_scale
 
         actor_valid = actor_valid.to(device=obj_scores.device, dtype=torch.bool)
         if tuple(actor_valid.shape) != tuple(actor_tokens.shape[:2]):
@@ -988,10 +1050,15 @@ class ActorObjectRelationUpdate(nn.Module):
                 f"{tuple(actor_tokens.shape[:2])}, got {tuple(actor_valid.shape)}"
             )
         object_valid = object_valid.to(device=obj_scores.device, dtype=torch.bool)
-        if self.valid_object_logit_bonus > 0:
-            obj_scores = obj_scores + object_valid[:, None, :].to(
-                dtype=obj_scores.dtype
-            ) * self.valid_object_logit_bonus
+        valid_object_logit_bonus = self._valid_object_logit_bonus(
+            obj_scores.device,
+            obj_scores.dtype,
+        )
+        obj_scores = (
+            obj_scores
+            + object_valid[:, None, :].to(dtype=obj_scores.dtype)
+            * valid_object_logit_bonus
+        )
 
         if relation_bias is not None:
             relation_bias = relation_bias.to(
@@ -1029,7 +1096,6 @@ class ActorObjectRelationUpdate(nn.Module):
         useful_mass = object_mass.squeeze(-1)
 
         selected_object_memory = torch.matmul(object_attn, object_tokens)
-        selected_object_memory = selected_object_memory * object_mass
         object_context = torch.matmul(object_attn, v)
         object_context = object_context * object_mass
 
@@ -1069,9 +1135,11 @@ class ActorObjectRelationUpdate(nn.Module):
             "useful_mass": useful_mass,
             "object_context": object_context,
             "selected_object_memory": selected_object_memory,
+            "relation_logit_scale": relation_logit_scale.detach(),
             "scale": scale.detach(),
             "gate": gate.detach(),
             "update_strength": update_strength.detach(),
+            "valid_object_logit_bonus": valid_object_logit_bonus.detach(),
         }
         return actor_tokens, aux
 
@@ -1182,6 +1250,7 @@ class VisionTransformer(nn.Module):
         actor_object_prompt_tokens=0,
         num_scene_object_tokens=32,
         num_object_classes=19,
+        actor_object_region_visual_tokens=0,
         actor_object_prompt_box_prior_weight=0.05,
         actor_object_prompt_box_prior_expand=1.25,
         token_selection_cls_weight=0.25,
@@ -1195,7 +1264,11 @@ class VisionTransformer(nn.Module):
         actor_object_relation_hidden_dim=512,
         actor_object_relation_max_scale=1.0,
         actor_object_relation_null_logit_init=4.0,
+        actor_object_relation_logit_scale_init=1.0,
+        actor_object_relation_learned_logit_scale=False,
+        actor_object_relation_normalize_pointers=False,
         actor_object_relation_valid_logit_bonus=0.0,
+        actor_object_relation_learned_valid_bonus=False,
         actor_object_relation_geometry_bias_weight=0.5,
         actor_object_relation_heatmap_bias_weight=1.0,
         actor_object_relation_learned_scale=False,
@@ -1247,6 +1320,13 @@ class VisionTransformer(nn.Module):
         self.num_object_classes = int(num_object_classes)
         if self.num_object_classes <= 0:
             raise ValueError("num_object_classes must be positive")
+        self.actor_object_region_visual_tokens = bool(actor_object_region_visual_tokens)
+        if self.actor_object_prompt_tokens and not self.actor_object_region_visual_tokens:
+            raise ValueError(
+                "actor_object_prompt_tokens requires actor_object_region_visual_tokens. "
+                "Runtime object memory must include visual patch features pooled from "
+                "the object box, not only class/box metadata."
+            )
         self.actor_object_prompt_box_prior_weight = float(
             actor_object_prompt_box_prior_weight
         )
@@ -1288,8 +1368,20 @@ class VisionTransformer(nn.Module):
         self.actor_object_relation_null_logit_init = float(
             actor_object_relation_null_logit_init
         )
+        self.actor_object_relation_logit_scale_init = float(
+            actor_object_relation_logit_scale_init
+        )
+        self.actor_object_relation_learned_logit_scale = bool(
+            actor_object_relation_learned_logit_scale
+        )
+        self.actor_object_relation_normalize_pointers = bool(
+            actor_object_relation_normalize_pointers
+        )
         self.actor_object_relation_valid_logit_bonus = float(
             actor_object_relation_valid_logit_bonus
+        )
+        self.actor_object_relation_learned_valid_bonus = bool(
+            actor_object_relation_learned_valid_bonus
         )
         self.actor_object_relation_geometry_bias_weight = float(
             actor_object_relation_geometry_bias_weight
@@ -1309,6 +1401,8 @@ class VisionTransformer(nn.Module):
             raise ValueError("actor_object_relation_hidden_dim must be positive")
         if self.actor_object_relation_max_scale < 0:
             raise ValueError("actor_object_relation_max_scale must be non-negative")
+        if self.actor_object_relation_logit_scale_init <= 0:
+            raise ValueError("actor_object_relation_logit_scale_init must be > 0")
         if self.actor_object_relation_valid_logit_bonus < 0:
             raise ValueError("actor_object_relation_valid_logit_bonus must be >= 0")
         if self.actor_object_relation_geometry_bias_weight < 0:
@@ -1432,8 +1526,20 @@ class VisionTransformer(nn.Module):
                         hidden_dim=self.actor_object_relation_hidden_dim,
                         max_scale=self.actor_object_relation_max_scale,
                         null_logit_init=self.actor_object_relation_null_logit_init,
+                        relation_logit_scale_init=(
+                            self.actor_object_relation_logit_scale_init
+                        ),
+                        learned_relation_logit_scale=(
+                            self.actor_object_relation_learned_logit_scale
+                        ),
+                        normalize_relation_pointers=(
+                            self.actor_object_relation_normalize_pointers
+                        ),
                         valid_object_logit_bonus=(
                             self.actor_object_relation_valid_logit_bonus
+                        ),
+                        learned_valid_object_logit_bonus=(
+                            self.actor_object_relation_learned_valid_bonus
                         ),
                         learned_scale=self.actor_object_relation_learned_scale,
                         layer_scale_init=self.actor_object_relation_layer_scale_init,
@@ -1447,7 +1553,19 @@ class VisionTransformer(nn.Module):
                 hidden_dim=self.actor_object_relation_hidden_dim,
                 max_scale=self.actor_object_relation_max_scale,
                 null_logit_init=self.actor_object_relation_null_logit_init,
+                relation_logit_scale_init=(
+                    self.actor_object_relation_logit_scale_init
+                ),
+                learned_relation_logit_scale=(
+                    self.actor_object_relation_learned_logit_scale
+                ),
+                normalize_relation_pointers=(
+                    self.actor_object_relation_normalize_pointers
+                ),
                 valid_object_logit_bonus=self.actor_object_relation_valid_logit_bonus,
+                learned_valid_object_logit_bonus=(
+                    self.actor_object_relation_learned_valid_bonus
+                ),
                 learned_scale=self.actor_object_relation_learned_scale,
                 layer_scale_init=self.actor_object_relation_layer_scale_init,
             )
@@ -1505,11 +1623,15 @@ class VisionTransformer(nn.Module):
                 nn.Linear(self.num_features, self.num_features),
             )
             self.object_valid_embed = nn.Embedding(2, self.num_features)
+            self.object_region_norm = nn.LayerNorm(self.num_features)
+            self.object_region_proj = nn.Linear(self.num_features, self.num_features)
             trunc_normal_(self.object_class_embed.weight, std=0.02)
             nn.init.zeros_(self.object_slot_embed)
             nn.init.zeros_(self.object_valid_embed.weight)
             trunc_normal_(self.object_box_mlp[-1].weight, std=0.01)
             nn.init.zeros_(self.object_box_mlp[-1].bias)
+            trunc_normal_(self.object_region_proj.weight, std=0.01)
+            nn.init.zeros_(self.object_region_proj.bias)
         if self.n_heatmap_out_channels > 0:
             self.heatmap_tokens = nn.Parameter(
                 torch.randn(1, self.HW_OUT_CONV[0] * self.HW_OUT_CONV[1], embed_dim)
@@ -1636,6 +1758,60 @@ class VisionTransformer(nn.Module):
         return spatial_prior.unsqueeze(1).expand(-1, frames, -1).reshape(
             boxes.shape[0], frames * height * width
         )
+
+    def _object_region_visual_features(
+        self,
+        visual_tokens,
+        object_boxes,
+        object_valid,
+        window_size,
+    ):
+        frames, height, width = [int(v) for v in window_size]
+        if height <= 0 or width <= 0:
+            raise ValueError(f"Invalid patch grid for object ROI pooling: {window_size}")
+        if visual_tokens.ndim != 3:
+            raise ValueError(
+                "visual_tokens must have shape [B,N,C], got "
+                f"{tuple(visual_tokens.shape)}"
+            )
+        expected_tokens = frames * height * width
+        if int(visual_tokens.shape[1]) != expected_tokens:
+            raise ValueError(
+                "visual token count does not match patch grid: "
+                f"N={visual_tokens.shape[1]}, grid={window_size}"
+            )
+
+        dtype = visual_tokens.dtype
+        device = visual_tokens.device
+        boxes = object_boxes.to(device=device, dtype=dtype).clamp(0.0, 1.0)
+        valid = object_valid.to(device=device, dtype=torch.bool)
+        y_centers = (torch.arange(height, device=device, dtype=dtype) + 0.5) / height
+        x_centers = (torch.arange(width, device=device, dtype=dtype) + 0.5) / width
+        grid_y, grid_x = torch.meshgrid(y_centers, x_centers, indexing="ij")
+        grid_x = grid_x.reshape(1, 1, height * width)
+        grid_y = grid_y.reshape(1, 1, height * width)
+
+        mins = boxes[..., :2]
+        maxs = boxes[..., 2:]
+        sharpness = visual_tokens.new_tensor(40.0)
+        left = torch.sigmoid((grid_x - mins[..., 0:1]) * sharpness)
+        right = torch.sigmoid((maxs[..., 0:1] - grid_x) * sharpness)
+        top = torch.sigmoid((grid_y - mins[..., 1:2]) * sharpness)
+        bottom = torch.sigmoid((maxs[..., 1:2] - grid_y) * sharpness)
+        spatial_weights = left * right * top * bottom
+        weights = spatial_weights.unsqueeze(2).expand(
+            -1,
+            -1,
+            frames,
+            -1,
+        )
+        weights = weights.reshape(boxes.shape[0], boxes.shape[1], expected_tokens)
+        weights = weights * valid.unsqueeze(-1).to(dtype=dtype)
+        denom = weights.sum(dim=-1, keepdim=True).clamp_min(1.0e-6)
+        pooled = torch.matmul(weights, visual_tokens) / denom
+        pooled = pooled * valid.unsqueeze(-1).to(dtype=dtype)
+        pooled = self.object_region_proj(self.object_region_norm(pooled))
+        return pooled
 
     def _bbox_token_prior(
         self,
@@ -1865,6 +2041,7 @@ class VisionTransformer(nn.Module):
         bbox_token_prior = None
         token_key_padding_mask = None
         object_memory_tokens = None
+        self.last_object_region_visual_norm = None
 
         prefix_tokens = []
         prefix_key_masks = []
@@ -1952,6 +2129,16 @@ class VisionTransformer(nn.Module):
                 + self.object_box_mlp(object_boxes)
                 + self.object_valid_embed(object_valid.long()).to(dtype=x.dtype)
             )
+            object_region_tokens = self._object_region_visual_features(
+                x,
+                object_boxes,
+                object_valid,
+                ws,
+            )
+            self.last_object_region_visual_norm = (
+                object_region_tokens.detach().float().norm(dim=-1)
+            )
+            object_tokens = object_tokens + object_region_tokens
             object_memory_tokens = object_tokens
         if self.n_heatmap_out_channels > 0:
             prefix_tokens.append(self.heatmap_tokens.expand(B, -1, -1))

@@ -83,6 +83,9 @@ class HeatmapModule(pl.LightningModule):
         self.actor_object_prompt_tokens = bool(
             hparams.get("actor_object_prompt_tokens", 0)
         )
+        self.actor_object_region_visual_tokens = bool(
+            hparams.get("actor_object_region_visual_tokens", 0)
+        )
         self.actor_object_relation_in_transformer = bool(
             hparams.get("actor_object_relation_in_transformer", 0)
         )
@@ -101,9 +104,24 @@ class HeatmapModule(pl.LightningModule):
         self.uses_object_proposals = self.actor_object_prompt_tokens
         if self.actor_object_prompt_tokens and not self.actor_prompt:
             raise ValueError("actor_object_prompt_tokens requires actor_prompt")
+        if self.actor_object_prompt_tokens and not self.actor_object_region_visual_tokens:
+            raise ValueError(
+                "actor_object_prompt_tokens requires "
+                "actor_object_region_visual_tokens=1. Runtime object memory must "
+                "include visual patch features pooled from object boxes."
+            )
         if self.actor_object_prompt_tokens and not self.actor_interaction_heatmaps:
             raise ValueError(
                 "actor_object_prompt_tokens requires actor_interaction_heatmaps"
+            )
+        if (
+            self.actor_object_prompt_tokens
+            and not self.actor_object_relation_in_transformer
+        ):
+            raise ValueError(
+                "actor_object_prompt_tokens now has one supported training path: "
+                "actor_object_relation_in_transformer=1 with learned "
+                "relation-action fusion."
             )
         if self.actor_object_relation_in_transformer and not self.actor_object_prompt_tokens:
             raise ValueError(
@@ -188,6 +206,25 @@ class HeatmapModule(pl.LightningModule):
         if self.actor_object_detector_dropout_relation_loss_weight < 0:
             raise ValueError(
                 "actor_object_detector_dropout_relation_loss_weight must be >= 0"
+            )
+        self.actor_object_present_margin_loss_weight = float(
+            hparams.get("actor_object_present_margin_loss_weight", 0.0)
+        )
+        if self.actor_object_present_margin_loss_weight < 0:
+            raise ValueError("actor_object_present_margin_loss_weight must be >= 0")
+        self.actor_object_present_margin = float(
+            hparams.get("actor_object_present_margin", 0.0)
+        )
+        if self.actor_object_present_margin < 0:
+            raise ValueError("actor_object_present_margin must be >= 0")
+        if (
+            float(hparams.get("actor_object_present_gain_loss_weight", 0.0)) != 0.0
+            or float(hparams.get("actor_object_present_gain_margin", 0.0)) != 0.0
+        ):
+            raise ValueError(
+                "actor_object_present_gain_* was replaced by "
+                "actor_object_present_margin_* so object-present training improves "
+                "the correct-vs-hardest-wrong action margin, not only the true logit."
             )
         self.actor_object_detector_dropout_eval = bool(
             hparams.get("actor_object_detector_dropout_eval", 0)
@@ -360,6 +397,8 @@ class HeatmapModule(pl.LightningModule):
             "object_dropout_relation_action_joint_missing_objectful": [],
             "object_dropout_relation_action_joint_missing_Uselaptop": [],
             "object_present_true_prob_gain": [],
+            "object_present_true_logit_gain": [],
+            "object_present_action_margin_gain": [],
             "object_present_Uselaptop_prob_gain": [],
             "object_present_Uselaptop_confuser_margin_gain": [],
         }
@@ -434,7 +473,6 @@ class HeatmapModule(pl.LightningModule):
         action_labels=None,
         object_boxes=None,
         object_classes=None,
-        object_confs=None,
         object_valid=None,
     ):
         # Forward function that is run when visualizing the graph
@@ -1606,6 +1644,39 @@ class HeatmapModule(pl.LightningModule):
         relation_aux = getattr(self.model, "last_actor_object_relation_aux", None)
         if not relation_aux:
             return None
+        last_block_name = sorted(relation_aux.keys(), key=lambda value: int(value))[-1]
+        valid_bonus = relation_aux[last_block_name].get("valid_object_logit_bonus")
+        if valid_bonus is not None:
+            self._log_scalar(
+                f"{stage}_relation_valid_object_logit_bonus",
+                valid_bonus.float(),
+                1,
+            )
+        relation_logit_scale = relation_aux[last_block_name].get("relation_logit_scale")
+        if relation_logit_scale is not None:
+            self._log_scalar(
+                f"{stage}_relation_logit_scale",
+                relation_logit_scale.float(),
+                1,
+            )
+        object_region_norm = getattr(
+            self.model,
+            "last_actor_object_region_visual_norm",
+            None,
+        )
+        if object_region_norm is not None:
+            target_valid = target.get("object_valid")
+            if target_valid is not None:
+                valid_object_norm = object_region_norm.to(
+                    device=target_valid.device,
+                    dtype=torch.float32,
+                )[target_valid.bool()]
+                if valid_object_norm.numel() > 0:
+                    self._log_scalar(
+                        f"{stage}_object_region_visual_feature_norm",
+                        valid_object_norm.mean(),
+                        int(valid_object_norm.numel()),
+                    )
 
         first_aux = next(iter(relation_aux.values()))
         logits0 = first_aux.get("logits")
@@ -2130,6 +2201,7 @@ class HeatmapModule(pl.LightningModule):
             dropped_object_mask.float().sum(),
         )
         aux_outputs = {}
+        present_margin_loss = None
         if selected_count > 0:
             dropout_labels = actions.to(device=dropout_preds.device, dtype=torch.long)
             dropout_valid = selected_actor_mask.to(
@@ -2163,9 +2235,69 @@ class HeatmapModule(pl.LightningModule):
                 true_prob_gain[dropout_valid].mean(),
                 selected_count,
             )
+            present_logits = present_preds.to(device=dropout_preds.device).float()
+            dropout_logits = dropout_preds.detach().float()
+            true_logit_gain = (
+                present_logits.gather(-1, label_idx).squeeze(-1)
+                - dropout_logits.gather(-1, label_idx).squeeze(-1)
+            )
+            self._log_scalar(
+                f"{aux_stage}_object_present_true_logit_gain",
+                true_logit_gain[dropout_valid].mean(),
+                selected_count,
+            )
+            class_indices = torch.arange(
+                present_logits.shape[-1],
+                device=present_logits.device,
+            )
+            other_class_mask = class_indices.view(1, 1, -1) != label_idx
+            floor = torch.finfo(present_logits.dtype).min
+            present_wrong_logit = present_logits.masked_fill(
+                ~other_class_mask,
+                floor,
+            ).amax(dim=-1)
+            dropout_wrong_logit = dropout_logits.masked_fill(
+                ~other_class_mask,
+                floor,
+            ).amax(dim=-1)
+            present_action_margin = (
+                present_logits.gather(-1, label_idx).squeeze(-1) - present_wrong_logit
+            )
+            dropout_action_margin = (
+                dropout_logits.gather(-1, label_idx).squeeze(-1) - dropout_wrong_logit
+            )
+            action_margin_gain = present_action_margin - dropout_action_margin
+            self._log_scalar(
+                f"{aux_stage}_object_present_action_margin_gain",
+                action_margin_gain[dropout_valid].mean(),
+                selected_count,
+            )
+            if (
+                stage.startswith("train")
+                and self.actor_object_present_margin_loss_weight > 0.0
+            ):
+                margin = float(self.actor_object_present_margin)
+                present_margin_loss = F.relu(
+                    action_margin_gain.new_tensor(margin) - action_margin_gain
+                )[dropout_valid].mean()
+                self.log(
+                    f"{aux_stage}_loss_object_present_margin",
+                    present_margin_loss,
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                    sync_dist=True,
+                )
             if stage == "val":
                 aux_outputs["object_present_true_prob_gain"] = (
                     true_prob_gain[dropout_valid].detach()
+                )
+                aux_outputs["object_present_true_logit_gain"] = (
+                    true_logit_gain[dropout_valid].detach()
+                )
+                aux_outputs["object_present_action_margin_gain"] = (
+                    action_margin_gain[dropout_valid].detach()
                 )
 
             uselaptop_idx = self._action_index("Uselaptop")
@@ -2303,6 +2435,13 @@ class HeatmapModule(pl.LightningModule):
             aux_losses.append(
                 aux_relation_loss
                 * self.actor_object_detector_dropout_relation_loss_weight
+            )
+        if (
+            present_margin_loss is not None
+            and self.actor_object_present_margin_loss_weight > 0.0
+        ):
+            aux_losses.append(
+                present_margin_loss * self.actor_object_present_margin_loss_weight
             )
         if not aux_losses:
             return None, aux_outputs
@@ -2521,6 +2660,14 @@ class HeatmapModule(pl.LightningModule):
             **self._actor_model_object_inputs(object_inputs),
         )
         preds, hm_preds, presence_logits = self._unpack_model_data(data)
+        fusion_delta = getattr(self.model, "last_actor_object_fusion_delta", None)
+        if fusion_delta is not None:
+            fusion_delta = fusion_delta.detach().float()
+            self._log_scalar(
+                f"{stage}_actor_object_fusion_delta_norm",
+                fusion_delta.norm(dim=-1)[valid.to(device=fusion_delta.device)].mean(),
+                int(valid.sum().item()),
+            )
 
         loss_action = self._action_loss(preds, actions, loss_fn, valid)
         valid_preds = preds[valid]
@@ -3998,6 +4145,12 @@ class HeatmapModule(pl.LightningModule):
             "object_dropout_relation_action_joint_missing_Uselaptop"
         )
         object_present_true_gain = mean_gathered("object_present_true_prob_gain")
+        object_present_true_logit_gain = mean_gathered(
+            "object_present_true_logit_gain"
+        )
+        object_present_action_margin_gain = mean_gathered(
+            "object_present_action_margin_gain"
+        )
         object_present_uselaptop_gain = mean_gathered(
             "object_present_Uselaptop_prob_gain"
         )
@@ -4012,6 +4165,11 @@ class HeatmapModule(pl.LightningModule):
         object_present_uselaptop_hurt = (
             (-object_present_uselaptop_gain).clamp_min(0.0)
             if object_present_uselaptop_gain is not None
+            else None
+        )
+        object_present_margin_hurt = (
+            (-object_present_action_margin_gain).clamp_min(0.0)
+            if object_present_action_margin_gain is not None
             else None
         )
 
@@ -4049,8 +4207,9 @@ class HeatmapModule(pl.LightningModule):
             penalties=[
                 (hard_object_action_rate, 0.20),
                 (key_action_floor_deficit, 0.15),
-                (object_present_true_hurt, 0.10),
-                (object_present_uselaptop_hurt, 0.20),
+                (object_present_true_hurt, 0.50),
+                (object_present_margin_hurt, 0.75),
+                (object_present_uselaptop_hurt, 1.00),
             ],
         )
         if deploy_score is None:
@@ -4091,6 +4250,14 @@ class HeatmapModule(pl.LightningModule):
             (
                 "val_deploy_object_present_true_prob_gain",
                 object_present_true_gain,
+            ),
+            (
+                "val_deploy_object_present_true_logit_gain",
+                object_present_true_logit_gain,
+            ),
+            (
+                "val_deploy_object_present_action_margin_gain",
+                object_present_action_margin_gain,
             ),
             (
                 "val_deploy_object_present_Uselaptop_prob_gain",

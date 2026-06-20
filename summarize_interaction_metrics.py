@@ -87,8 +87,11 @@ CORE_COLUMNS = [
     "val_deploy_object_dropout_joint_missing_acc",
     "val_deploy_object_dropout_joint_Uselaptop_acc",
     "val_deploy_object_present_true_prob_gain",
+    "val_deploy_object_present_true_logit_gain",
+    "val_deploy_object_present_action_margin_gain",
     "val_deploy_object_present_Uselaptop_prob_gain",
     "val_deploy_object_present_Uselaptop_confuser_margin_gain",
+    "val_actor_object_fusion_delta_norm",
     "val_actor_all_slot_acc",
     "val_actor_pair_acc",
     "val_actor_pair_swap_acc",
@@ -107,6 +110,8 @@ CORE_COLUMNS = [
     "val_relation_null_rate_missing_objectful",
     "val_relation_null_prob_missing_objectful",
     "val_relation_useful_mass_missing_objectful",
+    "val_relation_logit_scale",
+    "val_relation_valid_object_logit_bonus",
     "val_relation_action_joint_balanced_acc",
     "val_relation_action_joint_acc",
     "val_relation_action_joint_exact_acc",
@@ -135,6 +140,7 @@ CORE_COLUMNS = [
     "val_object_dropout_action_Uselaptop_missing_object_confuser_margin",
     "val_object_dropout_action_Uselaptop_missing_object_confuser_win_rate",
     "val_object_dropout_object_present_true_prob_gain",
+    "val_object_dropout_object_present_action_margin_gain",
     "val_object_dropout_object_present_Uselaptop_prob_gain",
     "val_object_dropout_object_present_Uselaptop_confuser_margin_gain",
     "val_actor_object_prompt_token_count",
@@ -379,6 +385,9 @@ def print_compact_epoch_summary(epoch_df):
         "val_relation_null_rate_missing_objectful",
         "val_relation_null_prob_missing_objectful",
         "val_relation_useful_mass_missing_objectful",
+        "val_relation_logit_scale",
+        "val_relation_valid_object_logit_bonus",
+        "val_object_region_visual_feature_norm",
         "val_relation_action_joint_balanced_acc",
         "val_relation_action_joint_acc",
         "val_relation_action_joint_exact_acc",
@@ -393,6 +402,9 @@ def print_compact_epoch_summary(epoch_df):
         "val_object_dropout_action_Uselaptop_missing_object_confuser_margin",
         "val_deploy_object_present_Uselaptop_prob_gain",
         "val_deploy_object_present_Uselaptop_confuser_margin_gain",
+        "val_deploy_object_present_true_logit_gain",
+        "val_deploy_object_present_action_margin_gain",
+        "val_actor_object_fusion_delta_norm",
         "val_actor_object_prompt_token_count",
         "val_token_selection_visual_keep_rate",
         "val_token_selection_actor_box_keep_rate",
@@ -546,6 +558,9 @@ def print_compact_best(epoch_df):
         "val_relation_null_rate_missing_objectful",
         "val_relation_null_prob_missing_objectful",
         "val_relation_useful_mass_missing_objectful",
+        "val_relation_logit_scale",
+        "val_relation_valid_object_logit_bonus",
+        "val_object_region_visual_feature_norm",
         "val_relation_action_joint_balanced_acc",
         "val_relation_action_joint_acc",
         "val_relation_action_joint_exact_acc",
@@ -573,6 +588,12 @@ def print_compact_best(epoch_df):
         "val_object_dropout_relation_correct_action_wrong_missing_Uselaptop_rate",
         "val_object_dropout_action_Uselaptop_missing_object_confuser_margin",
         "val_object_dropout_action_Uselaptop_missing_object_confuser_win_rate",
+        "val_deploy_object_present_true_prob_gain",
+        "val_deploy_object_present_true_logit_gain",
+        "val_deploy_object_present_action_margin_gain",
+        "val_deploy_object_present_Uselaptop_prob_gain",
+        "val_deploy_object_present_Uselaptop_confuser_margin_gain",
+        "val_actor_object_fusion_delta_norm",
         "val_token_selection_actor_box_keep_rate",
         "val_token_selection_visible_object_box_keep_rate",
         "val_token_selection_exact_teacher_object_keep_rate",
@@ -638,6 +659,8 @@ def print_decision(epoch_df):
         latest,
         "val_relation_useful_mass_missing_objectful",
     )
+    relation_valid_bonus = metric(latest, "val_relation_valid_object_logit_bonus")
+    relation_logit_scale = metric(latest, "val_relation_logit_scale")
     joint_balanced = metric(latest, "val_relation_action_joint_balanced_acc")
     joint_acc = metric(latest, "val_relation_action_joint_acc")
     joint_exact = metric(latest, "val_relation_action_joint_exact_acc")
@@ -718,6 +741,14 @@ def print_decision(epoch_df):
         latest,
         "val_deploy_object_present_true_prob_gain",
     )
+    object_present_true_logit_gain = metric(
+        latest,
+        "val_deploy_object_present_true_logit_gain",
+    )
+    object_present_action_margin_gain = metric(
+        latest,
+        "val_deploy_object_present_action_margin_gain",
+    )
     object_present_uselaptop_gain = metric(
         latest,
         "val_deploy_object_present_Uselaptop_prob_gain",
@@ -726,6 +757,7 @@ def print_decision(epoch_df):
         latest,
         "val_deploy_object_present_Uselaptop_confuser_margin_gain",
     )
+    fusion_delta_norm = metric(latest, "val_actor_object_fusion_delta_norm")
 
     pos = metric(latest, "val_interaction_heatmap_positive_mean")
     pred_max = metric(latest, "val_interaction_heatmap_pred_max")
@@ -822,6 +854,8 @@ def print_decision(epoch_df):
             f"null_missing {fmt(relation_null_missing)}, "
             f"null_prob_missing {fmt(relation_null_prob_missing)}, "
             f"useful_missing {fmt(relation_useful_missing)}, "
+            f"logit_scale {fmt(relation_logit_scale)}, "
+            f"valid_bonus {fmt(relation_valid_bonus)}, "
             f"tokens {fmt(prompt_tokens, 0)}"
         )
     if pd.notna(joint_acc) or pd.notna(joint_exact):
@@ -865,9 +899,13 @@ def print_decision(epoch_df):
         print(
             "object-present gain: "
             f"true_prob {fmt(object_present_true_gain)}, "
+            f"true_logit {fmt(object_present_true_logit_gain)}, "
+            f"action_margin {fmt(object_present_action_margin_gain)}, "
             f"uselaptop_prob {fmt(object_present_uselaptop_gain)}, "
             f"uselaptop_margin {fmt(object_present_uselaptop_margin_gain)}"
         )
+    if pd.notna(fusion_delta_norm):
+        print(f"learned object fusion: delta_norm {fmt(fusion_delta_norm)}")
     if pd.notna(token_keep_visual):
         print(
             "token-selection retention: "
@@ -935,6 +973,20 @@ def print_decision(epoch_df):
         print(
             "OBJECT PATH FAIL: detected object evidence is hurting Uselaptop "
             "relative to the object-hidden pass."
+        )
+        return
+    if (
+        pd.notna(object_present_action_margin_gain)
+        and object_present_action_margin_gain < -0.02
+    ):
+        print(
+            "OBJECT PATH FAIL: detected object evidence is hurting the correct "
+            "action margin relative to the object-hidden pass."
+        )
+        return
+    if pd.notna(fusion_delta_norm) and latest_epoch >= 2 and fusion_delta_norm < 0.05:
+        print(
+            "OBJECT FUSION WARNING: learned object-context fusion is nearly inactive."
         )
         return
     if pd.notna(dropout_joint_missing) and dropout_joint_missing < 0.65:
@@ -1010,7 +1062,13 @@ def print_row(title, row):
         f"useful_exact {metric(row, 'val_relation_useful_mass_exact'):.4f}, "
         f"null_objectless {metric(row, 'val_relation_null_rate_objectless'):.4f}, "
         "null_missing "
-        f"{metric(row, 'val_relation_null_rate_missing_objectful'):.4f}"
+        f"{metric(row, 'val_relation_null_rate_missing_objectful'):.4f}, "
+        "logit_scale "
+        f"{metric(row, 'val_relation_logit_scale'):.4f}, "
+        "valid_bonus "
+        f"{metric(row, 'val_relation_valid_object_logit_bonus'):.4f}, "
+        "roi_norm "
+        f"{metric(row, 'val_object_region_visual_feature_norm'):.4f}"
     )
     if pd.notna(metric(row, "val_relation_action_joint_exact_acc")):
         print(
@@ -1039,10 +1097,19 @@ def print_row(title, row):
         print(
             "object-present gain: "
             f"true_prob {metric(row, 'val_deploy_object_present_true_prob_gain'):.4f}, "
+            "true_logit "
+            f"{metric(row, 'val_deploy_object_present_true_logit_gain'):.4f}, "
+            "action_margin "
+            f"{metric(row, 'val_deploy_object_present_action_margin_gain'):.4f}, "
             "uselaptop_prob "
             f"{metric(row, 'val_deploy_object_present_Uselaptop_prob_gain'):.4f}, "
             "uselaptop_margin "
             f"{metric(row, 'val_deploy_object_present_Uselaptop_confuser_margin_gain'):.4f}"
+        )
+    if pd.notna(metric(row, "val_actor_object_fusion_delta_norm")):
+        print(
+            "learned object fusion: "
+            f"delta_norm {metric(row, 'val_actor_object_fusion_delta_norm'):.4f}"
         )
     print(
         "interaction heatmap: "
@@ -1133,6 +1200,7 @@ def main():
     print("- Detector-dropout metrics prove objectful actions still work when the compatible object token is hidden.")
     print("- For each actor, the object objective is one CE over NULL plus detected object slots.")
     print("- Runtime objects update actor tokens inside the transformer and feed selected object memory into actor_head.")
+    print("- Object-present gain must be non-negative; detected objects should not hurt the true action versus an object-hidden pass.")
     print("- The only object objective is relation CE; removed side objectives are not part of this run.")
     print("- Exact objectful cases must get both action and relation right; relation-right/action-wrong is a coupling failure.")
     print("- Exact compatible detections should select the teacher object; missing/objectless cases should route relation attention to NULL.")

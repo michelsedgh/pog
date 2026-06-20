@@ -447,6 +447,16 @@ def build_parser():
         default=0.0,
     )
     parser.add_argument(
+        "--actor_object_present_margin_loss_weight",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--actor_object_present_margin",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
         "--actor_object_detector_dropout_eval",
         type=int,
         default=0,
@@ -506,6 +516,16 @@ def main():
         )
     if hparams.actor_object_prompt_tokens and not hparams.actor_prompt:
         raise ValueError("actor_object_prompt_tokens requires actor_prompt")
+    if hparams.actor_object_prompt_tokens and not getattr(
+        hparams,
+        "actor_object_region_visual_tokens",
+        0,
+    ):
+        raise ValueError(
+            "actor_object_prompt_tokens requires "
+            "--actor_object_region_visual_tokens 1. Runtime object memory must "
+            "include visual patch features pooled from object boxes."
+        )
     if hparams.actor_object_prompt_tokens and not hparams.actor_interaction_heatmaps:
         raise ValueError(
             "actor_object_prompt_tokens requires --actor_interaction_heatmaps 1"
@@ -550,6 +570,13 @@ def main():
                 "--actor_relation_action_fusion 1 so selected object memory reaches "
                 "the final action head"
             )
+    elif getattr(hparams, "actor_object_prompt_tokens", 0):
+        raise ValueError(
+            "actor_object_prompt_tokens now has one supported training path: "
+            "--actor_object_relation_in_transformer 1 with "
+            "--actor_relation_action_fusion 1. This prevents passive object "
+            "prompt tokens from being trained without action coupling."
+        )
     if (
         hparams.actor_object_prompt_tokens
         and not hparams.object_detector_cache

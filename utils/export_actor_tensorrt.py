@@ -19,7 +19,23 @@ def uses_prompt_object_proposals(hparams):
             "actor_object_slot_head checkpoints are no longer supported. "
             "Train/export with actor_object_prompt_tokens instead."
         )
-    return bool(hparams.get("actor_object_prompt_tokens", 0))
+    uses_objects = bool(hparams.get("actor_object_prompt_tokens", 0))
+    if uses_objects and not bool(hparams.get("actor_object_region_visual_tokens", 0)):
+        raise RuntimeError(
+            "Object-proposal checkpoints now require "
+            "actor_object_region_visual_tokens=1 so object memory contains visual "
+            "patch features pooled from proposal boxes."
+        )
+    if uses_objects and (
+        not bool(hparams.get("actor_object_relation_in_transformer", 0))
+        or not bool(hparams.get("actor_relation_action_fusion", 0))
+    ):
+        raise RuntimeError(
+            "Object-proposal checkpoints now have one supported export path: "
+            "actor_object_relation_in_transformer=1 and "
+            "actor_relation_action_fusion=1."
+        )
+    return uses_objects
 
 
 def parse_args():
@@ -372,6 +388,9 @@ def checkpoint_payload(checkpoint_path, hparam_overrides=None):
         "actor_object_prompt_tokens": int(
             hparams.get("actor_object_prompt_tokens", 0)
         ),
+        "actor_object_region_visual_tokens": int(
+            hparams.get("actor_object_region_visual_tokens", 0)
+        ),
         "actor_object_relation_in_transformer": int(
             hparams.get("actor_object_relation_in_transformer", 0)
         ),
@@ -383,6 +402,18 @@ def checkpoint_payload(checkpoint_path, hparam_overrides=None):
         ),
         "actor_object_relation_learned_scale": int(
             hparams.get("actor_object_relation_learned_scale", 0)
+        ),
+        "actor_object_relation_logit_scale_init": float(
+            hparams.get("actor_object_relation_logit_scale_init", 1.0)
+        ),
+        "actor_object_relation_learned_logit_scale": int(
+            hparams.get("actor_object_relation_learned_logit_scale", 0)
+        ),
+        "actor_object_relation_normalize_pointers": int(
+            hparams.get("actor_object_relation_normalize_pointers", 0)
+        ),
+        "actor_object_relation_learned_valid_bonus": int(
+            hparams.get("actor_object_relation_learned_valid_bonus", 0)
         ),
         "actor_object_relation_layer_scale_init": float(
             hparams.get("actor_object_relation_layer_scale_init", 0.25)
@@ -624,6 +655,9 @@ def main():
             "actor_object_prompt_tokens": int(
                 hparams.get("actor_object_prompt_tokens", 0)
             ),
+            "actor_object_region_visual_tokens": int(
+                hparams.get("actor_object_region_visual_tokens", 0)
+            ),
             "actor_object_relation_in_transformer": int(
                 hparams.get("actor_object_relation_in_transformer", 0)
             ),
@@ -635,6 +669,18 @@ def main():
             ),
             "actor_object_relation_learned_scale": int(
                 hparams.get("actor_object_relation_learned_scale", 0)
+            ),
+            "actor_object_relation_logit_scale_init": float(
+                hparams.get("actor_object_relation_logit_scale_init", 1.0)
+            ),
+            "actor_object_relation_learned_logit_scale": int(
+                hparams.get("actor_object_relation_learned_logit_scale", 0)
+            ),
+            "actor_object_relation_normalize_pointers": int(
+                hparams.get("actor_object_relation_normalize_pointers", 0)
+            ),
+            "actor_object_relation_learned_valid_bonus": int(
+                hparams.get("actor_object_relation_learned_valid_bonus", 0)
             ),
             "actor_object_relation_layer_scale_init": float(
                 hparams.get("actor_object_relation_layer_scale_init", 0.25)

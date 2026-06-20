@@ -8,11 +8,7 @@ import torch
 import os
 import os.path
 import pickle
-from datasets.object_vocab import NUM_OBJECT_CLASSES, OBJECT_TO_ID
-from datasets.toyota_action_taxonomy import (
-    toyota_action_object_map,
-    toyota_action_to_index,
-)
+from datasets.object_vocab import NUM_OBJECT_CLASSES
 
 
 def load_state_dict(
@@ -159,16 +155,31 @@ class POGUISE(pl.LightningModule):
         self.actor_relation_action_fusion_enabled = bool(
             self.hparams.get("actor_relation_action_fusion", 0)
         )
-        self.actor_object_action_prior_weight = float(
-            self.hparams.get("actor_object_action_prior_weight", 0.0)
+        self.actor_relation_action_fusion_init_scale = float(
+            self.hparams.get("actor_relation_action_fusion_init_scale", 0.0)
         )
-        self.actor_object_action_prior_negative_weight = float(
-            self.hparams.get("actor_object_action_prior_negative_weight", 0.0)
+        if self.actor_relation_action_fusion_init_scale < 0:
+            raise ValueError("actor_relation_action_fusion_init_scale must be >= 0")
+        removed_action_prior_keys = (
+            "actor_object_action_prior_weight",
+            "actor_object_action_prior_negative_weight",
+            "actor_object_action_prior_map",
+            "object_action_prior_weight",
+            "object_action_prior_negative_weight",
         )
-        if self.actor_object_action_prior_weight < 0:
-            raise ValueError("actor_object_action_prior_weight must be >= 0")
-        if self.actor_object_action_prior_negative_weight < 0:
-            raise ValueError("actor_object_action_prior_negative_weight must be >= 0")
+        stale_action_prior = [
+            key
+            for key in removed_action_prior_keys
+            if key in self.hparams
+            and self.hparams.get(key) not in (None, 0, 0.0, "0", "0.0")
+        ]
+        if stale_action_prior:
+            raise ValueError(
+                "Manual object-to-action logit priors were removed. The clean "
+                "path is PO-GUISE+ video/heatmap features plus learned HOI-style "
+                "actor-object relation binding and learned relation-action fusion. "
+                f"Remove stale hparams: {', '.join(stale_action_prior)}"
+            )
         if bool(self.hparams.get("actor_object_slot_head", 0)):
             raise ValueError(
                 "actor_object_slot_head was replaced by "
@@ -194,12 +205,31 @@ class POGUISE(pl.LightningModule):
             )
         if self.actor_object_prompt_tokens_enabled and not self.actor_prompt:
             raise ValueError("actor_object_prompt_tokens requires actor_prompt")
+        if self.actor_object_prompt_tokens_enabled and not bool(
+            self.hparams.get("actor_object_region_visual_tokens", 0)
+        ):
+            raise ValueError(
+                "actor_object_prompt_tokens requires "
+                "actor_object_region_visual_tokens=1. Runtime object memory must "
+                "include object-region visual patch features, not only class/box "
+                "metadata."
+            )
         if (
             self.actor_object_prompt_tokens_enabled
             and not self.actor_interaction_heatmaps
         ):
             raise ValueError(
                 "actor_object_prompt_tokens requires actor_interaction_heatmaps"
+            )
+        if (
+            self.actor_object_prompt_tokens_enabled
+            and not self.actor_object_relation_in_transformer
+        ):
+            raise ValueError(
+                "actor_object_prompt_tokens now has one supported path: "
+                "enable actor_object_relation_in_transformer so object proposals "
+                "are bound to actor slots instead of existing as passive prompt "
+                "tokens."
             )
         if self.actor_object_relation_in_transformer and not self.actor_object_prompt_tokens_enabled:
             raise ValueError(
@@ -230,11 +260,6 @@ class POGUISE(pl.LightningModule):
                 "semantics come from relation-only runtime object memory."
             )
         self.use_register_tokens = bool(self.hparams.get("use_register_tokens", 0))
-        self.register_buffer(
-            "actor_object_action_prior_matrix",
-            self._build_actor_object_action_prior_matrix(),
-            persistent=False,
-        )
         self._create_network()
         # freeze backbone if specified
         if self.hparams.freeze_backbone:
@@ -256,135 +281,20 @@ class POGUISE(pl.LightningModule):
             )
         return result
 
-    def _build_actor_object_action_prior_matrix(self):
-        num_objects = int(self.hparams.get("num_object_classes", NUM_OBJECT_CLASSES))
-        num_classes = int(self.hparams.get("num_classes", 0))
-        matrix = torch.zeros(num_objects, num_classes, dtype=torch.float32)
-        compatible = torch.zeros(num_objects, num_classes, dtype=torch.bool)
-        if num_objects <= 0 or num_classes <= 0:
-            if (
-                self.actor_object_action_prior_weight > 0
-                or self.actor_object_action_prior_negative_weight > 0
-            ):
-                raise ValueError(
-                    "actor object/action priors require positive "
-                    f"num_object_classes and num_classes, got {num_objects} and "
-                    f"{num_classes}"
-                )
-            return matrix
-        task_type = self.hparams.get("task_type", "CS")
-        action_taxonomy = self.hparams.get("toyota_action_taxonomy", "toyota_31")
-        try:
-            action_to_index = toyota_action_to_index(task_type, action_taxonomy)
-            action_objects = toyota_action_object_map(task_type, action_taxonomy)
-        except Exception as exc:
-            if (
-                self.actor_object_action_prior_weight > 0
-                or self.actor_object_action_prior_negative_weight > 0
-            ):
-                raise ValueError(
-                    "actor object/action priors require a valid Toyota "
-                    f"action/object map, got task_type={task_type!r}, "
-                    f"toyota_action_taxonomy={action_taxonomy!r}"
-                ) from exc
-            return matrix
-        mapped_action_indices = set()
-        mapped_object_indices = set()
-        for action_name, object_names in action_objects.items():
-            action_idx = action_to_index.get(action_name)
-            if action_idx is None or not 0 <= int(action_idx) < num_classes:
-                continue
-            mapped_action_indices.add(int(action_idx))
-            for object_name in object_names:
-                object_idx = OBJECT_TO_ID.get(object_name)
-                if object_idx is None or not 0 <= int(object_idx) < num_objects:
-                    continue
-                mapped_object_indices.add(int(object_idx))
-                compatible[int(object_idx), int(action_idx)] = True
-        if (
-            (
-                self.actor_object_action_prior_weight > 0
-                or self.actor_object_action_prior_negative_weight > 0
-            )
-            and not compatible.any()
-        ):
-            raise ValueError(
-                "actor object/action priors are enabled but no object/action "
-                f"pairs were mapped for task_type={task_type!r}, "
-                f"toyota_action_taxonomy={action_taxonomy!r}, "
-                f"num_object_classes={num_objects}, num_classes={num_classes}"
-            )
-        if self.actor_object_action_prior_weight > 0:
-            matrix = matrix + compatible.to(dtype=matrix.dtype) * float(
-                self.actor_object_action_prior_weight
-            )
-        if self.actor_object_action_prior_negative_weight > 0:
-            for object_idx in mapped_object_indices:
-                for action_idx in mapped_action_indices:
-                    if not bool(compatible[object_idx, action_idx]):
-                        matrix[object_idx, action_idx] = -float(
-                            self.actor_object_action_prior_negative_weight
-                        )
-        return matrix
-
-    def _actor_object_action_prior(self, relation_aux, object_classes, object_valid, dtype):
-        if (
-            self.actor_object_action_prior_weight <= 0
-            and self.actor_object_action_prior_negative_weight <= 0
-        ):
-            return None
-        object_attention = relation_aux.get("object_attention")
-        if object_attention is None or object_classes is None or object_valid is None:
-            return None
-        if self.actor_object_action_prior_matrix.numel() == 0:
-            return None
-
-        object_attention = object_attention.float()
-        object_classes = object_classes.to(
-            device=object_attention.device,
-            dtype=torch.long,
-        )
-        object_valid = object_valid.to(
-            device=object_attention.device,
-            dtype=torch.bool,
-        )
-        if object_classes.shape != object_valid.shape:
-            raise RuntimeError(
-                "object_classes/object_valid shape mismatch for action prior: "
-                f"{tuple(object_classes.shape)} vs {tuple(object_valid.shape)}"
-            )
-        if object_attention.shape[:1] != object_classes.shape[:1] or (
-            object_attention.shape[2] != object_classes.shape[1]
-        ):
-            raise RuntimeError(
-                "relation attention/object class shape mismatch for action prior: "
-                f"{tuple(object_attention.shape)} vs {tuple(object_classes.shape)}"
-            )
-        max_object = int(self.actor_object_action_prior_matrix.shape[0]) - 1
-        safe_classes = object_classes.clamp(0, max_object)
-        object_action_matrix = self.actor_object_action_prior_matrix.to(
-            device=object_attention.device,
-            dtype=object_attention.dtype,
-        )[safe_classes]
-        object_action_matrix = object_action_matrix * object_valid[:, :, None].to(
-            dtype=object_action_matrix.dtype
-        )
-        prior = torch.einsum(
-            "bak,bkc->bac",
-            object_attention,
-            object_action_matrix,
-        )
-        return prior.to(dtype=dtype)
-
     def _create_network(self):
         n_registers = (
             int(self.hparams.get("n_registers", 0) or 0)
             if self.use_register_tokens
             else 0
         )
+        all_frames = int(self.hparams.get("n_frames", 16))
+        if all_frames <= 0:
+            raise ValueError("n_frames must be positive")
+
         if self.hparams.pretrained == "small":
             return_heatmap_features = bool(self.actor_object_prompt_tokens_enabled)
             self.net = vit_small_patch16_224(
+                all_frames=all_frames,
                 drop_rate=self.hparams.drop_rate,
                 attn_drop_rate=self.hparams.attn_drop_rate,
                 drop_path_rate=self.hparams.drop_path_rate,
@@ -415,6 +325,10 @@ class POGUISE(pl.LightningModule):
                 num_object_classes=self.hparams.get(
                     "num_object_classes",
                     NUM_OBJECT_CLASSES,
+                ),
+                actor_object_region_visual_tokens=self.hparams.get(
+                    "actor_object_region_visual_tokens",
+                    0,
                 ),
                 actor_object_prompt_box_prior_weight=self.hparams.get(
                     "actor_object_prompt_box_prior_weight",
@@ -465,9 +379,25 @@ class POGUISE(pl.LightningModule):
                     "actor_object_relation_null_logit_init",
                     4.0,
                 ),
+                actor_object_relation_logit_scale_init=self.hparams.get(
+                    "actor_object_relation_logit_scale_init",
+                    1.0,
+                ),
+                actor_object_relation_learned_logit_scale=self.hparams.get(
+                    "actor_object_relation_learned_logit_scale",
+                    0,
+                ),
+                actor_object_relation_normalize_pointers=self.hparams.get(
+                    "actor_object_relation_normalize_pointers",
+                    0,
+                ),
                 actor_object_relation_valid_logit_bonus=self.hparams.get(
                     "actor_object_relation_valid_logit_bonus",
                     0.0,
+                ),
+                actor_object_relation_learned_valid_bonus=self.hparams.get(
+                    "actor_object_relation_learned_valid_bonus",
+                    0,
                 ),
                 actor_object_relation_geometry_bias_weight=self.hparams.get(
                     "actor_object_relation_geometry_bias_weight",
@@ -491,6 +421,7 @@ class POGUISE(pl.LightningModule):
         else:
             return_heatmap_features = bool(self.actor_object_prompt_tokens_enabled)
             self.net = vit_base_patch16_224(
+                all_frames=all_frames,
                 drop_rate=self.hparams.drop_rate,
                 attn_drop_rate=self.hparams.attn_drop_rate,
                 drop_path_rate=self.hparams.drop_path_rate,
@@ -521,6 +452,10 @@ class POGUISE(pl.LightningModule):
                 num_object_classes=self.hparams.get(
                     "num_object_classes",
                     NUM_OBJECT_CLASSES,
+                ),
+                actor_object_region_visual_tokens=self.hparams.get(
+                    "actor_object_region_visual_tokens",
+                    0,
                 ),
                 actor_object_prompt_box_prior_weight=self.hparams.get(
                     "actor_object_prompt_box_prior_weight",
@@ -571,9 +506,25 @@ class POGUISE(pl.LightningModule):
                     "actor_object_relation_null_logit_init",
                     4.0,
                 ),
+                actor_object_relation_logit_scale_init=self.hparams.get(
+                    "actor_object_relation_logit_scale_init",
+                    1.0,
+                ),
+                actor_object_relation_learned_logit_scale=self.hparams.get(
+                    "actor_object_relation_learned_logit_scale",
+                    0,
+                ),
+                actor_object_relation_normalize_pointers=self.hparams.get(
+                    "actor_object_relation_normalize_pointers",
+                    0,
+                ),
                 actor_object_relation_valid_logit_bonus=self.hparams.get(
                     "actor_object_relation_valid_logit_bonus",
                     0.0,
+                ),
+                actor_object_relation_learned_valid_bonus=self.hparams.get(
+                    "actor_object_relation_learned_valid_bonus",
+                    0,
                 ),
                 actor_object_relation_geometry_bias_weight=self.hparams.get(
                     "actor_object_relation_geometry_bias_weight",
@@ -630,7 +581,13 @@ class POGUISE(pl.LightningModule):
                     nn.GELU(),
                     nn.Linear(self.net.num_features, self.net.num_features),
                 )
-                nn.init.zeros_(self.actor_relation_action_fusion[-1].weight)
+                if self.actor_relation_action_fusion_init_scale > 0:
+                    nn.init.trunc_normal_(
+                        self.actor_relation_action_fusion[-1].weight,
+                        std=self.actor_relation_action_fusion_init_scale,
+                    )
+                else:
+                    nn.init.zeros_(self.actor_relation_action_fusion[-1].weight)
                 nn.init.zeros_(self.actor_relation_action_fusion[-1].bias)
             self.presence_head = (
                 nn.Linear(self.net.num_features, 1)
@@ -685,6 +642,8 @@ class POGUISE(pl.LightningModule):
                 "object_class_embed",
                 "object_box_mlp",
                 "object_valid_embed",
+                "object_region_norm",
+                "object_region_proj",
             ):
                 module = getattr(self.net, attr, None)
                 if module is None:
@@ -719,7 +678,6 @@ class POGUISE(pl.LightningModule):
         action_labels=None,
         object_boxes=None,
         object_classes=None,
-        object_confs=None,
         object_valid=None,
     ):
         # convert to b c t h w
@@ -772,12 +730,17 @@ class POGUISE(pl.LightningModule):
             self.last_actor_object_prompt_valid = None
             self.last_actor_object_relation_context = None
             self.last_actor_object_relation_mass = None
-            self.last_actor_object_action_prior = None
+            self.last_actor_object_fusion_delta = None
             self.last_actor_action_tokens = None
             self.last_actor_object_relation_aux = getattr(
                 self.net,
                 "last_actor_object_relation_aux",
                 {},
+            )
+            self.last_actor_object_region_visual_norm = getattr(
+                self.net,
+                "last_object_region_visual_norm",
+                None,
             )
             if self.hparams.ret_feat:
                 return x_actor
@@ -864,29 +827,12 @@ class POGUISE(pl.LightningModule):
                     ],
                     dim=-1,
                 )
-                x_action = x_actor + self.actor_relation_action_fusion(fusion_in)
+                fusion_delta = self.actor_relation_action_fusion(fusion_in)
+                fusion_delta = fusion_delta * relation_mass
+                self.last_actor_object_fusion_delta = fusion_delta
+                x_action = x_actor + fusion_delta
             self.last_actor_action_tokens = x_action
             action_scores = self.actor_head(x_action)
-            if (
-                (
-                    self.actor_object_action_prior_weight > 0
-                    or self.actor_object_action_prior_negative_weight > 0
-                )
-                and self.last_actor_object_relation_aux
-            ):
-                last_block = sorted(
-                    self.last_actor_object_relation_aux.keys(),
-                    key=lambda value: int(value),
-                )[-1]
-                action_prior = self._actor_object_action_prior(
-                    self.last_actor_object_relation_aux[last_block],
-                    object_classes,
-                    object_valid,
-                    action_scores.dtype,
-                )
-                if action_prior is not None:
-                    action_scores = action_scores + action_prior
-                    self.last_actor_object_action_prior = action_prior
             self.last_actor_action_logits = action_scores
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)
@@ -955,6 +901,7 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--num_scene_object_tokens", type=int, default=32)
         parser.add_argument("--num_object_classes", type=int, default=19)
         parser.add_argument("--actor_object_prompt_tokens", type=int, default=0)
+        parser.add_argument("--actor_object_region_visual_tokens", type=int, default=0)
         parser.add_argument(
             "--actor_object_prompt_box_prior_weight",
             type=float,
@@ -983,12 +930,7 @@ class POGUISE(pl.LightningModule):
         )
         parser.add_argument("--actor_relation_action_fusion", type=int, default=0)
         parser.add_argument(
-            "--actor_object_action_prior_weight",
-            type=float,
-            default=0.0,
-        )
-        parser.add_argument(
-            "--actor_object_action_prior_negative_weight",
+            "--actor_relation_action_fusion_init_scale",
             type=float,
             default=0.0,
         )
@@ -1001,6 +943,26 @@ class POGUISE(pl.LightningModule):
             "--actor_object_relation_valid_logit_bonus",
             type=float,
             default=0.0,
+        )
+        parser.add_argument(
+            "--actor_object_relation_logit_scale_init",
+            type=float,
+            default=1.0,
+        )
+        parser.add_argument(
+            "--actor_object_relation_learned_logit_scale",
+            type=int,
+            default=0,
+        )
+        parser.add_argument(
+            "--actor_object_relation_normalize_pointers",
+            type=int,
+            default=0,
+        )
+        parser.add_argument(
+            "--actor_object_relation_learned_valid_bonus",
+            type=int,
+            default=0,
         )
         parser.add_argument(
             "--actor_object_relation_geometry_bias_weight",

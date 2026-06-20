@@ -9,7 +9,7 @@ object relation update spatial evidence.
 For each actor:
 
 ```text
-actor token + relation-only object memory + interaction heatmap features
+actor token + visual relation-only object memory + interaction heatmap features
     -> relation logits over NULL plus object slots
     -> object context
     -> updated actor token inside the transformer and before the action head
@@ -17,7 +17,9 @@ actor token + relation-only object memory + interaction heatmap features
 ```
 
 Heatmaps do not directly predict the action. They help localize the interaction
-region and support object slot selection.
+region and support object slot selection. Runtime object slots also carry
+object-region visual descriptors pooled from the proposal boxes, so the relation
+module is not selecting from class/box symbols alone.
 
 ## Recommended Run
 
@@ -32,8 +34,10 @@ The launcher uses:
 ```text
 --actor_interaction_heatmaps 1
 --actor_object_prompt_tokens 1
+--actor_object_region_visual_tokens 1
 --actor_object_relation_in_transformer 1
 --actor_object_relation_blocks 2,5,8
+--actor_relation_action_fusion 1
 --actor_object_relation_loss_weight 1.00
 --poguiseplus_interaction_heatmap_weight 3.0
 ```

@@ -188,6 +188,9 @@ def main():
             "Train/export with actor_object_prompt_tokens instead."
         )
     actor_object_prompt_tokens = bool(hparams.get("actor_object_prompt_tokens", 0))
+    actor_object_region_visual_tokens = bool(
+        hparams.get("actor_object_region_visual_tokens", 0)
+    )
     if bool(hparams.get("actor_object_residual_head", 0)):
         raise RuntimeError(
             "actor_object_residual_head checkpoints use the removed late object path. "
@@ -199,9 +202,33 @@ def main():
     actor_object_relation_learned_scale = bool(
         hparams.get("actor_object_relation_learned_scale", 0)
     )
+    actor_object_relation_learned_logit_scale = bool(
+        hparams.get("actor_object_relation_learned_logit_scale", 0)
+    )
+    actor_object_relation_normalize_pointers = bool(
+        hparams.get("actor_object_relation_normalize_pointers", 0)
+    )
+    actor_object_relation_learned_valid_bonus = bool(
+        hparams.get("actor_object_relation_learned_valid_bonus", 0)
+    )
     actor_relation_action_fusion = bool(
         hparams.get("actor_relation_action_fusion", 0)
     )
+    if actor_object_prompt_tokens and (
+        not actor_object_relation_in_transformer
+        or not actor_relation_action_fusion
+    ):
+        raise RuntimeError(
+            "Object-proposal checkpoints now have one supported TensorRT path: "
+            "actor_object_relation_in_transformer=1 and "
+            "actor_relation_action_fusion=1."
+        )
+    if actor_object_prompt_tokens and not actor_object_region_visual_tokens:
+        raise RuntimeError(
+            "Object-proposal checkpoints must use "
+            "actor_object_region_visual_tokens=1 so object memory includes visual "
+            "patch features from proposal boxes."
+        )
     uses_object_proposals = actor_object_prompt_tokens
     if uses_object_proposals != bool(engine.uses_object_proposals):
         raise RuntimeError(
@@ -223,6 +250,38 @@ def main():
             "Checkpoint/engine relation learned-scale mismatch: "
             f"checkpoint={actor_object_relation_learned_scale}, "
             f"engine={engine.actor_object_relation_learned_scale}"
+        )
+    if actor_object_region_visual_tokens != bool(
+        getattr(engine, "actor_object_region_visual_tokens", False)
+    ):
+        raise RuntimeError(
+            "Checkpoint/engine object-region-visual-token mismatch: "
+            f"checkpoint={actor_object_region_visual_tokens}, "
+            f"engine={engine.actor_object_region_visual_tokens}"
+        )
+    if actor_object_relation_learned_logit_scale != bool(
+        getattr(engine, "actor_object_relation_learned_logit_scale", False)
+    ):
+        raise RuntimeError(
+            "Checkpoint/engine relation learned-logit-scale mismatch: "
+            f"checkpoint={actor_object_relation_learned_logit_scale}, "
+            f"engine={engine.actor_object_relation_learned_logit_scale}"
+        )
+    if actor_object_relation_normalize_pointers != bool(
+        getattr(engine, "actor_object_relation_normalize_pointers", False)
+    ):
+        raise RuntimeError(
+            "Checkpoint/engine relation normalized-pointer mismatch: "
+            f"checkpoint={actor_object_relation_normalize_pointers}, "
+            f"engine={engine.actor_object_relation_normalize_pointers}"
+        )
+    if actor_object_relation_learned_valid_bonus != bool(
+        getattr(engine, "actor_object_relation_learned_valid_bonus", False)
+    ):
+        raise RuntimeError(
+            "Checkpoint/engine relation learned-valid-bonus mismatch: "
+            f"checkpoint={actor_object_relation_learned_valid_bonus}, "
+            f"engine={engine.actor_object_relation_learned_valid_bonus}"
         )
     if actor_relation_action_fusion != bool(
         getattr(engine, "actor_relation_action_fusion", False)
@@ -279,6 +338,7 @@ def main():
         "onnx": str(Path(args.onnx)),
         "engine": str(Path(args.engine)),
         "actor_object_prompt_tokens": actor_object_prompt_tokens,
+        "actor_object_region_visual_tokens": actor_object_region_visual_tokens,
         "actor_object_relation_in_transformer": actor_object_relation_in_transformer,
         "uses_object_proposals": uses_object_proposals,
         "hparam_overrides": hparam_overrides,

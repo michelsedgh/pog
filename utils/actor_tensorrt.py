@@ -96,6 +96,33 @@ class TensorRTActorEngine:
                 self.metadata.get("actor_object_relation_learned_scale", False),
             )
         )
+        self.actor_object_relation_learned_logit_scale = bool(
+            export_hparams.get(
+                "actor_object_relation_learned_logit_scale",
+                self.metadata.get(
+                    "actor_object_relation_learned_logit_scale",
+                    False,
+                ),
+            )
+        )
+        self.actor_object_relation_normalize_pointers = bool(
+            export_hparams.get(
+                "actor_object_relation_normalize_pointers",
+                self.metadata.get(
+                    "actor_object_relation_normalize_pointers",
+                    False,
+                ),
+            )
+        )
+        self.actor_object_relation_learned_valid_bonus = bool(
+            export_hparams.get(
+                "actor_object_relation_learned_valid_bonus",
+                self.metadata.get(
+                    "actor_object_relation_learned_valid_bonus",
+                    False,
+                ),
+            )
+        )
         self.actor_relation_action_fusion = bool(
             export_hparams.get(
                 "actor_relation_action_fusion",
@@ -122,11 +149,35 @@ class TensorRTActorEngine:
                 ),
             )
         )
+        self.actor_object_region_visual_tokens = bool(
+            export_hparams.get(
+                "actor_object_region_visual_tokens",
+                self.metadata.get(
+                    "actor_object_region_visual_tokens",
+                    False,
+                ),
+            )
+        )
         if self.actor_object_prompt_tokens != self.uses_object_proposals:
             raise RuntimeError(
                 "Engine metadata and bindings disagree on object prompt inputs: "
                 f"metadata={self.actor_object_prompt_tokens}, "
                 f"bindings={self.uses_object_proposals}."
+            )
+        if self.actor_object_prompt_tokens and not self.actor_object_region_visual_tokens:
+            raise RuntimeError(
+                "Object-proposal TensorRT engines must include "
+                "actor_object_region_visual_tokens=1 so object memory uses visual "
+                "patch features from proposal boxes."
+            )
+        if self.actor_object_prompt_tokens and (
+            not self.actor_object_relation_in_transformer
+            or not self.actor_relation_action_fusion
+        ):
+            raise RuntimeError(
+                "Object-proposal TensorRT engines must use the single supported "
+                "path: actor_object_relation_in_transformer=1 and "
+                "actor_relation_action_fusion=1."
             )
         if "object_selection" in output_set:
             raise RuntimeError(
