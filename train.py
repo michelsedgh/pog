@@ -395,7 +395,7 @@ def build_parser():
 
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--lr_head", type=float, default=6e-4)
-    parser.add_argument("--lr_head_hm", type=float, default=0.0)
+    parser.add_argument("--lr_head_hm", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=0.04)
     parser.add_argument("--weight_decay_head", type=float, default=0.01)
     parser.add_argument("--weight_decay_head_hm", type=float, default=0.01)
@@ -459,31 +459,7 @@ def build_parser():
         type=float,
         default=0.0,
     )
-    parser.add_argument(
-        "--actor_object_detector_dropout_action_loss_weight",
-        type=float,
-        default=0.0,
-    )
-    parser.add_argument(
-        "--actor_object_detector_dropout_relation_loss_weight",
-        type=float,
-        default=0.0,
-    )
-    parser.add_argument(
-        "--actor_object_present_margin_loss_weight",
-        type=float,
-        default=0.0,
-    )
-    parser.add_argument(
-        "--actor_object_present_margin",
-        type=float,
-        default=0.0,
-    )
-    parser.add_argument(
-        "--actor_object_detector_dropout_eval",
-        type=int,
-        default=0,
-    )
+
     parser.add_argument(
         "--actor_object_proposal_aug_prob",
         type=float,

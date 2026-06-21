@@ -659,7 +659,7 @@ class POGUISE(pl.LightningModule):
             self.actor_object_pair_action_head = None
             if self.actor_object_pair_action_head_enabled:
                 feature_dim = int(self.net.num_features)
-                pair_dim = feature_dim * 3 + 2
+                pair_dim = feature_dim * 3 + 1
                 hidden_dim = self.actor_object_pair_action_hidden_dim or feature_dim
                 self.actor_object_null_pair_token = nn.Parameter(
                     torch.zeros(1, 1, 1, feature_dim)
@@ -890,7 +890,6 @@ class POGUISE(pl.LightningModule):
                 actor_tokens,
                 pair_tokens,
                 actor_tokens * pair_tokens,
-                relation_log_probs.to(dtype=x_actor.dtype).unsqueeze(-1),
                 valid_pair.unsqueeze(-1),
             ],
             dim=-1,
@@ -905,8 +904,11 @@ class POGUISE(pl.LightningModule):
             num_pairs,
             num_actions,
         )
-        masked_pair_scores = pair_scores.masked_fill(~allowed, -1.0e4)
-        action_scores = torch.logsumexp(masked_pair_scores, dim=2)
+        masked_pair_logits = pair_logits.masked_fill(~allowed, -1.0e4)
+        pair_action_probs = F.softmax(masked_pair_logits, dim=-1)
+        relation_probs = torch.exp(relation_log_probs)
+        action_probs = torch.sum(pair_action_probs * relation_probs.unsqueeze(-1), dim=2)
+        action_scores = torch.log(action_probs.clamp_min(1e-6))
 
         self.last_actor_object_pair_action_logits = pair_logits
         self.last_actor_object_pair_action_scores = pair_scores

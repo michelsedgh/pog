@@ -35,9 +35,7 @@ margin objective.
 
 Sparse detections are handled by window-level `object_valid`: one valid detected
 laptop in the clip is enough for a laptop slot to compete against `NULL`.
-Detector-miss dropout trains the fallback branch, but object-present margin
-training separately requires valid compatible objects to improve the true action
-margin instead of being ignored.
+Detector-miss dropout in the main pass trains the fallback branch to select `NULL` when objects are missing. This is implemented via random dropping of valid targets.
 
 The default object run now uses two actor tokens because side-by-side actor-slot
 training is active. Slot padding is still masked; the second slot is real in the
@@ -66,8 +64,7 @@ Relation:
 --actor_object_pair_action_init_scale 0.01
 --actor_object_pair_action_margin_loss_weight 0.25
 --actor_object_pair_action_margin 0.50
---actor_object_present_margin_loss_weight 0.15
---actor_object_present_margin 0.25
+
 ```
 
 Object memory and token selection:
@@ -144,23 +141,11 @@ A promising run should show:
 - `val_relation_null_rate_missing_objectful` high
 - `val_object_region_visual_feature_norm` present and nonzero
 - `val_relation_logit_scale` staying finite and not collapsing
-- `val_deploy_object_present_action_margin_gain` not negative
-- `val_deploy_object_present_action_margin_gain_median` not negative
-- `val_deploy_object_present_action_margin_gain_negative_rate` low
-- `val_deploy_object_present_Uselaptop_prob_gain` not negative
-- `val_deploy_object_present_Uselaptop_prob_gain_median` not negative
+
 - `val_actor_object_pair_action_margin_win_rate` rising
 - `val_interaction_heatmap_soft_iou` and positive response improving
 
-`val_deploy_score` strongly penalizes negative object-present gain and negative
-object-present action-margin gain, so top-k checkpointing should not quietly
-prefer a checkpoint where detected objects hurt the action decision.
-
-The object-present gain loss is not an object-to-action rule. It compares the
-same clip with valid compatible detections present versus hidden and trains only
-the object-present pass to keep the true-action logit at least slightly better.
-The detector-dropout action loss separately preserves the no-object fallback.
+`val_deploy_score` continues to penalize performance drops.
 
 A bad run can still have high relation metrics if pair action margins do not
-improve. In that case, inspect pair scoring and object-present intervention
-metrics before adding more objectives.
+improve. In that case, inspect pair scoring before adding more objectives.

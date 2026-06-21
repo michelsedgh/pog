@@ -1103,100 +1103,6 @@ class HeatmapModule(pl.LightningModule):
             if key != "object_confs"
         }
 
-    def _detector_dropout_object_inputs(
-        self,
-        actions,
-        valid,
-        target,
-        object_inputs,
-        stage,
-    ):
-        if not self.uses_object_proposals or not object_inputs:
-            return None
-        is_train = stage.startswith("train")
-        train_active = (
-            is_train
-            and self.actor_object_detector_dropout_prob > 0.0
-            and (
-                self.actor_object_detector_dropout_action_loss_weight > 0.0
-                or self.actor_object_detector_dropout_relation_loss_weight > 0.0
-            )
-        )
-        eval_active = stage == "val" and self.actor_object_detector_dropout_eval
-        if not train_active and not eval_active:
-            return None
-
-        object_valid = object_inputs["object_valid"].to(dtype=torch.bool)
-        device = object_valid.device
-        info = self._exact_teacher_object_info(actions, valid, target, device)
-        if info is None:
-            return None
-
-        exact = info["valid"] & info["known_action"] & info["compatible_from_one_based"]
-        if not exact.any():
-            return None
-        selected_actor_mask = exact.clone()
-        if is_train and self.actor_object_detector_dropout_prob < 1.0:
-            keep = torch.rand(
-                selected_actor_mask.shape,
-                device=device,
-                dtype=torch.float32,
-            ) < self.actor_object_detector_dropout_prob
-            selected_actor_mask = selected_actor_mask & keep
-        if not selected_actor_mask.any():
-            return None
-
-        actions = actions.to(device=device, dtype=torch.long)
-        object_classes = object_inputs["object_classes"].to(
-            device=device,
-            dtype=torch.long,
-        )
-        dropped_object_mask = torch.zeros_like(object_valid, dtype=torch.bool)
-        for action_idx, object_ids in self.action_object_ids_by_index.items():
-            action_actor_mask = selected_actor_mask & (actions == int(action_idx))
-            if not action_actor_mask.any():
-                continue
-            sample_mask = action_actor_mask.any(dim=1)
-            object_ids = object_ids.to(device=device, dtype=torch.long)
-            # Drop every compatible proposal for the selected action, not only
-            # the teacher slot, so the auxiliary pass is a true detector miss.
-            class_match = (
-                object_classes.unsqueeze(-1) == object_ids.view(1, 1, -1)
-            ).any(dim=-1)
-            dropped_object_mask |= sample_mask[:, None] & object_valid & class_match
-
-        if not dropped_object_mask.any():
-            return None
-
-        masked_object_valid = object_valid & ~dropped_object_mask
-        masked_object_confs = object_inputs["object_confs"].clone()
-        masked_object_confs = masked_object_confs.masked_fill(dropped_object_mask, 0.0)
-
-        masked_object_inputs = {
-            "object_boxes": object_inputs["object_boxes"],
-            "object_classes": object_classes,
-            "object_confs": masked_object_confs,
-            "object_valid": masked_object_valid,
-        }
-        masked_target = dict(target)
-        for key in (
-            "object_boxes",
-            "object_classes",
-            "object_confs",
-            "interaction_object_index",
-            "interaction_object_index_valid",
-        ):
-            if key in target:
-                masked_target[key] = target[key].to(device=device)
-        masked_target["object_valid"] = masked_object_valid
-        masked_target["object_confs"] = masked_object_confs
-
-        return {
-            "object_inputs": masked_object_inputs,
-            "target": masked_target,
-            "selected_actor_mask": selected_actor_mask,
-            "dropped_object_mask": dropped_object_mask,
-        }
 
     def _teacher_object_slot_mask(self, target, shape, device):
         teacher_mask = torch.zeros(shape, device=device, dtype=torch.bool)
@@ -1222,60 +1128,67 @@ class HeatmapModule(pl.LightningModule):
         return teacher_mask
 
     def _augment_object_inputs_for_training(self, object_inputs, target, stage):
+        device = object_inputs["object_valid"].device
+        dropped_target_mask = torch.zeros(target["valid"].shape, dtype=torch.bool, device=device)
+
         if (
             not stage.startswith("train")
             or not self.uses_object_proposals
             or not object_inputs
-            or self.actor_object_proposal_aug_prob <= 0.0
         ):
-            return object_inputs
+            return object_inputs, dropped_target_mask
 
         object_valid = object_inputs["object_valid"].to(dtype=torch.bool)
         if not object_valid.any():
-            return object_inputs
-        device = object_valid.device
-        aug_mask = object_valid & (
-            torch.rand(object_valid.shape, device=device, dtype=torch.float32)
-            < self.actor_object_proposal_aug_prob
-        )
-        if not aug_mask.any():
-            return object_inputs
+            return object_inputs, dropped_target_mask
 
         boxes = object_inputs["object_boxes"].clone()
         original_boxes = boxes.clone()
         confs = object_inputs["object_confs"].clone()
-        if self.actor_object_proposal_box_jitter > 0.0:
-            center = (boxes[..., :2] + boxes[..., 2:]) * 0.5
-            size = (boxes[..., 2:] - boxes[..., :2]).clamp_min(1.0e-4)
-            center_noise = (
-                torch.rand_like(center) * 2.0 - 1.0
-            ) * size * self.actor_object_proposal_box_jitter
-            center = center + torch.where(
-                aug_mask[..., None],
-                center_noise,
-                torch.zeros_like(center_noise),
-            )
-            if self.actor_object_proposal_scale_jitter > 0.0:
-                scale_noise = (
-                    torch.rand_like(size) * 2.0 - 1.0
-                ) * self.actor_object_proposal_scale_jitter
-                size = size * (1.0 + scale_noise).clamp_min(0.25)
-            half = size * 0.5
-            jittered_boxes = torch.cat([center - half, center + half], dim=-1)
-            boxes = torch.where(aug_mask[..., None], jittered_boxes, boxes)
-            boxes = boxes.clamp(0.0, 1.0)
-            min_xy = torch.minimum(boxes[..., :2], boxes[..., 2:])
-            max_xy = torch.maximum(boxes[..., :2], boxes[..., 2:])
-            jittered_boxes = torch.cat([min_xy, max_xy], dim=-1)
-            jittered_size = max_xy - min_xy
-            valid_jittered = aug_mask & (jittered_size > 1.0e-4).all(dim=-1)
-            boxes = torch.where(
-                valid_jittered[..., None],
-                jittered_boxes,
-                original_boxes,
-            )
-
         output_valid = object_valid.clone()
+
+        if self.actor_object_proposal_aug_prob > 0.0:
+            aug_mask = object_valid & (
+                torch.rand(object_valid.shape, device=device, dtype=torch.float32)
+                < self.actor_object_proposal_aug_prob
+            )
+            if aug_mask.any():
+                if self.actor_object_proposal_box_jitter > 0.0:
+                    center = (boxes[..., :2] + boxes[..., 2:]) * 0.5
+                    size = (boxes[..., 2:] - boxes[..., :2]).clamp_min(1.0e-4)
+                    center_noise = (
+                        torch.rand_like(center) * 2.0 - 1.0
+                    ) * size * self.actor_object_proposal_box_jitter
+                    center = center + torch.where(
+                        aug_mask[..., None],
+                        center_noise,
+                        torch.zeros_like(center_noise),
+                    )
+                    if self.actor_object_proposal_scale_jitter > 0.0:
+                        scale_noise = (
+                            torch.rand_like(size) * 2.0 - 1.0
+                        ) * self.actor_object_proposal_scale_jitter
+                        size = size * (1.0 + scale_noise).clamp_min(0.25)
+                    half = size * 0.5
+                    jittered_boxes = torch.cat([center - half, center + half], dim=-1)
+                    boxes = torch.where(aug_mask[..., None], jittered_boxes, boxes)
+                    boxes = boxes.clamp(0.0, 1.0)
+                    min_xy = torch.minimum(boxes[..., :2], boxes[..., 2:])
+                    max_xy = torch.maximum(boxes[..., :2], boxes[..., 2:])
+                    jittered_boxes = torch.cat([min_xy, max_xy], dim=-1)
+                    jittered_size = max_xy - min_xy
+                    valid_jittered = aug_mask & (jittered_size > 1.0e-4).all(dim=-1)
+                    boxes = torch.where(
+                        valid_jittered[..., None],
+                        jittered_boxes,
+                        original_boxes,
+                    )
+                self._log_scalar(
+                    f"{stage}_object_proposal_aug_rate",
+                    aug_mask.float().mean(),
+                    aug_mask.numel(),
+                )
+
         if self.actor_object_proposal_distractor_drop_prob > 0.0:
             teacher_mask = self._teacher_object_slot_mask(
                 target,
@@ -1289,27 +1202,51 @@ class HeatmapModule(pl.LightningModule):
             )
             output_valid = output_valid & ~drop_mask
             confs = confs.masked_fill(drop_mask, 0.0)
-        else:
-            drop_mask = torch.zeros_like(object_valid, dtype=torch.bool)
-
-        self._log_scalar(
-            f"{stage}_object_proposal_aug_rate",
-            aug_mask.float().mean(),
-            aug_mask.numel(),
-        )
-        if self.actor_object_proposal_distractor_drop_prob > 0.0:
             self._log_scalar(
                 f"{stage}_object_proposal_distractor_drop_rate",
                 drop_mask.float().mean(),
                 drop_mask.numel(),
             )
 
+        if self.actor_object_detector_dropout_prob > 0.0:
+            actions = target["actions"].to(device=device, dtype=torch.long)
+            valid = target["valid"].to(device=device, dtype=torch.bool)
+            info = self._exact_teacher_object_info(actions, valid, target, device)
+            if info is not None:
+                exact = info["valid"] & info["known_action"] & info["compatible_from_one_based"]
+                if exact.any():
+                    dropped_target_mask = exact & (
+                        torch.rand(exact.shape, device=device, dtype=torch.float32)
+                        < self.actor_object_detector_dropout_prob
+                    )
+                    if dropped_target_mask.any():
+                        object_classes = object_inputs["object_classes"].to(device=device, dtype=torch.long)
+                        dropped_object_mask = torch.zeros_like(object_valid, dtype=torch.bool)
+                        for action_idx, object_ids in self.action_object_ids_by_index.items():
+                            action_actor_mask = dropped_target_mask & (actions == int(action_idx))
+                            if not action_actor_mask.any():
+                                continue
+                            sample_mask = action_actor_mask.any(dim=1)
+                            object_ids = object_ids.to(device=device, dtype=torch.long)
+                            class_match = (
+                                object_classes.unsqueeze(-1) == object_ids.view(1, 1, -1)
+                            ).any(dim=-1)
+                            dropped_object_mask |= sample_mask[:, None] & object_valid & class_match
+
+                        output_valid = output_valid & ~dropped_object_mask
+                        confs = confs.masked_fill(dropped_object_mask, 0.0)
+                        self._log_scalar(
+                            f"{stage}_object_detector_dropout_rate",
+                            dropped_target_mask.float().mean(),
+                            dropped_target_mask.numel(),
+                        )
+
         return {
             "object_boxes": boxes,
             "object_classes": object_inputs["object_classes"],
             "object_confs": confs,
             "object_valid": output_valid,
-        }
+        }, dropped_target_mask
 
     def _exact_teacher_object_info(self, actions, valid, target, device):
         required = (
@@ -2274,155 +2211,6 @@ class HeatmapModule(pl.LightningModule):
                     outputs[name] = joint_correct[mask].float().detach()
             return outputs
 
-    def _actor_object_detector_dropout_aux(
-        self,
-        imgs,
-        actions,
-        boxes,
-        valid,
-        target,
-        object_inputs,
-        present_preds,
-        loss_fn,
-        stage,
-    ):
-        dropout_batch = self._detector_dropout_object_inputs(
-            actions,
-            valid,
-            target,
-            object_inputs,
-            stage,
-        )
-        if dropout_batch is None:
-            return None, {}
-
-        masked_inputs = dropout_batch["object_inputs"]
-        masked_target = dropout_batch["target"]
-        selected_actor_mask = dropout_batch["selected_actor_mask"]
-        dropped_object_mask = dropout_batch["dropped_object_mask"]
-        data = self.model(
-            imgs,
-            boxes=boxes,
-            valid=valid,
-            action_labels=actions,
-            **self._actor_model_object_inputs(masked_inputs),
-        )
-        dropout_preds, _, _ = self._unpack_model_data(data)
-
-        aux_stage = f"{stage}_object_dropout"
-        selected_count = int(selected_actor_mask.sum().item())
-        self._log_scalar(
-            f"{aux_stage}_actor_rate",
-            selected_actor_mask.float().mean(),
-            selected_actor_mask.numel(),
-        )
-        self._log_count(
-            f"{aux_stage}_actor_count",
-            selected_actor_mask.float().sum(),
-        )
-        self._log_scalar(
-            f"{aux_stage}_object_drop_rate",
-            dropped_object_mask.float().mean(),
-            dropped_object_mask.numel(),
-        )
-        self._log_count(
-            f"{aux_stage}_object_drop_count",
-            dropped_object_mask.float().sum(),
-        )
-        aux_outputs = {}
-        present_margin_loss = None
-        if selected_count > 0:
-            dropout_labels = actions.to(device=dropout_preds.device, dtype=torch.long)
-            dropout_valid = selected_actor_mask.to(
-                device=dropout_preds.device,
-                dtype=torch.bool,
-            )
-            pred_labels = dropout_preds.argmax(dim=-1)
-            action_correct = pred_labels == dropout_labels
-            self._log_scalar(
-                f"{aux_stage}_action_acc",
-                action_correct[dropout_valid].float().mean(),
-                selected_count,
-            )
-            self._log_action_metrics(
-                f"{aux_stage}_action_{{action}}_acc",
-                dropout_preds[dropout_valid],
-                dropout_labels[dropout_valid],
-            )
-            present_probs = F.softmax(present_preds.detach().float(), dim=-1)
-            dropout_probs = F.softmax(dropout_preds.detach().float(), dim=-1)
-            label_idx = dropout_labels.clamp(
-                0,
-                present_probs.shape[-1] - 1,
-            ).unsqueeze(-1)
-            true_prob_gain = (
-                present_probs.gather(-1, label_idx).squeeze(-1)
-                - dropout_probs.gather(-1, label_idx).squeeze(-1)
-            )
-            self._log_scalar(
-                f"{aux_stage}_object_present_true_prob_gain",
-                true_prob_gain[dropout_valid].mean(),
-                selected_count,
-            )
-            present_logits = present_preds.to(device=dropout_preds.device).float()
-            dropout_logits = dropout_preds.detach().float()
-            true_logit_gain = (
-                present_logits.gather(-1, label_idx).squeeze(-1)
-                - dropout_logits.gather(-1, label_idx).squeeze(-1)
-            )
-            self._log_scalar(
-                f"{aux_stage}_object_present_true_logit_gain",
-                true_logit_gain[dropout_valid].mean(),
-                selected_count,
-            )
-            class_indices = torch.arange(
-                present_logits.shape[-1],
-                device=present_logits.device,
-            )
-            other_class_mask = class_indices.view(1, 1, -1) != label_idx
-            floor = torch.finfo(present_logits.dtype).min
-            present_wrong_logit = present_logits.masked_fill(
-                ~other_class_mask,
-                floor,
-            ).amax(dim=-1)
-            dropout_wrong_logit = dropout_logits.masked_fill(
-                ~other_class_mask,
-                floor,
-            ).amax(dim=-1)
-            present_action_margin = (
-                present_logits.gather(-1, label_idx).squeeze(-1) - present_wrong_logit
-            )
-            dropout_action_margin = (
-                dropout_logits.gather(-1, label_idx).squeeze(-1) - dropout_wrong_logit
-            )
-            action_margin_gain = present_action_margin - dropout_action_margin
-            self._log_scalar(
-                f"{aux_stage}_object_present_action_margin_gain",
-                action_margin_gain[dropout_valid].mean(),
-                selected_count,
-            )
-            if (
-                stage.startswith("train")
-                and self.actor_object_present_margin_loss_weight > 0.0
-            ):
-                margin = float(self.actor_object_present_margin)
-                present_margin_loss = F.relu(
-                    action_margin_gain.new_tensor(margin) - action_margin_gain
-                )[dropout_valid].mean()
-                self.log(
-                    f"{aux_stage}_loss_object_present_margin",
-                    present_margin_loss,
-                    on_step=True,
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                    sync_dist=True,
-                )
-            if stage == "val":
-                aux_outputs["object_present_true_prob_gain"] = (
-                    true_prob_gain[dropout_valid].detach()
-                )
-                aux_outputs["object_present_true_logit_gain"] = (
                     true_logit_gain[dropout_valid].detach()
                 )
                 aux_outputs["object_present_action_margin_gain"] = (
@@ -2776,7 +2564,7 @@ class HeatmapModule(pl.LightningModule):
             raise ValueError(f"{stage} actor batch has no valid actor slots")
 
         object_inputs = self._object_inputs_from_target(target, imgs.device)
-        object_inputs = self._augment_object_inputs_for_training(
+        object_inputs, dropped_target_mask = self._augment_object_inputs_for_training(
             object_inputs,
             target,
             stage,
@@ -2801,18 +2589,21 @@ class HeatmapModule(pl.LightningModule):
                 count,
             )
 
-        loss_action = self._action_loss(preds, actions, loss_fn, valid)
-        valid_preds = preds[valid]
-        valid_labels = actions[valid]
-        self.log(
-            f"{stage}_loss_action",
-            loss_action,
-            on_step=is_train,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-            sync_dist=True,
-        )
+        # Mask action loss for main-pass object dropouts to avoid confuser overfit
+        action_ce_mask = valid & ~dropped_target_mask
+        if action_ce_mask.any():
+            loss_action = self._action_loss(preds, actions, loss_fn, action_ce_mask)
+            self.log(
+                f"{stage}_loss_action",
+                loss_action,
+                on_step=is_train,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+        else:
+            loss_action = preds.sum() * 0.0
 
         loss_main_task = loss_action
         if presence_logits is not None:
@@ -2860,24 +2651,6 @@ class HeatmapModule(pl.LightningModule):
         heatmap_aux_terms = []
 
         self._log_token_selection_diagnostics(stage, actions, valid, target)
-        (
-            detector_dropout_loss,
-            detector_dropout_outputs,
-        ) = self._actor_object_detector_dropout_aux(
-            imgs,
-            actions,
-            boxes,
-            valid,
-            target,
-            object_inputs,
-            preds,
-            loss_fn,
-            stage,
-        )
-        if is_train and detector_dropout_loss is not None:
-            loss_main_task = loss_main_task + detector_dropout_loss
-        if detector_dropout_outputs:
-            relation_action_joint_outputs.update(detector_dropout_outputs)
         loss_kp = None
         loss_pose_frobenius = None
         loss_pose_heatmap_optimized = None

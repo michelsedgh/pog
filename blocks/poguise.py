@@ -1214,7 +1214,7 @@ class VisionTransformer(nn.Module):
         actor_object_relation_dim=256,
         actor_object_relation_hidden_dim=512,
         actor_object_relation_max_scale=1.0,
-        actor_object_relation_null_logit_init=4.0,
+        actor_object_relation_null_logit_init=0.5,
         actor_object_relation_logit_scale_init=1.0,
         actor_object_relation_learned_logit_scale=False,
         actor_object_relation_normalize_pointers=False,
