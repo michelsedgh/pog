@@ -2469,11 +2469,12 @@ class HeatmapModule(pl.LightningModule):
         )
         if loss_actor_object_relation is not None:
             loss_main_task = loss_main_task + loss_actor_object_relation
+        margin_valid_mask = valid & ~dropped_target_mask
         loss_actor_object_pair_action_margin = (
             self._actor_object_pair_action_margin_loss(
                 stage,
                 actions,
-                action_ce_mask,
+                margin_valid_mask,
                 target,
             )
         )
