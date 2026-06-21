@@ -2428,8 +2428,8 @@ class HeatmapModule(pl.LightningModule):
                 count,
             )
 
-        # Mask action loss for main-pass object dropouts to avoid confuser overfit
-        action_ce_mask = valid & ~dropped_target_mask
+        # Allow the model to learn "Pose Fallback" through the NULL slot when objects are missing
+        action_ce_mask = valid
         if action_ce_mask.any():
             loss_action = self._action_loss(preds, actions, loss_fn, action_ce_mask)
             self.log(
