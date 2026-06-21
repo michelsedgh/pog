@@ -2864,6 +2864,10 @@ class HeatmapModule(pl.LightningModule):
                 elif kp_loss_weight > 0.0:
                     loss = loss + loss_kp * kp_loss_weight
 
+        valid_mask = valid.to(device=preds.device, dtype=torch.bool)
+        valid_preds = preds[valid_mask]
+        valid_labels = actions.to(device=preds.device, dtype=torch.long)[valid_mask]
+
         return (
             loss,
             valid_preds,
