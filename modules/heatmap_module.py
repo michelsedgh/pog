@@ -2473,7 +2473,7 @@ class HeatmapModule(pl.LightningModule):
             self._actor_object_pair_action_margin_loss(
                 stage,
                 actions,
-                valid,
+                action_ce_mask,
                 target,
             )
         )
