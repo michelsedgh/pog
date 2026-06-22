@@ -86,7 +86,7 @@ class HeatmapModule(pl.LightningModule):
         self.actor_object_region_visual_tokens = bool(
             hparams.get("actor_object_region_visual_tokens", 0)
         )
-
+        self.uses_object_proposals = self.actor_object_prompt_tokens
         self.actor_poguiseplus_loss = self.actor_prompt and self.actor_interaction_heatmaps
         self.poguiseplus_heatmap_loss_weight = float(
             hparams.get("poguiseplus_heatmap_loss_weight", 1.0)
