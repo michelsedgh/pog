@@ -280,17 +280,6 @@ class POGUISE(pl.LightningModule):
             raise ValueError(
                 "actor_object_relation_in_transformer requires actor_object_prompt_tokens"
             )
-        if self.actor_object_relation_in_transformer and not self.actor_object_pair_action_head_enabled:
-            raise ValueError(
-                "actor_object_relation_in_transformer requires "
-                "actor_object_pair_action_head so relation pointers and action "
-                "classification are optimized through the same actor-object pairs."
-            )
-        if self.actor_object_pair_action_head_enabled and not self.actor_object_relation_in_transformer:
-            raise ValueError(
-                "actor_object_pair_action_head requires "
-                "actor_object_relation_in_transformer"
-            )
         if self.actor_interaction_heatmaps and not self.actor_prompt:
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
         if self.actor_object_relation_in_transformer and not self.actor_interaction_heatmaps:
@@ -306,7 +295,6 @@ class POGUISE(pl.LightningModule):
                 "semantics come from relation-only runtime object memory."
             )
         self.use_register_tokens = bool(self.hparams.get("use_register_tokens", 0))
-        self._register_actor_object_action_buffers()
         self._create_network()
         # freeze backbone if specified
         if self.hparams.freeze_backbone:
@@ -327,85 +315,6 @@ class POGUISE(pl.LightningModule):
                 f"First stale keys: {preview}"
             )
         return result
-
-    def _register_actor_object_action_buffers(self):
-        num_classes = int(self.hparams.get("num_classes", 0))
-        num_object_classes = int(
-            self.hparams.get("num_object_classes", NUM_OBJECT_CLASSES)
-        )
-        action_object_mask = torch.zeros(
-            num_classes,
-            num_object_classes,
-            dtype=torch.bool,
-        )
-        action_has_object = torch.zeros(num_classes, dtype=torch.bool)
-        if not self.actor_object_pair_action_head_enabled:
-            self.register_buffer(
-                "actor_object_action_mask",
-                action_object_mask,
-                persistent=False,
-            )
-            self.register_buffer(
-                "actor_object_action_has_object",
-                action_has_object,
-                persistent=False,
-            )
-            return
-
-        task_type = self.hparams.get("task_type", "CS")
-        action_taxonomy = self.hparams.get("toyota_action_taxonomy", "toyota_31")
-        action_names = toyota_action_names(task_type, action_taxonomy)
-        if len(action_names) != num_classes:
-            raise ValueError(
-                "actor_object_pair_action_head needs the Toyota action taxonomy "
-                f"to match num_classes. Got {len(action_names)} action names for "
-                f"num_classes={num_classes}."
-            )
-        action_to_index = {name: index for index, name in enumerate(action_names)}
-        action_object_map = toyota_action_object_map(task_type, action_taxonomy)
-        if not action_object_map:
-            raise ValueError(
-                "actor_object_pair_action_head requires a non-empty Toyota "
-                "action-to-object map."
-            )
-
-        missing_objects = []
-        mapped_actions = 0
-        for action_name, object_names in action_object_map.items():
-            action_idx = action_to_index.get(action_name)
-            if action_idx is None:
-                continue
-            for object_name in object_names:
-                object_idx = OBJECT_TO_ID.get(object_name)
-                if object_idx is None or object_idx >= num_object_classes:
-                    missing_objects.append(object_name)
-                    continue
-                action_object_mask[int(action_idx), int(object_idx)] = True
-            if action_object_mask[int(action_idx)].any():
-                action_has_object[int(action_idx)] = True
-                mapped_actions += 1
-        if missing_objects:
-            names = ", ".join(sorted(set(missing_objects)))
-            raise ValueError(
-                "actor_object_pair_action_head found Toyota action-object names "
-                f"missing from object_vocab: {names}"
-            )
-        if mapped_actions == 0:
-            raise ValueError(
-                "actor_object_pair_action_head built zero mapped object actions. "
-                "Check --toyota_action_taxonomy and --num_object_classes."
-            )
-
-        self.register_buffer(
-            "actor_object_action_mask",
-            action_object_mask,
-            persistent=False,
-        )
-        self.register_buffer(
-            "actor_object_action_has_object",
-            action_has_object,
-            persistent=False,
-        )
 
     def _create_network(self):
         n_registers = (
@@ -654,32 +563,10 @@ class POGUISE(pl.LightningModule):
         self.net.head = nn.Identity(self.net.num_features, self.net.num_features)
         self.head = nn.Linear(self.net.num_features, self.hparams.num_classes)
         if self.actor_prompt:
-            self.actor_head = None
-            self.actor_object_null_pair_token = None
-            self.actor_object_pair_action_head = None
-            if self.actor_object_pair_action_head_enabled:
-                feature_dim = int(self.net.num_features)
-                pair_dim = feature_dim * 3 + 1
-                hidden_dim = self.actor_object_pair_action_hidden_dim or feature_dim
-                self.actor_object_null_pair_token = nn.Parameter(
-                    torch.zeros(1, 1, 1, feature_dim)
-                )
-                self.actor_object_pair_action_head = nn.Sequential(
-                    nn.LayerNorm(pair_dim),
-                    nn.Linear(pair_dim, hidden_dim),
-                    nn.GELU(),
-                    nn.Linear(hidden_dim, self.hparams.num_classes),
-                )
-                nn.init.trunc_normal_(
-                    self.actor_object_pair_action_head[-1].weight,
-                    std=self.actor_object_pair_action_init_scale,
-                )
-                nn.init.zeros_(self.actor_object_pair_action_head[-1].bias)
-            else:
-                self.actor_head = nn.Linear(
-                    self.net.num_features,
-                    self.hparams.num_classes,
-                )
+            self.actor_head = nn.Linear(
+                self.net.num_features,
+                self.hparams.num_classes,
+            )
             self.presence_head = (
                 nn.Linear(self.net.num_features, 1)
                 if self.hparams.get("actor_presence_head", 0)
@@ -715,11 +602,6 @@ class POGUISE(pl.LightningModule):
             if self.actor_head is not None:
                 for param in self.actor_head.parameters():
                     param.requires_grad = True
-            if self.actor_object_pair_action_head is not None:
-                for param in self.actor_object_pair_action_head.parameters():
-                    param.requires_grad = True
-            if self.actor_object_null_pair_token is not None:
-                self.actor_object_null_pair_token.requires_grad = True
             if hasattr(self.net, "actor_token"):
                 self.net.actor_token.requires_grad = True
             if hasattr(self.net, "actor_slot_embed"):
@@ -863,59 +745,6 @@ class POGUISE(pl.LightningModule):
             feature_dim,
         )
         pair_tokens = torch.cat([null_token, object_pair_tokens], dim=2)
-        actor_tokens = x_actor[:, :, None, :].expand(
-            batch_size,
-            num_actors,
-            num_pairs,
-            feature_dim,
-        )
-        relation_log_probs = F.log_softmax(relation_logits.float(), dim=-1)
-        valid_pair = torch.cat(
-            [
-                torch.ones(
-                    batch_size,
-                    num_actors,
-                    1,
-                    device=x_actor.device,
-                    dtype=x_actor.dtype,
-                ),
-                object_valid.to(device=x_actor.device, dtype=x_actor.dtype)[
-                    :, None, :
-                ].expand(batch_size, num_actors, num_objects),
-            ],
-            dim=2,
-        )
-        pair_features = torch.cat(
-            [
-                actor_tokens,
-                pair_tokens,
-                actor_tokens * pair_tokens,
-                valid_pair.unsqueeze(-1),
-            ],
-            dim=-1,
-        )
-        pair_logits = self.actor_object_pair_action_head(pair_features).float()
-        pair_scores = pair_logits + relation_log_probs.unsqueeze(-1)
-        allowed = self._actor_object_pair_allowed_mask(
-            object_classes.to(device=x_actor.device, dtype=torch.long),
-            object_valid.to(device=x_actor.device, dtype=torch.bool),
-            actor_valid,
-            num_actors,
-            num_pairs,
-            num_actions,
-        )
-        masked_pair_logits = pair_logits.masked_fill(~allowed, -1.0e4)
-        pair_action_probs = F.softmax(masked_pair_logits, dim=-1)
-        relation_probs = torch.exp(relation_log_probs)
-        action_probs = torch.sum(pair_action_probs * relation_probs.unsqueeze(-1), dim=2)
-        action_scores = torch.log(action_probs.clamp_min(1e-6))
-
-        self.last_actor_object_pair_action_logits = pair_logits
-        self.last_actor_object_pair_action_scores = pair_scores
-        self.last_actor_object_pair_action_allowed = allowed
-        self.last_actor_object_pair_action_log_probs = relation_log_probs
-        return action_scores.to(dtype=x_actor.dtype)
-
     def forward(
         self,
         x,
@@ -971,82 +800,11 @@ class POGUISE(pl.LightningModule):
                 x_visual_final = None
                 x_object_prompt = None
             self.last_actor_tokens = x_actor
-            self.last_actor_object_prompt_classes = None
-            self.last_actor_object_prompt_tokens = None
-            self.last_actor_object_prompt_valid = None
-            self.last_actor_object_relation_context = None
-            self.last_actor_object_relation_mass = None
-            self.last_actor_object_pair_action_logits = None
-            self.last_actor_object_pair_action_scores = None
-            self.last_actor_object_pair_action_allowed = None
-            self.last_actor_object_pair_action_log_probs = None
-            self.last_actor_action_tokens = None
-            self.last_actor_object_relation_aux = getattr(
-                self.net,
-                "last_actor_object_relation_aux",
-                {},
-            )
-            self.last_actor_object_region_visual_norm = getattr(
-                self.net,
-                "last_object_region_visual_norm",
-                None,
-            )
-            if self.hparams.ret_feat:
-                return x_actor
-
-            prompt_valid = None
-            if (
-                self.actor_object_prompt_tokens_enabled
-                and x_object_prompt is not None
-                and object_valid is not None
-            ):
-                prompt_valid = object_valid.to(
-                    device=x_object_prompt.device,
-                    dtype=torch.bool,
-                )
-                if object_classes is not None:
-                    none_id = int(self.hparams.get("num_object_classes", 19))
-                    prompt_classes = object_classes.to(
-                        device=x_object_prompt.device,
-                        dtype=torch.long,
-                    )
-                    prompt_classes = torch.where(
-                        prompt_valid,
-                        prompt_classes.clamp(0, none_id),
-                        torch.full_like(prompt_classes, none_id),
-                    )
-                    self.last_actor_object_prompt_classes = prompt_classes
-                    self.last_actor_object_prompt_tokens = x_object_prompt
-                    self.last_actor_object_prompt_valid = prompt_valid
             x_action = x_actor
             self.last_actor_action_tokens = x_action
-            if self.actor_object_pair_action_head is not None:
-                if not self.last_actor_object_relation_aux:
-                    raise RuntimeError(
-                        "actor_object_pair_action_head requires relation logits"
-                    )
-                last_block = sorted(
-                    self.last_actor_object_relation_aux.keys(),
-                    key=lambda value: int(value),
-                )[-1]
-                last_relation_aux = self.last_actor_object_relation_aux[last_block]
-                relation_logits = last_relation_aux.get("logits")
-                if relation_logits is None:
-                    raise RuntimeError(
-                        "actor_object_pair_action_head requires final relation logits"
-                    )
-                action_scores = self._actor_object_pair_action_scores(
-                    x_actor,
-                    relation_logits.to(device=x_actor.device),
-                    x_object_prompt,
-                    self.last_actor_object_prompt_classes,
-                    prompt_valid,
-                    valid,
-                )
-            else:
-                if self.actor_head is None:
-                    raise RuntimeError("actor_head is not initialized")
-                action_scores = self.actor_head(x_action)
+            if self.actor_head is None:
+                raise RuntimeError("actor_head is not initialized")
+            action_scores = self.actor_head(x_action)
             self.last_actor_action_logits = action_scores
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)

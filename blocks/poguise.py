@@ -1439,51 +1439,8 @@ class VisionTransformer(nn.Module):
                 for i in range(depth)
             ]
         )
-        if self.actor_object_relation_in_transformer:
-            self.actor_object_relation_updates = nn.ModuleDict(
-                {
-                    str(block_idx): ActorObjectRelationUpdate(
-                        embed_dim,
-                        relation_dim=self.actor_object_relation_dim,
-                        hidden_dim=self.actor_object_relation_hidden_dim,
-                        max_scale=self.actor_object_relation_max_scale,
-                        null_logit_init=self.actor_object_relation_null_logit_init,
-                        relation_logit_scale_init=(
-                            self.actor_object_relation_logit_scale_init
-                        ),
-                        learned_relation_logit_scale=(
-                            self.actor_object_relation_learned_logit_scale
-                        ),
-                        normalize_relation_pointers=(
-                            self.actor_object_relation_normalize_pointers
-                        ),
-                        learned_scale=self.actor_object_relation_learned_scale,
-                        layer_scale_init=self.actor_object_relation_layer_scale_init,
-                    )
-                    for block_idx in self.actor_object_relation_blocks
-                }
-            )
-            self.actor_object_final_relation_update = ActorObjectRelationUpdate(
-                embed_dim,
-                relation_dim=self.actor_object_relation_dim,
-                hidden_dim=self.actor_object_relation_hidden_dim,
-                max_scale=self.actor_object_relation_max_scale,
-                null_logit_init=self.actor_object_relation_null_logit_init,
-                relation_logit_scale_init=(
-                    self.actor_object_relation_logit_scale_init
-                ),
-                learned_relation_logit_scale=(
-                    self.actor_object_relation_learned_logit_scale
-                ),
-                normalize_relation_pointers=(
-                    self.actor_object_relation_normalize_pointers
-                ),
-                learned_scale=self.actor_object_relation_learned_scale,
-                layer_scale_init=self.actor_object_relation_layer_scale_init,
-            )
-        else:
-            self.actor_object_relation_updates = nn.ModuleDict()
-            self.actor_object_final_relation_update = None
+        self.actor_object_relation_updates = nn.ModuleDict()
+        self.actor_object_final_relation_update = None
         self.norm = nn.Identity() if use_mean_pooling else norm_layer(embed_dim)
         self.fc_norm = norm_layer(embed_dim) if use_mean_pooling else None
         self.head_dropout = nn.Dropout(head_drop_rate)
@@ -1899,6 +1856,8 @@ class VisionTransformer(nn.Module):
             )
             object_tokens = object_tokens + object_region_tokens
             object_memory_tokens = object_tokens
+            prefix_tokens.append(object_tokens)
+            prefix_key_masks.append(~object_valid)
         if self.n_heatmap_out_channels > 0:
             prefix_tokens.append(self.heatmap_tokens.expand(B, -1, -1))
             prefix_key_masks.append(
@@ -1943,24 +1902,6 @@ class VisionTransformer(nn.Module):
                 bbox_token_prior=bbox_token_prior,
                 key_padding_mask=token_key_padding_mask,
             )
-            if self.actor_object_relation_in_transformer and i in self.actor_object_relation_blocks:
-                actor_tokens = x[:, actor_start:actor_end, :]
-                object_tokens = object_memory_tokens
-                actor_tokens, relation_aux = self.actor_object_relation_updates[str(i)](
-                    actor_tokens,
-                    object_tokens,
-                    valid,
-                    object_valid,
-                )
-                x = torch.cat(
-                    [
-                        x[:, :actor_start, :],
-                        actor_tokens,
-                        x[:, actor_end:, :],
-                    ],
-                    dim=1,
-                )
-                self.last_actor_object_relation_aux[str(i)] = relation_aux
 
         selected_mask = torch.zeros(B, N, dtype=torch.bool, device=x.device)
         if idx is not None and idx.numel() > 0:
@@ -2009,19 +1950,6 @@ class VisionTransformer(nn.Module):
                 x_object = self.norm(x_object)
             if x_visual is not None:
                 x_visual = self.norm(x_visual)
-        if (
-            self.actor_object_final_relation_update is not None
-            and self.actor_object_relation_in_transformer
-            and self.n_actor_tokens > 0
-            and x_object is not None
-        ):
-            x_actor, relation_aux = self.actor_object_final_relation_update(
-                x_actor,
-                x_object,
-                valid,
-                object_valid,
-            )
-            self.last_actor_object_relation_aux[str(self.depth)] = relation_aux
         x_class = self.head_dropout(x_class)
         x_class = self.head(x_class)
         if self.n_actor_tokens > 0:

@@ -1598,284 +1598,10 @@ class HeatmapModule(pl.LightningModule):
             )
 
     def _actor_object_relation_loss(self, stage, actions, valid, target):
-        is_train = stage.startswith("train")
-        if (
-            not self.actor_object_relation_in_transformer
-            or self.actor_object_relation_loss_weight <= 0
-        ):
-            return None
-        relation_aux = getattr(self.model, "last_actor_object_relation_aux", None)
-        if not relation_aux:
-            return None
-        last_block_name = sorted(relation_aux.keys(), key=lambda value: int(value))[-1]
-        relation_logit_scale = relation_aux[last_block_name].get("relation_logit_scale")
-        if relation_logit_scale is not None:
-            self._log_scalar(
-                f"{stage}_relation_logit_scale",
-                relation_logit_scale.float(),
-                1,
-            )
-        object_region_norm = getattr(
-            self.model,
-            "last_actor_object_region_visual_norm",
-            None,
-        )
-        if object_region_norm is not None:
-            target_valid = target.get("object_valid")
-            if target_valid is not None:
-                valid_object_norm = object_region_norm.to(
-                    device=target_valid.device,
-                    dtype=torch.float32,
-                )[target_valid.bool()]
-                if valid_object_norm.numel() > 0:
-                    self._log_scalar(
-                        f"{stage}_object_region_visual_feature_norm",
-                        valid_object_norm.mean(),
-                        int(valid_object_norm.numel()),
-                    )
-
-        first_aux = next(iter(relation_aux.values()))
-        logits0 = first_aux.get("logits")
-        if logits0 is None:
-            return None
-        device = logits0.device
-        info = self._exact_teacher_object_info(actions, valid, target, device)
-        if info is None:
-            return None
-
-        actions = actions.to(device=device, dtype=torch.long)
-        valid = valid.to(device=device, dtype=torch.bool)
-        objectless = self._labels_in_indices(actions, self.objectless_action_indices)
-        objectless = valid & objectless
-        known_objectful = info["valid"] & info["known_action"]
-        exact_compatible = known_objectful & info["compatible_from_one_based"]
-        missing_compatible = known_objectful & ~info["any_compatible"]
-
-        target_index = torch.zeros_like(actions, dtype=torch.long, device=device)
-        selected_index = info["selected_indices"].to(device=device, dtype=torch.long)
-        max_object_index = int(logits0.shape[-1]) - 1
-        target_index[exact_compatible] = selected_index[exact_compatible].clamp(
-            1,
-            max_object_index,
-        )
-
-        null_weight = self.actor_object_relation_null_loss_weight
-        null_supervised = missing_compatible | objectless
-        supervised = exact_compatible | (null_supervised & (null_weight > 0))
-        if not supervised.any():
-            return None
-
-        losses = []
-        for block_name, aux in relation_aux.items():
-            logits = aux.get("logits")
-            if logits is None:
-                continue
-            if logits.shape[:2] != target_index.shape:
-                raise RuntimeError(
-                    "actor-object relation logits shape mismatch: "
-                    f"{tuple(logits.shape[:2])} vs {tuple(target_index.shape)}"
-                )
-            per_item = F.cross_entropy(
-                logits.float().reshape(-1, logits.shape[-1]),
-                target_index.reshape(-1),
-                reduction="none",
-            ).reshape_as(target_index)
-
-            block_components = []
-            block_weights = []
-            exact_loss = None
-            if exact_compatible.any():
-                exact_loss = per_item[exact_compatible].mean()
-                block_components.append(exact_loss)
-                block_weights.append(per_item.new_tensor(1.0))
-
-            null_loss = None
-            if null_supervised.any() and null_weight > 0:
-                null_parts = []
-                if missing_compatible.any():
-                    null_parts.append(per_item[missing_compatible].mean())
-                if objectless.any():
-                    null_parts.append(per_item[objectless].mean())
-                if null_parts:
-                    null_loss = torch.stack(null_parts).mean()
-                    block_components.append(null_loss * null_weight)
-                    block_weights.append(per_item.new_tensor(null_weight))
-
-            if not block_components:
-                continue
-            block_loss = torch.stack(block_components).sum() / torch.stack(
-                block_weights
-            ).sum().clamp_min(1e-6)
-            losses.append(block_loss)
-            self.log(
-                f"{stage}_loss_actor_object_relation_block_{block_name}",
-                block_loss,
-                on_step=is_train,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-                sync_dist=True,
-            )
-            if exact_loss is not None:
-                self.log(
-                    f"{stage}_loss_actor_object_relation_exact_block_{block_name}",
-                    exact_loss,
-                    on_step=is_train,
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                    sync_dist=True,
-                )
-            if null_loss is not None:
-                self.log(
-                    f"{stage}_loss_actor_object_relation_null_block_{block_name}",
-                    null_loss,
-                    on_step=is_train,
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                    sync_dist=True,
-                )
-
-        if not losses:
-            return None
-
-        loss = torch.stack(losses).mean()
-        weighted_loss = loss * self.actor_object_relation_loss_weight
-        self.log(
-            f"{stage}_loss_actor_object_relation",
-            loss,
-            on_step=is_train,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-            sync_dist=True,
-        )
-        self._log_actor_object_relation_metrics(
-            stage,
-            relation_aux,
-            target_index,
-            exact_compatible,
-            missing_compatible,
-            objectless,
-            info,
-        )
-        return weighted_loss
+        return None
 
     def _actor_object_pair_action_margin_loss(self, stage, actions, valid, target):
-        if not self.actor_object_pair_action_head:
-            return None
-        pair_scores = getattr(self.model, "last_actor_object_pair_action_scores", None)
-        pair_allowed = getattr(self.model, "last_actor_object_pair_action_allowed", None)
-        if pair_scores is None or pair_allowed is None:
-            return None
-        if pair_scores.ndim != 4:
-            raise RuntimeError(
-                "pair action scores must have shape [B,A,P,C], got "
-                f"{tuple(pair_scores.shape)}"
-            )
-
-        device = pair_scores.device
-        actions = actions.to(device=device, dtype=torch.long)
-        valid = valid.to(device=device, dtype=torch.bool)
-        pair_scores = pair_scores.float()
-        pair_allowed = pair_allowed.to(device=device, dtype=torch.bool)
-        info = self._exact_teacher_object_info(actions, valid, target, device)
-        if info is None:
-            return None
-
-        objectless = self._labels_in_indices(actions, self.objectless_action_indices)
-        objectless = info["valid"] & objectless
-        known_objectful = info["valid"] & info["known_action"]
-        exact_compatible = known_objectful & info["compatible_from_one_based"]
-        missing_compatible = known_objectful & ~info["any_compatible"]
-        supervised = exact_compatible | objectless | missing_compatible
-        supervised = supervised & (actions >= 0) & (actions < pair_scores.shape[-1])
-        if not supervised.any():
-            return None
-
-        num_pairs = int(pair_scores.shape[2])
-        target_pair = torch.zeros_like(actions, dtype=torch.long, device=device)
-        selected_index = info["selected_indices"].to(device=device, dtype=torch.long)
-        if num_pairs > 1:
-            target_pair[exact_compatible] = selected_index[exact_compatible].clamp(
-                1,
-                num_pairs - 1,
-            )
-
-        scores_s = pair_scores[supervised]
-        allowed_s = pair_allowed[supervised]
-        labels_s = actions[supervised]
-        pair_s = target_pair[supervised].clamp(0, num_pairs - 1)
-        rows = torch.arange(scores_s.shape[0], device=device)
-        target_allowed = allowed_s[rows, pair_s, labels_s]
-        if not bool(target_allowed.any()):
-            return None
-        # Filter to only actors whose target pair/action is in the allowed mask.
-        # Object dropout can legitimately remove the target slot, making it disallowed.
-        if not bool(target_allowed.all()):
-            keep = target_allowed
-            scores_s = scores_s[keep]
-            allowed_s = allowed_s[keep]
-            labels_s = labels_s[keep]
-            pair_s = pair_s[keep]
-            rows = torch.arange(scores_s.shape[0], device=device)
-
-        true_scores = scores_s[rows, pair_s, labels_s]
-        wrong_scores = scores_s.masked_fill(~allowed_s, -1.0e4).clone()
-        wrong_scores[rows, pair_s, labels_s] = -1.0e4
-        max_wrong = wrong_scores.reshape(scores_s.shape[0], -1).amax(dim=-1)
-        usable = max_wrong > -9999.0
-        if not usable.any():
-            return None
-
-        margins = true_scores[usable] - max_wrong[usable]
-        count = int(margins.numel())
-        self._log_scalar(
-            f"{stage}_actor_object_pair_action_margin",
-            margins.mean(),
-            count,
-        )
-        self._log_scalar(
-            f"{stage}_actor_object_pair_action_margin_win_rate",
-            (margins > 0).float().mean(),
-            count,
-        )
-        uselaptop_idx = self._action_index("Uselaptop")
-        if uselaptop_idx is not None:
-            labels_usable = labels_s[usable]
-            uselaptop_mask = labels_usable == int(uselaptop_idx)
-            if uselaptop_mask.any():
-                uselaptop_count = int(uselaptop_mask.sum().item())
-                self._log_scalar(
-                    f"{stage}_actor_object_pair_action_Uselaptop_margin",
-                    margins[uselaptop_mask].mean(),
-                    uselaptop_count,
-                )
-                self._log_scalar(
-                    f"{stage}_actor_object_pair_action_Uselaptop_margin_win_rate",
-                    (margins[uselaptop_mask] > 0).float().mean(),
-                    uselaptop_count,
-                )
-
-        if (
-            not stage.startswith("train")
-            or self.actor_object_pair_action_margin_loss_weight <= 0.0
-        ):
-            return None
-
-        margin_target = margins.new_tensor(float(self.actor_object_pair_action_margin))
-        loss = F.relu(margin_target - margins).mean()
-        self.log(
-            f"{stage}_loss_actor_object_pair_action_margin",
-            loss,
-            on_step=True,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-            sync_dist=True,
-        )
-        return loss * self.actor_object_pair_action_margin_loss_weight
+        return None
 
     def _log_actor_object_relation_metrics(
         self,
@@ -1979,244 +1705,10 @@ class HeatmapModule(pl.LightningModule):
                     )
 
     def _relation_action_joint_info(self, preds, actions, valid, target):
-        if not self.actor_object_relation_in_transformer:
-            return None
-        relation_aux = getattr(self.model, "last_actor_object_relation_aux", None)
-        if not relation_aux:
-            return None
-        last_aux = relation_aux[sorted(relation_aux.keys(), key=lambda x: int(x))[-1]]
-        relation_logits = last_aux.get("logits")
-        if relation_logits is None:
-            return None
-
-        device = relation_logits.device
-        actions = actions.to(device=device, dtype=torch.long)
-        valid = valid.to(device=device, dtype=torch.bool)
-        preds = preds.to(device=device)
-        if relation_logits.shape[:2] != actions.shape:
-            raise RuntimeError(
-                "actor-object relation logits shape mismatch for joint metrics: "
-                f"{tuple(relation_logits.shape[:2])} vs {tuple(actions.shape)}"
-            )
-        if preds.shape[:2] != actions.shape:
-            raise RuntimeError(
-                "action logits shape mismatch for joint relation-action metrics: "
-                f"{tuple(preds.shape[:2])} vs {tuple(actions.shape)}"
-            )
-
-        info = self._exact_teacher_object_info(actions, valid, target, device)
-        if info is None:
-            return None
-
-        objectless = self._labels_in_indices(actions, self.objectless_action_indices)
-        objectless = info["valid"] & objectless
-        known_objectful = info["valid"] & info["known_action"]
-        exact_compatible = known_objectful & info["compatible_from_one_based"]
-        missing_compatible = known_objectful & ~info["any_compatible"]
-
-        target_index = torch.zeros_like(actions, dtype=torch.long, device=device)
-        selected_index = info["selected_indices"].to(device=device, dtype=torch.long)
-        max_object_index = int(relation_logits.shape[-1]) - 1
-        target_index[exact_compatible] = selected_index[exact_compatible].clamp(
-            1,
-            max_object_index,
-        )
-
-        relation_pred = relation_logits.argmax(dim=-1)
-        action_pred = preds.argmax(dim=-1)
-        action_correct = info["valid"] & (action_pred == actions)
-        relation_goal_correct = torch.zeros_like(info["valid"], dtype=torch.bool)
-        relation_goal_correct[exact_compatible] = (
-            relation_pred[exact_compatible] == target_index[exact_compatible]
-        )
-        null_supervised = objectless | missing_compatible
-        relation_goal_correct[null_supervised] = relation_pred[null_supervised] == 0
-        supervised = exact_compatible | null_supervised
-        joint_correct = action_correct & relation_goal_correct
-
-        return {
-            "actions": actions,
-            "action_logits": preds,
-            "action_correct": action_correct,
-            "relation_goal_correct": relation_goal_correct,
-            "joint_correct": joint_correct,
-            "supervised": supervised,
-            "exact_compatible": exact_compatible,
-            "objectless": objectless,
-            "missing_compatible": missing_compatible,
-        }
+        return None
 
     def _log_relation_action_joint_metrics(self, stage, preds, actions, valid, target):
-        info = self._relation_action_joint_info(preds, actions, valid, target)
-        if info is None:
-            return {}
-
-        def log_masked(name, values, mask):
-            if not mask.any():
-                return
-            count = int(mask.sum().item())
-            self._log_scalar(name, values[mask].float().mean(), count)
-            self._log_count(f"{name}_count", mask.float().sum())
-
-        with torch.no_grad():
-            joint_correct = info["joint_correct"]
-            action_correct = info["action_correct"]
-            relation_correct = info["relation_goal_correct"]
-            supervised = info["supervised"]
-            exact = info["exact_compatible"]
-            objectless = info["objectless"]
-            missing = info["missing_compatible"]
-
-            log_masked(
-                f"{stage}_relation_action_joint_acc",
-                joint_correct,
-                supervised,
-            )
-            log_masked(
-                f"{stage}_relation_action_joint_exact_acc",
-                joint_correct,
-                exact,
-            )
-            log_masked(
-                f"{stage}_relation_action_joint_objectless_acc",
-                joint_correct,
-                objectless,
-            )
-            log_masked(
-                f"{stage}_relation_action_joint_missing_objectful_acc",
-                joint_correct,
-                missing,
-            )
-
-            relation_correct_action_wrong = relation_correct & ~action_correct
-            action_correct_relation_wrong = action_correct & ~relation_correct
-            log_masked(
-                f"{stage}_relation_correct_action_wrong_exact_rate",
-                relation_correct_action_wrong,
-                exact,
-            )
-            log_masked(
-                f"{stage}_action_correct_relation_wrong_exact_rate",
-                action_correct_relation_wrong,
-                exact,
-            )
-            relation_correct_exact = exact & relation_correct
-            action_correct_exact = exact & action_correct
-            log_masked(
-                f"{stage}_action_acc_when_relation_exact",
-                action_correct,
-                relation_correct_exact,
-            )
-            log_masked(
-                f"{stage}_relation_exact_when_action_correct",
-                relation_correct,
-                action_correct_exact,
-            )
-
-            actions = info["actions"]
-            for action_name in RELATION_ACTION_AUDIT_ACTIONS:
-                action_idx = self._action_index(action_name)
-                if action_idx is None:
-                    continue
-                action_mask = exact & (actions == int(action_idx))
-                missing_action_mask = missing & (actions == int(action_idx))
-                safe_name = action_name.replace(".", "_")
-                log_masked(
-                    f"{stage}_relation_action_joint_{safe_name}_acc",
-                    joint_correct,
-                    action_mask,
-                )
-                log_masked(
-                    f"{stage}_relation_correct_action_wrong_{safe_name}_rate",
-                    relation_correct_action_wrong,
-                    action_mask,
-                )
-                log_masked(
-                    f"{stage}_relation_action_joint_missing_{safe_name}_acc",
-                    joint_correct,
-                    missing_action_mask,
-                )
-                log_masked(
-                    f"{stage}_relation_correct_action_wrong_missing_{safe_name}_rate",
-                    relation_correct_action_wrong,
-                    missing_action_mask,
-                )
-
-            uselaptop_idx = self._action_index("Uselaptop")
-            if uselaptop_idx is not None:
-                confuser_indices = [
-                    self._action_index(action_name)
-                    for action_name in RELATION_ACTION_AUDIT_ACTIONS
-                    if action_name != "Uselaptop"
-                ]
-                confuser_indices = [
-                    int(index) for index in confuser_indices if index is not None
-                ]
-                uselaptop_mask = exact & (actions == int(uselaptop_idx))
-                uselaptop_missing_mask = missing & (actions == int(uselaptop_idx))
-                if confuser_indices and uselaptop_mask.any():
-                    action_logits = info["action_logits"].float()
-                    true_logit = action_logits[..., int(uselaptop_idx)]
-                    confuser_tensor = torch.tensor(
-                        confuser_indices,
-                        device=action_logits.device,
-                        dtype=torch.long,
-                    )
-                    confuser_logit = action_logits.index_select(
-                        -1,
-                        confuser_tensor,
-                    ).amax(dim=-1)
-                    margin = true_logit - confuser_logit
-                    count = int(uselaptop_mask.sum().item())
-                    self._log_scalar(
-                        f"{stage}_action_Uselaptop_object_confuser_margin",
-                        margin[uselaptop_mask].mean(),
-                        count,
-                    )
-                    self._log_scalar(
-                        f"{stage}_action_Uselaptop_object_confuser_win_rate",
-                        (margin[uselaptop_mask] > 0).float().mean(),
-                        count,
-                    )
-                if confuser_indices and uselaptop_missing_mask.any():
-                    action_logits = info["action_logits"].float()
-                    true_logit = action_logits[..., int(uselaptop_idx)]
-                    confuser_tensor = torch.tensor(
-                        confuser_indices,
-                        device=action_logits.device,
-                        dtype=torch.long,
-                    )
-                    confuser_logit = action_logits.index_select(
-                        -1,
-                        confuser_tensor,
-                    ).amax(dim=-1)
-                    margin = true_logit - confuser_logit
-                    count = int(uselaptop_missing_mask.sum().item())
-                    self._log_scalar(
-                        f"{stage}_action_Uselaptop_missing_object_confuser_margin",
-                        margin[uselaptop_missing_mask].mean(),
-                        count,
-                    )
-                    self._log_scalar(
-                        f"{stage}_action_Uselaptop_missing_object_confuser_win_rate",
-                        (margin[uselaptop_missing_mask] > 0).float().mean(),
-                        count,
-                    )
-
-            if not stage.startswith("val"):
-                return {}
-            outputs = {}
-            for name, mask in (
-                ("relation_action_joint", supervised),
-                ("relation_action_joint_exact", exact),
-                ("relation_action_joint_objectless", objectless),
-                ("relation_action_joint_missing_objectful", missing),
-            ):
-                if mask.any():
-                    outputs[name] = joint_correct[mask].float().detach()
-            return outputs
-
-
+        return None
 
     def _append_nash_mtl_params(self, params):
         if not (
@@ -2466,32 +1958,6 @@ class HeatmapModule(pl.LightningModule):
                 logger=True,
                 sync_dist=True,
             )
-        loss_actor_object_relation = self._actor_object_relation_loss(
-            stage,
-            actions,
-            valid,
-            target,
-        )
-        if loss_actor_object_relation is not None:
-            loss_main_task = loss_main_task + loss_actor_object_relation
-        margin_valid_mask = valid & ~dropped_target_mask
-        loss_actor_object_pair_action_margin = (
-            self._actor_object_pair_action_margin_loss(
-                stage,
-                actions,
-                margin_valid_mask,
-                target,
-            )
-        )
-        if loss_actor_object_pair_action_margin is not None:
-            loss_main_task = loss_main_task + loss_actor_object_pair_action_margin
-        relation_action_joint_outputs = self._log_relation_action_joint_metrics(
-            stage,
-            preds,
-            actions,
-            valid,
-            target,
-        )
 
         heatmap_aux_terms = []
 
@@ -4356,6 +3822,40 @@ class HeatmapModule(pl.LightningModule):
                 target["valid"].bool(),
                 target,
             )
+            
+            # --- Object Dropout Evaluation ---
+            if getattr(self.model, "actor_object_prompt_tokens", False) and target.get("object_valid") is not None:
+                dropout_target = target.copy()
+                dropout_target["object_valid"] = torch.zeros_like(target["object_valid"])
+                object_inputs = self._object_inputs_from_target(dropout_target, imgs.device)
+                object_inputs, _ = self._augment_object_inputs_for_training(
+                    object_inputs,
+                    dropout_target,
+                    "val_dropout",
+                )
+                with torch.no_grad():
+                    data_dropout = self.model(
+                        imgs,
+                        boxes=target["boxes"].float(),
+                        valid=target["valid"].bool(),
+                        action_labels=target["actions"].long(),
+                        **self._actor_model_object_inputs(object_inputs),
+                    )
+                preds_dropout, _, _ = self._unpack_model_data(data_dropout)
+                valid_mask = target["valid"].bool().to(device=preds_dropout.device)
+                valid_preds_dropout = preds_dropout[valid_mask]
+                dropout_correct = (valid_preds_dropout.argmax(dim=-1) == labels)
+                
+                self.validation_step_outputs["object_dropout_action"].append(dropout_correct.detach())
+                
+                # Uselaptop specifically (Action class 28 in default dataset)
+                uselaptop_idx = self.action_classes.index("Uselaptop") if "Uselaptop" in self.action_classes else -1
+                if uselaptop_idx >= 0:
+                    is_uselaptop = (labels == uselaptop_idx)
+                    if is_uselaptop.any():
+                        self.validation_step_outputs["object_dropout_action_Uselaptop"].append(
+                            dropout_correct[is_uselaptop].detach()
+                        )
             if hard_mask is not None:
                 valid_mask = target["valid"].bool().to(device=full_preds.device)
                 self.validation_step_outputs["hard_objectless"].append(
