@@ -86,65 +86,7 @@ class HeatmapModule(pl.LightningModule):
         self.actor_object_region_visual_tokens = bool(
             hparams.get("actor_object_region_visual_tokens", 0)
         )
-        self.actor_object_relation_in_transformer = bool(
-            hparams.get("actor_object_relation_in_transformer", 0)
-        )
-        self.actor_object_pair_action_head = bool(
-            hparams.get("actor_object_pair_action_head", 0)
-        )
-        actor_object_slot_head = bool(hparams.get("actor_object_slot_head", 0))
-        if actor_object_slot_head:
-            raise ValueError(
-                "actor_object_slot_head was replaced by "
-                "actor_object_prompt_tokens. Set --actor_object_prompt_tokens 1 "
-                "and keep --actor_object_slot_head 0."
-            )
-        if self.actor_object_residual_head:
-            raise ValueError(
-                "actor_object_residual_head was removed. Use "
-                "actor_object_relation_in_transformer for object-aware actor tokens."
-            )
-        self.uses_object_proposals = self.actor_object_prompt_tokens
-        if self.actor_object_prompt_tokens and not self.actor_prompt:
-            raise ValueError("actor_object_prompt_tokens requires actor_prompt")
-        if self.actor_object_prompt_tokens and not self.actor_object_region_visual_tokens:
-            raise ValueError(
-                "actor_object_prompt_tokens requires "
-                "actor_object_region_visual_tokens=1. Runtime object memory must "
-                "include visual patch features pooled from object boxes."
-            )
-        if self.actor_object_prompt_tokens and not self.actor_interaction_heatmaps:
-            raise ValueError(
-                "actor_object_prompt_tokens requires actor_interaction_heatmaps"
-            )
-        if (
-            self.actor_object_prompt_tokens
-            and not self.actor_object_relation_in_transformer
-        ):
-            raise ValueError(
-                "actor_object_prompt_tokens now has one supported training path: "
-                "actor_object_relation_in_transformer=1 with learned pair action "
-                "scoring."
-            )
-        if self.actor_object_relation_in_transformer and not self.actor_object_prompt_tokens:
-            raise ValueError(
-                "actor_object_relation_in_transformer requires actor_object_prompt_tokens"
-            )
-        if self.actor_object_relation_in_transformer and not self.actor_interaction_heatmaps:
-            raise ValueError(
-                "actor_object_relation_in_transformer requires actor_interaction_heatmaps"
-            )
-        if self.actor_object_relation_in_transformer and not self.actor_object_pair_action_head:
-            raise ValueError(
-                "actor_object_relation_in_transformer requires "
-                "actor_object_pair_action_head=1 so action CE trains the same "
-                "actor-object pairs as relation CE."
-            )
-        if self.actor_object_pair_action_head and not self.actor_object_relation_in_transformer:
-            raise ValueError(
-                "actor_object_pair_action_head requires "
-                "actor_object_relation_in_transformer=1"
-            )
+
         self.actor_poguiseplus_loss = self.actor_prompt and self.actor_interaction_heatmaps
         self.poguiseplus_heatmap_loss_weight = float(
             hparams.get("poguiseplus_heatmap_loss_weight", 1.0)

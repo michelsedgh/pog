@@ -266,28 +266,7 @@ class POGUISE(pl.LightningModule):
             raise ValueError(
                 "actor_object_prompt_tokens requires actor_interaction_heatmaps"
             )
-        if (
-            self.actor_object_prompt_tokens_enabled
-            and not self.actor_object_relation_in_transformer
-        ):
-            raise ValueError(
-                "actor_object_prompt_tokens now has one supported path: "
-                "enable actor_object_relation_in_transformer so object proposals "
-                "are bound to actor slots instead of existing as passive prompt "
-                "tokens."
-            )
-        if self.actor_object_relation_in_transformer and not self.actor_object_prompt_tokens_enabled:
-            raise ValueError(
-                "actor_object_relation_in_transformer requires actor_object_prompt_tokens"
-            )
-        if self.actor_interaction_heatmaps and not self.actor_prompt:
-            raise ValueError("actor_interaction_heatmaps requires actor_prompt")
-        if self.actor_object_relation_in_transformer and not self.actor_interaction_heatmaps:
-            raise ValueError(
-                "actor_object_relation_in_transformer requires "
-                "actor_interaction_heatmaps so relation bias is grounded in "
-                "actor-conditioned object heatmap tokens."
-            )
+
         if "interaction_object_classes" in self.hparams:
             raise ValueError(
                 "interaction_object_classes was removed. Actor-object heatmaps "
