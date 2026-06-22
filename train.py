@@ -552,35 +552,7 @@ def main():
             "by detector-side thresholding and object_valid; sparse valid detections "
             "are not down-weighted by temporal coverage inside the actor model."
         )
-    if getattr(hparams, "actor_object_relation_in_transformer", 0):
-        if not hparams.actor_object_prompt_tokens:
-            raise ValueError(
-                "actor_object_relation_in_transformer requires "
-                "--actor_object_prompt_tokens 1"
-            )
-        if not hparams.actor_interaction_heatmaps:
-            raise ValueError(
-                "actor_object_relation_in_transformer requires "
-                "--actor_interaction_heatmaps 1"
-            )
-        if getattr(hparams, "actor_relation_action_fusion", 0):
-            raise ValueError(
-                "actor_relation_action_fusion was removed. Use "
-                "--actor_object_pair_action_head 1."
-            )
-        if not getattr(hparams, "actor_object_pair_action_head", 0):
-            raise ValueError(
-                "actor_object_relation_in_transformer requires "
-                "--actor_object_pair_action_head 1 so action CE trains the same "
-                "actor-object pairs as relation CE"
-            )
-    elif getattr(hparams, "actor_object_prompt_tokens", 0):
-        raise ValueError(
-            "actor_object_prompt_tokens now has one supported training path: "
-            "--actor_object_relation_in_transformer 1 with "
-            "--actor_object_pair_action_head 1. This prevents passive object "
-            "prompt tokens from being trained without pair/action coupling."
-        )
+
     if (
         hparams.actor_object_prompt_tokens
         and not hparams.object_detector_cache
