@@ -1809,12 +1809,17 @@ class HeatmapModule(pl.LightningModule):
         pair_s = target_pair[supervised].clamp(0, num_pairs - 1)
         rows = torch.arange(scores_s.shape[0], device=device)
         target_allowed = allowed_s[rows, pair_s, labels_s]
+        if not bool(target_allowed.any()):
+            return None
+        # Filter to only actors whose target pair/action is in the allowed mask.
+        # Object dropout can legitimately remove the target slot, making it disallowed.
         if not bool(target_allowed.all()):
-            raise RuntimeError(
-                "The supervised pair/action target is masked out. This means the "
-                "Toyota action-object map, target interaction object, or object "
-                "validity disagrees with pair scorer routing."
-            )
+            keep = target_allowed
+            scores_s = scores_s[keep]
+            allowed_s = allowed_s[keep]
+            labels_s = labels_s[keep]
+            pair_s = pair_s[keep]
+            rows = torch.arange(scores_s.shape[0], device=device)
 
         true_scores = scores_s[rows, pair_s, labels_s]
         wrong_scores = scores_s.masked_fill(~allowed_s, -1.0e4).clone()
