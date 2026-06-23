@@ -83,9 +83,7 @@ class HeatmapModule(pl.LightningModule):
         self.actor_object_prompt_tokens = bool(
             hparams.get("actor_object_prompt_tokens", 0)
         )
-        self.actor_object_region_visual_tokens = bool(
-            hparams.get("actor_object_region_visual_tokens", 0)
-        )
+
         self.uses_object_proposals = self.actor_object_prompt_tokens
         self.actor_poguiseplus_loss = self.actor_prompt and self.actor_interaction_heatmaps
         self.poguiseplus_heatmap_loss_weight = float(
@@ -134,28 +132,7 @@ class HeatmapModule(pl.LightningModule):
             raise ValueError(
                 "poguiseplus_interaction_heatmap_center_temperature must be > 0"
             )
-        self.actor_object_relation_loss_weight = float(
-            hparams.get("actor_object_relation_loss_weight", 0.0)
-        )
-        if self.actor_object_relation_loss_weight < 0:
-            raise ValueError("actor_object_relation_loss_weight must be >= 0")
-        self.actor_object_relation_null_loss_weight = float(
-            hparams.get("actor_object_relation_null_loss_weight", 0.5)
-        )
-        if self.actor_object_relation_null_loss_weight < 0:
-            raise ValueError("actor_object_relation_null_loss_weight must be >= 0")
-        self.actor_object_pair_action_margin_loss_weight = float(
-            hparams.get("actor_object_pair_action_margin_loss_weight", 0.0)
-        )
-        if self.actor_object_pair_action_margin_loss_weight < 0:
-            raise ValueError(
-                "actor_object_pair_action_margin_loss_weight must be >= 0"
-            )
-        self.actor_object_pair_action_margin = float(
-            hparams.get("actor_object_pair_action_margin", 0.0)
-        )
-        if self.actor_object_pair_action_margin < 0:
-            raise ValueError("actor_object_pair_action_margin must be >= 0")
+
         self.actor_object_detector_dropout_prob = float(
             hparams.get("actor_object_detector_dropout_prob", 0.0)
         )
@@ -398,10 +375,8 @@ class HeatmapModule(pl.LightningModule):
                 "model.net.object_box_mlp",
                 "model.net.object_valid_embed",
                 "model.net.actor_object_relation_updates",
-                "model.net.actor_object_final_relation_update",
                 "model.actor_head",
-                "model.actor_object_null_pair_token",
-                "model.actor_object_pair_action_head",
+
                 "model.presence_head",
             ]
             if self.model.hparams.get("use_register_tokens", 0):
@@ -465,7 +440,6 @@ class HeatmapModule(pl.LightningModule):
                 "object_box_mlp",
                 "object_valid_embed",
                 "actor_object_relation_updates",
-                "actor_object_final_relation_update",
             )
         )
 
@@ -487,8 +461,7 @@ class HeatmapModule(pl.LightningModule):
         params = []
         if getattr(self.model, "actor_head", None) is not None:
             params += list(self.model.actor_head.parameters())
-        if getattr(self.model, "actor_object_pair_action_head", None) is not None:
-            params += list(self.model.actor_object_pair_action_head.parameters())
+
         null_pair_token = getattr(self.model, "actor_object_null_pair_token", None)
         if isinstance(null_pair_token, nn.Parameter):
             params.append(null_pair_token)
@@ -1292,366 +1265,6 @@ class HeatmapModule(pl.LightningModule):
             "compatible_from_zero_based": compatible_from_zero_based,
         }
 
-    def _log_token_selection_diagnostics(self, stage, actions, valid, target):
-        if stage.startswith("train"):
-            return
-        net = getattr(self.model, "net", None)
-        diagnostics = getattr(net, "last_token_selection_diagnostics", None)
-        if not diagnostics:
-            return
-        selected_mask = diagnostics.get("selected_mask")
-        window_size = diagnostics.get("window_size")
-        if selected_mask is None or window_size is None:
-            return
-
-        device = selected_mask.device
-        selected_mask = selected_mask.to(device=device, dtype=torch.float32)
-        if selected_mask.ndim != 2:
-            raise RuntimeError(
-                "token-selection selected_mask must have shape [B,N], got "
-                f"{tuple(selected_mask.shape)}"
-            )
-        batch_size, num_tokens = selected_mask.shape
-        count = int(batch_size)
-        self._log_scalar(
-            f"{stage}_token_selection_visual_keep_rate",
-            selected_mask.mean(),
-            count,
-        )
-        self._log_scalar(
-            f"{stage}_token_selection_visual_keep_count",
-            selected_mask.sum(dim=-1).mean(),
-            count,
-        )
-
-        def log_region_keep_rate(metric_name, prior, sample_mask, selected=None):
-            if prior is None:
-                return
-            prior = prior.to(device=device, dtype=torch.float32)
-            selected_for_prior = selected_mask if selected is None else selected
-            selected_for_prior = selected_for_prior.to(device=device, dtype=torch.float32)
-            if prior.shape != selected_for_prior.shape:
-                raise RuntimeError(
-                    f"{metric_name} prior shape {tuple(prior.shape)} does not "
-                    f"match selected mask {tuple(selected_for_prior.shape)}"
-                )
-            sample_mask = sample_mask.to(device=device, dtype=torch.bool)
-            denom = prior.sum(dim=-1)
-            keep_valid = sample_mask & (denom > 0)
-            if not keep_valid.any():
-                return
-            keep_rate = (prior * selected_for_prior).sum(dim=-1) / denom.clamp_min(
-                1.0e-6
-            )
-            sample_count = int(keep_valid.sum().item())
-            self._log_scalar(
-                f"{stage}_{metric_name}",
-                keep_rate[keep_valid].mean(),
-                sample_count,
-            )
-            self._log_count(
-                f"{stage}_{metric_name}_count",
-                keep_valid.float().sum(),
-            )
-
-        if not hasattr(net, "_make_box_token_prior"):
-            return
-
-        actions = actions.to(device=device, dtype=torch.long)
-        valid = valid.to(device=device, dtype=torch.bool)
-        boxes = target.get("boxes")
-        if boxes is not None:
-            boxes = boxes.to(device=device, dtype=torch.float32)
-            actor_prior = net._make_box_token_prior(
-                boxes,
-                valid,
-                window_size,
-                expand=float(self.model.hparams.get("actor_bbox_prior_expand", 1.75)),
-            )
-            log_region_keep_rate(
-                "token_selection_actor_box_keep_rate",
-                actor_prior,
-                valid.any(dim=1),
-            )
-
-        object_boxes = target.get("object_boxes")
-        object_valid = target.get("object_valid")
-        object_classes = target.get("object_classes")
-        if (
-            object_boxes is not None
-            and object_valid is not None
-            and object_classes is not None
-        ):
-            object_boxes = object_boxes.to(device=device, dtype=torch.float32)
-            object_valid = object_valid.to(device=device, dtype=torch.bool)
-            object_classes = object_classes.to(device=device, dtype=torch.long)
-            object_prior = net._make_box_token_prior(
-                object_boxes,
-                object_valid,
-                window_size,
-                expand=float(
-                    self.model.hparams.get(
-                        "actor_object_prompt_box_prior_expand",
-                        1.25,
-                    )
-                ),
-            )
-            log_region_keep_rate(
-                "token_selection_visible_object_box_keep_rate",
-                object_prior,
-                object_valid.any(dim=1),
-            )
-            for object_name in ("laptop", "book", "phone", "tv_monitor"):
-                object_id = OBJECT_TO_ID.get(object_name)
-                if object_id is None:
-                    continue
-                class_valid = object_valid & (object_classes == int(object_id))
-                class_prior = net._make_box_token_prior(
-                    object_boxes,
-                    class_valid,
-                    window_size,
-                    expand=float(
-                        self.model.hparams.get(
-                            "actor_object_prompt_box_prior_expand",
-                            1.25,
-                        )
-                    ),
-                )
-                safe_name = object_name.replace(".", "_")
-                log_region_keep_rate(
-                    f"token_selection_{safe_name}_box_keep_rate",
-                    class_prior,
-                    class_valid.any(dim=1),
-                )
-
-            info = self._exact_teacher_object_info(actions, valid, target, device)
-            exact_compatible = None
-            if info is not None:
-                exact_compatible = (
-                    info["valid"]
-                    & info["known_action"]
-                    & info["compatible_from_one_based"]
-                )
-            if exact_compatible is not None and exact_compatible.any():
-                B, A = actions.shape
-                if B != batch_size:
-                    raise RuntimeError(
-                        "token-selection diagnostics batch mismatch: "
-                        f"{B} actions vs {batch_size} selected masks"
-                    )
-                teacher_slots = info["slot_index_from_one_based"].to(
-                    device=device,
-                    dtype=torch.long,
-                )
-                teacher_boxes = object_boxes.gather(
-                    1,
-                    teacher_slots.unsqueeze(-1).expand(-1, -1, 4),
-                )
-                flat_teacher_boxes = teacher_boxes.reshape(B * A, 1, 4)
-                flat_teacher_valid = exact_compatible.reshape(B * A, 1)
-                flat_prior = net._make_box_token_prior(
-                    flat_teacher_boxes,
-                    flat_teacher_valid,
-                    window_size,
-                    expand=float(
-                        self.model.hparams.get(
-                            "actor_object_prompt_box_prior_expand",
-                            1.25,
-                        )
-                    ),
-                )
-                flat_selected = (
-                    selected_mask[:, None, :]
-                    .expand(-1, A, -1)
-                    .reshape(B * A, num_tokens)
-                )
-                flat_exact = exact_compatible.reshape(B * A)
-                log_region_keep_rate(
-                    "token_selection_exact_teacher_object_keep_rate",
-                    flat_prior,
-                    flat_exact,
-                    selected=flat_selected,
-                )
-                for action_name in (
-                    "Uselaptop",
-                    "Readbook",
-                    "WatchTV",
-                    "Usetelephone",
-                ):
-                    action_idx = self._action_index(action_name)
-                    if action_idx is None:
-                        continue
-                    action_mask = exact_compatible & (actions == int(action_idx))
-                    safe_name = action_name.replace(".", "_")
-                    log_region_keep_rate(
-                        f"token_selection_{safe_name}_teacher_object_keep_rate",
-                        flat_prior,
-                        action_mask.reshape(B * A),
-                        selected=flat_selected,
-                    )
-
-        if (
-            "interaction_heatmap" in target
-            and "interaction_heatmap_valid" in target
-            and len(window_size) == 3
-        ):
-            target_heatmap = target["interaction_heatmap"].to(
-                device=device,
-                dtype=torch.float32,
-            )
-            heatmap_valid = target["interaction_heatmap_valid"].to(
-                device=device,
-                dtype=torch.bool,
-            )
-            if target_heatmap.ndim != 4:
-                raise RuntimeError(
-                    "interaction_heatmap must have shape [B,A,H,W], got "
-                    f"{tuple(target_heatmap.shape)}"
-                )
-            B, A, _, _ = target_heatmap.shape
-            frames, height, width = [int(v) for v in window_size]
-            flat_heatmap = target_heatmap.reshape(B * A, 1, *target_heatmap.shape[-2:])
-            spatial_prior = F.interpolate(
-                flat_heatmap,
-                size=(height, width),
-                mode="area",
-            ).reshape(B * A, height * width)
-            heatmap_prior = (
-                spatial_prior[:, None, :]
-                .expand(-1, frames, -1)
-                .reshape(B * A, frames * height * width)
-                .clamp_min(0.0)
-            )
-            flat_selected = (
-                selected_mask[:, None, :]
-                .expand(-1, A, -1)
-                .reshape(B * A, num_tokens)
-            )
-            heatmap_sample_valid = (
-                valid
-                & heatmap_valid
-                & (target_heatmap.flatten(2).sum(dim=-1) > 0)
-            )
-            log_region_keep_rate(
-                "token_selection_interaction_heatmap_keep_rate",
-                heatmap_prior,
-                heatmap_sample_valid.reshape(B * A),
-                selected=flat_selected,
-            )
-
-    def _actor_object_relation_loss(self, stage, actions, valid, target):
-        return None
-
-    def _actor_object_pair_action_margin_loss(self, stage, actions, valid, target):
-        return None
-
-    def _log_actor_object_relation_metrics(
-        self,
-        stage,
-        relation_aux,
-        target_index,
-        exact_compatible,
-        missing_compatible,
-        objectless,
-        info,
-    ):
-        if not relation_aux:
-            return
-        last_aux = relation_aux[sorted(relation_aux.keys(), key=lambda x: int(x))[-1]]
-        logits = last_aux.get("logits")
-        if logits is None:
-            return
-        with torch.no_grad():
-            pred = logits.argmax(dim=-1)
-            if exact_compatible.any():
-                count = int(exact_compatible.sum().item())
-                self._log_scalar(
-                    f"{stage}_relation_exact_teacher_acc",
-                    (pred[exact_compatible] == target_index[exact_compatible])
-                    .float()
-                    .mean(),
-                    count,
-                )
-                object_attention = last_aux.get("object_attention")
-                if object_attention is not None:
-                    teacher_slot = info["slot_index_from_one_based"].to(
-                        device=object_attention.device,
-                        dtype=torch.long,
-                    )
-                    teacher_prob = object_attention.float().gather(
-                        -1,
-                        teacher_slot.unsqueeze(-1),
-                    ).squeeze(-1)
-                    self._log_scalar(
-                        f"{stage}_relation_exact_teacher_prob",
-                        teacher_prob[exact_compatible].mean(),
-                        count,
-                    )
-                useful_mass = last_aux.get("useful_mass")
-                if useful_mass is not None:
-                    self._log_scalar(
-                        f"{stage}_relation_useful_mass_exact",
-                        useful_mass.float()[exact_compatible].mean(),
-                        count,
-                    )
-                null_prob = last_aux.get("null_prob")
-                if null_prob is not None:
-                    self._log_scalar(
-                        f"{stage}_relation_null_prob_exact",
-                        null_prob.float()[exact_compatible].mean(),
-                        count,
-                    )
-
-            if missing_compatible.any():
-                count = int(missing_compatible.sum().item())
-                self._log_scalar(
-                    f"{stage}_relation_null_rate_missing_objectful",
-                    (pred[missing_compatible] == 0).float().mean(),
-                    count,
-                )
-                useful_mass = last_aux.get("useful_mass")
-                if useful_mass is not None:
-                    self._log_scalar(
-                        f"{stage}_relation_useful_mass_missing_objectful",
-                        useful_mass.float()[missing_compatible].mean(),
-                        count,
-                    )
-                null_prob = last_aux.get("null_prob")
-                if null_prob is not None:
-                    self._log_scalar(
-                        f"{stage}_relation_null_prob_missing_objectful",
-                        null_prob.float()[missing_compatible].mean(),
-                        count,
-                    )
-
-            if objectless.any():
-                count = int(objectless.sum().item())
-                self._log_scalar(
-                    f"{stage}_relation_null_rate_objectless",
-                    (pred[objectless] == 0).float().mean(),
-                    count,
-                )
-                useful_mass = last_aux.get("useful_mass")
-                if useful_mass is not None:
-                    self._log_scalar(
-                        f"{stage}_relation_useful_mass_objectless",
-                        useful_mass.float()[objectless].mean(),
-                        count,
-                    )
-                null_prob = last_aux.get("null_prob")
-                if null_prob is not None:
-                    self._log_scalar(
-                        f"{stage}_relation_null_prob_objectless",
-                        null_prob.float()[objectless].mean(),
-                        count,
-                    )
-
-    def _relation_action_joint_info(self, preds, actions, valid, target):
-        return None
-
-    def _log_relation_action_joint_metrics(self, stage, preds, actions, valid, target):
-        return None
-
     def _append_nash_mtl_params(self, params):
         if not (
             self.model.hparams.grad_weights
@@ -1855,17 +1468,7 @@ class HeatmapModule(pl.LightningModule):
             **self._actor_model_object_inputs(object_inputs),
         )
         preds, hm_preds, presence_logits = self._unpack_model_data(data)
-        pair_scores = getattr(self.model, "last_actor_object_pair_action_scores", None)
-        pair_allowed = getattr(self.model, "last_actor_object_pair_action_allowed", None)
-        if pair_scores is not None and pair_allowed is not None and pair_allowed.any():
-            pair_scores = pair_scores.detach().float()
-            pair_allowed = pair_allowed.to(device=pair_scores.device, dtype=torch.bool)
-            count = int(pair_allowed.sum().item())
-            self._log_scalar(
-                f"{stage}_actor_object_pair_action_score_abs",
-                pair_scores[pair_allowed].abs().mean(),
-                count,
-            )
+
 
         # Allow the model to learn "Pose Fallback" through the NULL slot when objects are missing
         action_ce_mask = valid
@@ -1903,7 +1506,7 @@ class HeatmapModule(pl.LightningModule):
 
         heatmap_aux_terms = []
 
-        self._log_token_selection_diagnostics(stage, actions, valid, target)
+
         loss_kp = None
         loss_pose_frobenius = None
         loss_pose_heatmap_optimized = None

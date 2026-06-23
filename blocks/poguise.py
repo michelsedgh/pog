@@ -339,14 +339,10 @@ class KTPAttention(Attention):
         attn_head_dim=None,
         use_checkpoint=False,
         keep_rate=0.0,
-        enhanced_weight_class=1,
-        enhanced_weight_heatmap=1,
         n_heatmap_tokens=196,
         sim_metric=0,
         topk_type=0,
         n_key_tokens=1,
-        bbox_prior_weight=0.0,
-        semantic_token_score_weights=None,
         needs_full_attention=False,
         trt_safe_attention=False,
     ):
@@ -357,29 +353,12 @@ class KTPAttention(Attention):
         assert 0 < keep_rate <= 1, "keep_rate must > 0 and <= 1, got {0}".format(
             keep_rate
         )
-        self.enhanced_weight_class = enhanced_weight_class
-        self.enhanced_weight_heatmap = enhanced_weight_heatmap
         self.n_heatmap_tokens = n_heatmap_tokens
         self.use_checkpoint = use_checkpoint
         # self.merge_type = "sim"
         self.topk_type = topk_type  # 0: all, 1: cls_hm
         self.sim_metric = sim_metric  # 0: k, 1: attn
         self.n_key_tokens = n_key_tokens
-        self.bbox_prior_weight = float(bbox_prior_weight)
-        if semantic_token_score_weights is None:
-            self.semantic_token_score_weights = None
-        else:
-            semantic_token_score_weights = torch.as_tensor(
-                semantic_token_score_weights,
-                dtype=torch.float32,
-            )
-            if semantic_token_score_weights.ndim != 1:
-                raise ValueError("semantic_token_score_weights must be a 1D tensor")
-            self.register_buffer(
-                "semantic_token_score_weights",
-                semantic_token_score_weights,
-                persistent=False,
-            )
         self.needs_full_attention = bool(needs_full_attention)
         self.trt_safe_attention = bool(trt_safe_attention)
 
@@ -472,7 +451,6 @@ class KTPAttention(Attention):
         last_idx=None,
         ws=None,
         size=None,
-        bbox_token_prior=None,
         key_padding_mask=None,
     ):
         B, N, C = x.shape
@@ -500,32 +478,6 @@ class KTPAttention(Attention):
                         0.0,
                     )
                 prefix_count = self.n_heatmap_tokens + self.n_key_tokens
-                if self.semantic_token_score_weights is not None:
-                    if self.semantic_token_score_weights.numel() != prefix_count:
-                        raise RuntimeError(
-                            "semantic token score weights must match protected "
-                            f"prefix length {prefix_count}, got "
-                            f"{self.semantic_token_score_weights.numel()}"
-                        )
-                    semantic_weights = self.semantic_token_score_weights.to(
-                        device=attn_topk.device,
-                        dtype=attn_topk.dtype,
-                    )
-                    attn_topk[:, :, :prefix_count] *= semantic_weights.view(
-                        1,
-                        1,
-                        -1,
-                        1,
-                    )
-                else:
-                    # Legacy PO-GUISE weighting: class plus heatmap tokens guide pruning.
-                    attn_topk[:, :, 0] *= self.enhanced_weight_class
-                    if self.n_heatmap_tokens:
-                        attn_topk[
-                            :,
-                            :,
-                            self.n_key_tokens : self.n_heatmap_tokens + self.n_key_tokens,
-                        ] *= self.enhanced_weight_heatmap
                 if self.topk_type == 0:
                     attn_topk = attn_topk.sum(dim=-2).mean(
                         dim=1
@@ -543,13 +495,6 @@ class KTPAttention(Attention):
                 attn_topk = attn_topk[
                     :, num_s_tokens:
                 ]  # remove class token and heatmap tokens
-                if bbox_token_prior is not None and self.bbox_prior_weight > 0:
-                    bbox_prior = torch.gather(
-                        bbox_token_prior.to(dtype=attn_topk.dtype),
-                        dim=1,
-                        index=last_idx,
-                    )
-                    attn_topk = attn_topk + self.bbox_prior_weight * bbox_prior
                 # average on all queries and num_heads
                 _, idx_evad = torch.topk(
                     attn_topk,
@@ -610,11 +555,6 @@ class Block(nn.Module):
             n_heatmap_tokens=n_heatmap_tokens,
             sim_metric=sim_metric,
             n_key_tokens=n_key_tokens,
-            bbox_prior_weight=kwargs.pop("bbox_prior_weight", 0.0),
-            semantic_token_score_weights=kwargs.pop(
-                "semantic_token_score_weights",
-                None,
-            ),
             needs_full_attention=keep_rate_merge < 1,
             **kwargs,
         )
@@ -646,7 +586,6 @@ class Block(nn.Module):
         x,
         last_idx,
         window_size,
-        bbox_token_prior=None,
         key_padding_mask=None,
     ):
         # check if self._size_attn shape matches with x
@@ -654,9 +593,8 @@ class Block(nn.Module):
             tmp, idx, attn = self.attn(
                 self.norm1(x),
                 last_idx,
-                window_size,
-                self._size_attn,
-                bbox_token_prior=bbox_token_prior,
+                ws=window_size,
+                size=self._size_attn,
                 key_padding_mask=key_padding_mask,
             )
             return self.drop_path(tmp), idx, attn
@@ -664,8 +602,8 @@ class Block(nn.Module):
             attn, idx = self.attn(
                 self.norm1(x),
                 last_idx,
-                window_size,
-                self._size_attn,
+                ws=window_size,
+                size=self._size_attn,
                 key_padding_mask=key_padding_mask,
             )
             return self.drop_path(self.gamma_1 * attn), idx
@@ -676,20 +614,11 @@ class Block(nn.Module):
         else:
             return self.drop_path(self.gamma_2 * self.mlp(self.norm2(x)))
 
-    def forward(
-        self,
-        x,
-        last_idx,
-        window_size,
-        bbox_token_prior=None,
-        key_padding_mask=None,
-    ):
-        # attn
+    def forward(self, x, last_idx, ws=None, size=None, key_padding_mask=None):
         tmp, idx, attn = self.forward_KTPpart1(
             x,
-            last_idx,
-            window_size,
-            bbox_token_prior=bbox_token_prior,
+            last_idx=last_idx,
+            window_size=ws,
             key_padding_mask=key_padding_mask,
         )
         x = x + tmp
@@ -895,207 +824,6 @@ class Block(nn.Module):
         return x
 
 
-class ActorObjectRelationUpdate(nn.Module):
-    """Update actor tokens from selected runtime object memory.
-
-    The relation logits choose NULL or one object slot for each actor. The same
-    selected object context is then fused into the actor token that ultimately
-    feeds the action head; there is no separate object-action classifier.
-    """
-
-    def __init__(
-        self,
-        dim,
-        relation_dim=256,
-        hidden_dim=512,
-        max_scale=1.0,
-        null_logit_init=None,
-        relation_logit_scale_init=1.0,
-        learned_relation_logit_scale=False,
-        normalize_relation_pointers=False,
-        learned_scale=False,
-        layer_scale_init=0.25,
-    ):
-        super().__init__()
-        if null_logit_init is None:
-            null_logit_init = 4.0
-
-        self.actor_norm = nn.LayerNorm(dim)
-        self.object_norm = nn.LayerNorm(dim)
-        self.actor_q = nn.Linear(dim, relation_dim, bias=False)
-        self.object_k = nn.Linear(dim, relation_dim, bias=False)
-        self.object_v = nn.Linear(dim, dim, bias=False)
-
-        self.null_logit = nn.Parameter(torch.tensor(float(null_logit_init)))
-        relation_logit_scale_init = float(relation_logit_scale_init)
-        if relation_logit_scale_init <= 0:
-            raise ValueError("relation_logit_scale_init must be > 0")
-        self.normalize_relation_pointers = bool(normalize_relation_pointers)
-        self.learned_relation_logit_scale = bool(learned_relation_logit_scale)
-        if self.learned_relation_logit_scale:
-            raw_init = math.log(math.expm1(max(relation_logit_scale_init, 1.0e-6)))
-            self.relation_logit_scale_raw = nn.Parameter(torch.tensor(raw_init))
-            self.register_buffer(
-                "relation_logit_scale",
-                torch.empty(0),
-                persistent=False,
-            )
-        else:
-            self.relation_logit_scale_raw = None
-            self.register_buffer(
-                "relation_logit_scale",
-                torch.tensor(relation_logit_scale_init),
-                persistent=False,
-            )
-
-        fusion_dim = 3 * dim
-        self.out = nn.Sequential(
-            nn.LayerNorm(fusion_dim),
-            nn.Linear(fusion_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, dim),
-        )
-        gate_hidden = max(hidden_dim // 4, 64)
-        self.gate = nn.Sequential(
-            nn.LayerNorm(fusion_dim),
-            nn.Linear(fusion_dim, gate_hidden),
-            nn.GELU(),
-            nn.Linear(gate_hidden, 1),
-            nn.Sigmoid(),
-        )
-
-        self.max_scale = float(max_scale)
-        if self.max_scale < 0:
-            raise ValueError("max_scale must be non-negative")
-        self.learned_scale = bool(learned_scale)
-        self.layer_scale_init = float(layer_scale_init)
-        if self.learned_scale:
-            if self.max_scale <= 0:
-                raise ValueError("learned relation scale requires max_scale > 0")
-            if self.layer_scale_init <= 0:
-                raise ValueError("layer_scale_init must be positive")
-            scale_ratio = min(
-                max(self.layer_scale_init / self.max_scale, 1.0e-4),
-                1.0 - 1.0e-4,
-            )
-            self.layer_scale_raw = nn.Parameter(
-                torch.tensor(math.log(scale_ratio / (1.0 - scale_ratio)))
-            )
-        else:
-            self.layer_scale_raw = None
-
-        nn.init.zeros_(self.out[-1].weight)
-        nn.init.zeros_(self.out[-1].bias)
-
-    def _relation_logit_scale(self, device, dtype):
-        if self.relation_logit_scale_raw is not None:
-            return F.softplus(
-                self.relation_logit_scale_raw.to(device=device, dtype=dtype)
-            )
-        return self.relation_logit_scale.to(device=device, dtype=dtype)
-
-    def forward(
-        self,
-        actor_tokens,
-        object_tokens,
-        actor_valid,
-        object_valid,
-    ):
-        B, A, _ = actor_tokens.shape
-
-        q = self.actor_q(self.actor_norm(actor_tokens))
-        k = self.object_k(self.object_norm(object_tokens))
-        v = self.object_v(object_tokens)
-
-        relation_logit_scale = self._relation_logit_scale(q.device, q.dtype)
-        if self.normalize_relation_pointers:
-            q_scores = F.normalize(q.float(), p=2, dim=-1).to(dtype=q.dtype)
-            k_scores = F.normalize(k.float(), p=2, dim=-1).to(dtype=k.dtype)
-            obj_scores = torch.matmul(q_scores, k_scores.transpose(1, 2))
-            obj_scores = obj_scores * relation_logit_scale
-        else:
-            obj_scores = torch.matmul(q, k.transpose(1, 2))
-            obj_scores = obj_scores / (q.shape[-1] ** 0.5)
-            obj_scores = obj_scores * relation_logit_scale
-
-        actor_valid = actor_valid.to(device=obj_scores.device, dtype=torch.bool)
-        if tuple(actor_valid.shape) != tuple(actor_tokens.shape[:2]):
-            raise ValueError(
-                "actor_valid must have shape "
-                f"{tuple(actor_tokens.shape[:2])}, got {tuple(actor_valid.shape)}"
-            )
-        object_valid = object_valid.to(device=obj_scores.device, dtype=torch.bool)
-        obj_scores = obj_scores.masked_fill(~object_valid[:, None, :], -1.0e4)
-
-        null_score = self.null_logit.to(
-            device=actor_tokens.device,
-            dtype=actor_tokens.dtype,
-        ).view(1, 1, 1)
-        null_score = null_score.expand(B, A, 1)
-
-        logits = torch.cat([null_score, obj_scores], dim=-1)
-        attn = torch.softmax(logits.float(), dim=-1).to(actor_tokens.dtype)
-
-        null_prob = attn[..., 0]
-        object_posterior = attn[..., 1:] * object_valid[:, None, :].to(
-            dtype=attn.dtype
-        )
-        object_mass = object_posterior.sum(dim=-1, keepdim=True).clamp(0.0, 1.0)
-        object_attn = torch.where(
-            object_mass > 0,
-            object_posterior / object_mass.clamp_min(1.0e-6),
-            torch.zeros_like(object_posterior),
-        )
-        useful_mass = object_mass.squeeze(-1)
-
-        selected_object_memory = torch.matmul(object_attn, object_tokens)
-        object_context = torch.matmul(object_attn, v)
-        object_context = object_context * object_mass
-
-        update_in = torch.cat(
-            [
-                actor_tokens,
-                object_context,
-                actor_tokens * object_context,
-            ],
-            dim=-1,
-        )
-        delta = self.out(update_in)
-        gate = self.gate(update_in)
-        # Relation NULL means "no interacted object"; in that case the
-        # object-conditioned residual should be a near no-op on actor tokens.
-        update_strength = gate * object_mass
-        update_strength = update_strength * actor_valid[:, :, None].to(
-            dtype=update_strength.dtype
-        )
-
-        if self.layer_scale_raw is None:
-            scale = actor_tokens.new_tensor(self.max_scale)
-        else:
-            scale = actor_tokens.new_tensor(self.max_scale) * torch.sigmoid(
-                self.layer_scale_raw.to(
-                    device=actor_tokens.device,
-                    dtype=actor_tokens.dtype,
-                )
-            )
-        actor_tokens = actor_tokens + scale * update_strength * delta
-
-        aux = {
-            "logits": logits,
-            "object_attention": object_posterior,
-            "object_attention_norm": object_attn,
-            "null_prob": null_prob,
-            "useful_mass": useful_mass,
-            "object_context": object_context,
-            "selected_object_memory": selected_object_memory,
-            "relation_logit_scale": relation_logit_scale.detach(),
-            "scale": scale.detach(),
-            "gate": gate.detach(),
-            "update_strength": update_strength.detach(),
-        }
-        return actor_tokens, aux
-
-
 class PatchEmbed(nn.Module):
     """Image to Patch Embedding"""
 
@@ -1196,30 +924,12 @@ class VisionTransformer(nn.Module):
         n_registers=0,
         actor_prompt=0,
         num_actor_tokens=8,
-        actor_bbox_prior_weight=0.1,
-        actor_bbox_prior_expand=1.75,
+
         actor_interaction_heatmaps=0,
         actor_object_prompt_tokens=0,
         num_scene_object_tokens=32,
         num_object_classes=19,
-        actor_object_region_visual_tokens=0,
-        actor_object_prompt_box_prior_weight=0.05,
-        actor_object_prompt_box_prior_expand=1.25,
-        token_selection_cls_weight=0.25,
-        token_selection_actor_weight=0.25,
-        token_selection_register_weight=0.0,
-        token_selection_heatmap_weight=0.35,
-        actor_object_relation_in_transformer=0,
-        actor_object_relation_blocks="2,5,8",
-        actor_object_relation_dim=256,
-        actor_object_relation_hidden_dim=512,
-        actor_object_relation_max_scale=1.0,
-        actor_object_relation_null_logit_init=0.5,
-        actor_object_relation_logit_scale_init=1.0,
-        actor_object_relation_learned_logit_scale=False,
-        actor_object_relation_normalize_pointers=False,
-        actor_object_relation_learned_scale=False,
-        actor_object_relation_layer_scale_init=0.25,
+
         return_heatmap_features=False,
         **kwargs,
     ):
@@ -1243,12 +953,6 @@ class VisionTransformer(nn.Module):
         self.n_actor_tokens = int(num_actor_tokens) if self.actor_prompt else 0
         if self.n_actor_tokens < 0:
             raise ValueError("num_actor_tokens must be non-negative")
-        self.actor_bbox_prior_weight = float(actor_bbox_prior_weight)
-        self.actor_bbox_prior_expand = float(actor_bbox_prior_expand)
-        if self.actor_bbox_prior_weight < 0:
-            raise ValueError("actor_bbox_prior_weight must be non-negative")
-        if self.actor_bbox_prior_expand <= 0:
-            raise ValueError("actor_bbox_prior_expand must be positive")
         self.actor_interaction_heatmaps = bool(actor_interaction_heatmaps)
         if self.actor_interaction_heatmaps and not self.actor_prompt:
             raise ValueError("actor_interaction_heatmaps requires actor_prompt")
@@ -1262,77 +966,8 @@ class VisionTransformer(nn.Module):
         self.n_object_tokens = (
             int(num_scene_object_tokens) if self.actor_object_prompt_tokens else 0
         )
-        if self.n_object_tokens < 0:
-            raise ValueError("num_scene_object_tokens must be non-negative")
         self.num_object_classes = int(num_object_classes)
-        if self.num_object_classes <= 0:
-            raise ValueError("num_object_classes must be positive")
-        self.actor_object_region_visual_tokens = bool(actor_object_region_visual_tokens)
-        if self.actor_object_prompt_tokens and not self.actor_object_region_visual_tokens:
-            raise ValueError(
-                "actor_object_prompt_tokens requires actor_object_region_visual_tokens. "
-                "Runtime object memory must include visual patch features pooled from "
-                "the object box, not only class/box metadata."
-            )
-        self.actor_object_prompt_box_prior_weight = float(
-            actor_object_prompt_box_prior_weight
-        )
-        if self.actor_object_prompt_box_prior_weight < 0:
-            raise ValueError("actor_object_prompt_box_prior_weight must be >= 0")
-        self.actor_object_prompt_box_prior_expand = float(
-            actor_object_prompt_box_prior_expand
-        )
-        if self.actor_object_prompt_box_prior_expand <= 0:
-            raise ValueError("actor_object_prompt_box_prior_expand must be positive")
-        self.token_selection_cls_weight = float(token_selection_cls_weight)
-        self.token_selection_actor_weight = float(token_selection_actor_weight)
-        self.token_selection_register_weight = float(token_selection_register_weight)
-        self.token_selection_heatmap_weight = float(token_selection_heatmap_weight)
-        self.actor_object_relation_in_transformer = bool(
-            actor_object_relation_in_transformer
-        )
-        if self.actor_object_relation_in_transformer and not self.actor_object_prompt_tokens:
-            raise ValueError(
-                "actor_object_relation_in_transformer requires actor_object_prompt_tokens"
-            )
-        self.actor_object_relation_blocks = self._parse_relation_blocks(
-            actor_object_relation_blocks
-        )
-        if self.actor_object_relation_in_transformer and not self.actor_object_relation_blocks:
-            raise ValueError(
-                "actor_object_relation_in_transformer requires at least one relation block"
-            )
-        self.actor_object_relation_dim = int(actor_object_relation_dim)
-        self.actor_object_relation_hidden_dim = int(actor_object_relation_hidden_dim)
-        self.actor_object_relation_max_scale = float(actor_object_relation_max_scale)
-        self.actor_object_relation_null_logit_init = float(
-            actor_object_relation_null_logit_init
-        )
-        self.actor_object_relation_logit_scale_init = float(
-            actor_object_relation_logit_scale_init
-        )
-        self.actor_object_relation_learned_logit_scale = bool(
-            actor_object_relation_learned_logit_scale
-        )
-        self.actor_object_relation_normalize_pointers = bool(
-            actor_object_relation_normalize_pointers
-        )
-        self.actor_object_relation_learned_scale = bool(
-            actor_object_relation_learned_scale
-        )
-        self.actor_object_relation_layer_scale_init = float(
-            actor_object_relation_layer_scale_init
-        )
-        if self.actor_object_relation_dim <= 0:
-            raise ValueError("actor_object_relation_dim must be positive")
-        if self.actor_object_relation_hidden_dim <= 0:
-            raise ValueError("actor_object_relation_hidden_dim must be positive")
-        if self.actor_object_relation_max_scale < 0:
-            raise ValueError("actor_object_relation_max_scale must be non-negative")
-        if self.actor_object_relation_logit_scale_init <= 0:
-            raise ValueError("actor_object_relation_logit_scale_init must be > 0")
-        if self.actor_object_relation_layer_scale_init <= 0:
-            raise ValueError("actor_object_relation_layer_scale_init must be positive")
+
         if "interaction_object_classes" in kwargs:
             raise ValueError(
                 "interaction_object_classes was removed. Actor-object heatmaps "
@@ -1355,11 +990,9 @@ class VisionTransformer(nn.Module):
             self.n_heatmap_tokens = 0
         self.mode = mode
 
-        # Class, actor, object, and register tokens are protected from pruning.
         self.N_KEY_TOKENS = (
             1 + self.n_actor_tokens + self.n_object_tokens + self.n_registers
         )
-        self.semantic_token_score_weights = self._semantic_token_score_weights()
 
         if use_learnable_pos_emb:
             self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
@@ -1369,16 +1002,7 @@ class VisionTransformer(nn.Module):
 
         self.pos_drop = nn.Dropout(p=drop_rate)
         self.depth = depth
-        invalid_relation_blocks = [
-            block_idx
-            for block_idx in self.actor_object_relation_blocks
-            if block_idx < 0 or block_idx >= self.depth
-        ]
-        if invalid_relation_blocks:
-            raise ValueError(
-                "actor_object_relation_blocks contains invalid block indices "
-                f"for depth {self.depth}: {invalid_relation_blocks}"
-            )
+
         if depth == 12:
             keep_rate = [1, 1, 1, keep_rate, 1, 1, keep_rate, 1, 1, keep_rate, 1, 1]
             keep_rate_merge = [
@@ -1430,15 +1054,11 @@ class VisionTransformer(nn.Module):
                     keep_rate_merge=keep_rate_merge[i],
                     n_heatmap_tokens=self.n_heatmap_tokens,
                     n_key_tokens=self.N_KEY_TOKENS,
-                    bbox_prior_weight=1.0,
-                    semantic_token_score_weights=self.semantic_token_score_weights,
                     **kwargs,
                 )
                 for i in range(depth)
             ]
         )
-        self.actor_object_relation_updates = nn.ModuleDict()
-        self.actor_object_final_relation_update = None
         self.norm = nn.Identity() if use_mean_pooling else norm_layer(embed_dim)
         self.fc_norm = norm_layer(embed_dim) if use_mean_pooling else None
         self.head_dropout = nn.Dropout(head_drop_rate)
@@ -1450,12 +1070,6 @@ class VisionTransformer(nn.Module):
             trunc_normal_(self.pos_embed, std=0.02)
 
         self.apply(self._init_weights)
-        relation_modules = list(self.actor_object_relation_updates.values())
-        if self.actor_object_final_relation_update is not None:
-            relation_modules.append(self.actor_object_final_relation_update)
-        for relation_update in relation_modules:
-            nn.init.zeros_(relation_update.out[-1].weight)
-            nn.init.zeros_(relation_update.out[-1].bias)
 
         self.head.weight.data.mul_(init_scale)
         self.head.bias.data.mul_(init_scale)
@@ -1573,152 +1187,7 @@ class VisionTransformer(nn.Module):
             return tuple(sorted(set(int(value) for value in blocks)))
         return (int(blocks),)
 
-    def _semantic_token_score_weights(self):
-        def distribute(group_weight, count):
-            count = int(count)
-            if count <= 0:
-                return []
-            return [float(group_weight) / float(count)] * count
 
-        weights = [self.token_selection_cls_weight]
-        weights.extend(distribute(self.token_selection_actor_weight, self.n_actor_tokens))
-        weights.extend(distribute(self.token_selection_register_weight, self.n_registers))
-        weights.extend(distribute(self.token_selection_heatmap_weight, self.n_heatmap_tokens))
-        return torch.tensor(weights, dtype=torch.float32)
-
-    def _expand_boxes(self, boxes, expand):
-        boxes = boxes.clamp(0.0, 1.0)
-        center = (boxes[..., :2] + boxes[..., 2:]) * 0.5
-        size = (boxes[..., 2:] - boxes[..., :2]).clamp_min(1e-4)
-        size = size * float(expand)
-        mins = (center - size * 0.5).clamp(0.0, 1.0)
-        maxs = (center + size * 0.5).clamp(0.0, 1.0)
-        return torch.cat([mins, maxs], dim=-1)
-
-    def _make_box_token_prior(self, boxes, valid, window_size, expand=1.0):
-        frames, height, width = [int(v) for v in window_size]
-        if height <= 0 or width <= 0:
-            return None
-        if boxes is None or valid is None or boxes.shape[1] == 0:
-            return None
-
-        boxes = boxes.clamp(0.0, 1.0)
-        valid = valid.bool()
-        center = (boxes[..., :2] + boxes[..., 2:]) * 0.5
-        size = (boxes[..., 2:] - boxes[..., :2]).clamp_min(1e-4)
-        expanded = size * float(expand)
-        mins = (center - expanded * 0.5).clamp(0.0, 1.0)
-        maxs = (center + expanded * 0.5).clamp(0.0, 1.0)
-
-        y_centers = (
-            torch.arange(height, device=boxes.device, dtype=boxes.dtype) + 0.5
-        ) / height
-        x_centers = (
-            torch.arange(width, device=boxes.device, dtype=boxes.dtype) + 0.5
-        ) / width
-        grid_y, grid_x = torch.meshgrid(y_centers, x_centers, indexing="ij")
-        grid_x = grid_x.reshape(1, 1, -1)
-        grid_y = grid_y.reshape(1, 1, -1)
-
-        inside = (
-            (grid_x >= mins[..., 0:1])
-            & (grid_x <= maxs[..., 0:1])
-            & (grid_y >= mins[..., 1:2])
-            & (grid_y <= maxs[..., 1:2])
-            & valid.unsqueeze(-1)
-        )
-        box_prior = inside.to(dtype=boxes.dtype)
-        spatial_prior = box_prior.max(dim=1).values
-        return spatial_prior.unsqueeze(1).expand(-1, frames, -1).reshape(
-            boxes.shape[0], frames * height * width
-        )
-
-    def _object_region_visual_features(
-        self,
-        visual_tokens,
-        object_boxes,
-        object_valid,
-        window_size,
-    ):
-        frames, height, width = [int(v) for v in window_size]
-        if height <= 0 or width <= 0:
-            raise ValueError(f"Invalid patch grid for object ROI pooling: {window_size}")
-        if visual_tokens.ndim != 3:
-            raise ValueError(
-                "visual_tokens must have shape [B,N,C], got "
-                f"{tuple(visual_tokens.shape)}"
-            )
-        expected_tokens = frames * height * width
-        if int(visual_tokens.shape[1]) != expected_tokens:
-            raise ValueError(
-                "visual token count does not match patch grid: "
-                f"N={visual_tokens.shape[1]}, grid={window_size}"
-            )
-
-        dtype = visual_tokens.dtype
-        device = visual_tokens.device
-        boxes = object_boxes.to(device=device, dtype=dtype).clamp(0.0, 1.0)
-        valid = object_valid.to(device=device, dtype=torch.bool)
-        grid_x = self.object_region_grid_x.to(device=device, dtype=dtype)
-        grid_y = self.object_region_grid_y.to(device=device, dtype=dtype)
-        if int(grid_x.shape[-1]) != height * width:
-            raise ValueError(
-                "object ROI grid does not match patch grid: "
-                f"buffer={grid_x.shape[-1]}, forward={height * width}"
-            )
-
-        mins = boxes[..., :2]
-        maxs = boxes[..., 2:]
-        sharpness = visual_tokens.new_tensor(40.0)
-        left = torch.sigmoid((grid_x - mins[..., 0:1]) * sharpness)
-        right = torch.sigmoid((maxs[..., 0:1] - grid_x) * sharpness)
-        top = torch.sigmoid((grid_y - mins[..., 1:2]) * sharpness)
-        bottom = torch.sigmoid((maxs[..., 1:2] - grid_y) * sharpness)
-        spatial_weights = left * right * top * bottom
-        weights = spatial_weights.unsqueeze(2).expand(
-            -1,
-            -1,
-            frames,
-            -1,
-        )
-        weights = weights.reshape(boxes.shape[0], boxes.shape[1], expected_tokens)
-        weights = weights * valid.unsqueeze(-1).to(dtype=dtype)
-        denom = weights.sum(dim=-1, keepdim=True).clamp_min(1.0e-6)
-        pooled = torch.matmul(weights, visual_tokens) / denom
-        pooled = pooled * valid.unsqueeze(-1).to(dtype=dtype)
-        pooled = self.object_region_proj(self.object_region_norm(pooled))
-        return pooled
-
-    def _bbox_token_prior(
-        self,
-        actor_boxes,
-        actor_valid,
-        object_boxes,
-        object_valid,
-        window_size,
-    ):
-        priors = []
-        if self.actor_bbox_prior_weight > 0:
-            actor_prior = self._make_box_token_prior(
-                actor_boxes,
-                actor_valid,
-                window_size,
-                expand=self.actor_bbox_prior_expand,
-            )
-            if actor_prior is not None:
-                priors.append(actor_prior * self.actor_bbox_prior_weight)
-        if self.actor_object_prompt_box_prior_weight > 0:
-            object_prior = self._make_box_token_prior(
-                object_boxes,
-                object_valid,
-                window_size,
-                expand=self.actor_object_prompt_box_prior_expand,
-            )
-            if object_prior is not None:
-                priors.append(object_prior * self.actor_object_prompt_box_prior_weight)
-        if not priors:
-            return None
-        return torch.stack(priors, dim=0).sum(dim=0).clamp(0.0, 1.0)
 
     def forward(
         self,
@@ -1752,10 +1221,8 @@ class VisionTransformer(nn.Module):
                 .detach()
         )
         x = self.pos_drop(x)
-        bbox_token_prior = None
         token_key_padding_mask = None
         object_memory_tokens = None
-        self.last_object_region_visual_norm = None
 
         prefix_tokens = []
         prefix_key_masks = []
@@ -1843,16 +1310,6 @@ class VisionTransformer(nn.Module):
                 + self.object_box_mlp(object_boxes)
                 + self.object_valid_embed(object_valid.long()).to(dtype=x.dtype)
             )
-            object_region_tokens = self._object_region_visual_features(
-                x,
-                object_boxes,
-                object_valid,
-                ws,
-            )
-            self.last_object_region_visual_norm = (
-                object_region_tokens.detach().float().norm(dim=-1)
-            )
-            object_tokens = object_tokens + object_region_tokens
             object_memory_tokens = object_tokens
             prefix_tokens.append(object_tokens)
             prefix_key_masks.append(~object_valid)
@@ -1861,14 +1318,7 @@ class VisionTransformer(nn.Module):
             prefix_key_masks.append(
                 torch.zeros(B, self.n_heatmap_tokens, dtype=torch.bool, device=x.device)
             )
-        if self.n_actor_tokens > 0:
-            bbox_token_prior = self._bbox_token_prior(
-                boxes,
-                valid,
-                object_boxes if self.actor_object_prompt_tokens else None,
-                object_valid if self.actor_object_prompt_tokens else None,
-                ws,
-            )
+
         if prefix_tokens:
             x = torch.cat([*prefix_tokens, x], dim=1)
             prefix_mask = torch.cat(prefix_key_masks, dim=1)
@@ -1887,8 +1337,8 @@ class VisionTransformer(nn.Module):
         actor_end = actor_start + self.n_actor_tokens
         heatmap_start = self.N_KEY_TOKENS
         heatmap_end = heatmap_start + self.n_heatmap_tokens
-        self.last_actor_object_relation_aux = {}
-        self.last_token_selection_diagnostics = None
+
+
         # keep the global indexes of non-keyframe tokens during pruning
         idx = torch.arange(0, N, device=x.device).unsqueeze(0).repeat(B, 1)
         for i in range(self.depth):
@@ -1896,25 +1346,12 @@ class VisionTransformer(nn.Module):
             x, idx, token_key_padding_mask = blk(
                 x,
                 idx,
-                ws,
-                bbox_token_prior=bbox_token_prior,
+                ws=ws,
+                size=self._size_attn if hasattr(self, "_size_attn") else None,
                 key_padding_mask=token_key_padding_mask,
             )
 
-        selected_mask = torch.zeros(B, N, dtype=torch.bool, device=x.device)
-        if idx is not None and idx.numel() > 0:
-            selected_idx = idx.clamp(0, N - 1).long()
-            selected_mask = selected_mask.scatter(
-                1,
-                selected_idx,
-                torch.ones_like(selected_idx, dtype=torch.bool, device=x.device),
-            )
-        self.last_token_selection_diagnostics = {
-            "selected_indices": idx.detach() if idx is not None else None,
-            "selected_mask": selected_mask.detach(),
-            "num_visual_tokens": int(N),
-            "window_size": tuple(int(v) for v in ws),
-        }
+
 
         if self.n_actor_tokens > 0:
             x_actor = x[:, actor_start:actor_end, :]
