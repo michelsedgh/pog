@@ -1355,11 +1355,9 @@ class VisionTransformer(nn.Module):
             self.n_heatmap_tokens = 0
         self.mode = mode
 
-        # Class, actor, and register tokens are protected from pruning. Runtime
-        # object detections are kept as relation-only memory so they cannot
-        # leak object-presence shortcuts through generic self-attention.
+        # Class, actor, object, and register tokens are protected from pruning.
         self.N_KEY_TOKENS = (
-            1 + self.n_actor_tokens + self.n_registers
+            1 + self.n_actor_tokens + self.n_object_tokens + self.n_registers
         )
         self.semantic_token_score_weights = self._semantic_token_score_weights()
 
