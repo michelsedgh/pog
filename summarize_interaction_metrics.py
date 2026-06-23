@@ -85,8 +85,8 @@ CORE_COLUMNS = [
     "val_group_laptop_book_tv_acc",
     "val_group_phone_tv_acc",
     "val_loss_heatmap_aux",
-    "val_object_dropout_action_acc",
-    "val_object_dropout_action_Uselaptop_acc",
+    "val_deploy_object_dropout_action_acc",
+    "val_deploy_object_dropout_Uselaptop_acc",
     "val_actor_object_prompt_token_count",
     "val_token_selection_actor_box_keep_rate",
     "val_token_selection_visible_object_box_keep_rate",
@@ -284,8 +284,8 @@ def print_compact_epoch_summary(epoch_df):
         "val_group_object_mapped_acc",
         "val_group_objectless_acc",
         "val_loss_heatmap_aux",
-        "val_object_dropout_action_acc",
-        "val_object_dropout_action_Uselaptop_acc",
+        "val_deploy_object_dropout_action_acc",
+        "val_deploy_object_dropout_Uselaptop_acc",
         "val_interaction_heatmap_positive_mean",
         "val_interaction_heatmap_soft_iou",
     ]
@@ -412,8 +412,8 @@ def print_compact_best(epoch_df):
         "val_acc_macro",
         "val_group_object_mapped_acc",
         "val_group_objectless_acc",
-        "val_object_dropout_action_acc",
-        "val_object_dropout_action_Uselaptop_acc",
+        "val_deploy_object_dropout_action_acc",
+        "val_deploy_object_dropout_Uselaptop_acc",
         "val_interaction_heatmap_soft_iou",
         "val_interaction_heatmap_positive_mean",
         "val_action_Uselaptop_acc",
@@ -481,12 +481,12 @@ def print_row(title, row):
             "uselaptop_margin "
             f"{metric(row, 'val_action_Uselaptop_object_confuser_margin'):.4f}"
         )
-    if pd.notna(metric(row, "val_object_dropout_action_acc")):
+    if pd.notna(metric(row, "val_deploy_object_dropout_action_acc")):
         print(
             "object-dropout fallback: "
-            f"action {metric(row, 'val_object_dropout_action_acc'):.4f}, "
+            f"action {metric(row, 'val_deploy_object_dropout_action_acc'):.4f}, "
             "uselaptop_action "
-            f"{metric(row, 'val_object_dropout_action_Uselaptop_acc'):.4f}, "
+            f"{metric(row, 'val_deploy_object_dropout_Uselaptop_acc'):.4f}, "
             "uselaptop_joint "
             f"{metric(row, 'val_object_dropout_relation_action_joint_missing_Uselaptop_acc'):.4f}, "
             "uselaptop_margin "
