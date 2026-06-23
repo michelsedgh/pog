@@ -515,25 +515,12 @@ def main():
         )
     if hparams.actor_object_prompt_tokens and not hparams.actor_prompt:
         raise ValueError("actor_object_prompt_tokens requires actor_prompt")
-    if hparams.actor_object_prompt_tokens and not getattr(
-        hparams,
-        "actor_object_region_visual_tokens",
-        0,
-    ):
-        raise ValueError(
-            "actor_object_prompt_tokens requires "
-            "--actor_object_region_visual_tokens 1. Runtime object memory must "
-            "include visual patch features pooled from object boxes."
-        )
+
     if hparams.actor_object_prompt_tokens and not hparams.actor_interaction_heatmaps:
         raise ValueError(
             "actor_object_prompt_tokens requires --actor_interaction_heatmaps 1"
         )
-    if getattr(hparams, "actor_object_base_fusion", 0):
-        raise ValueError(
-            "actor_object_base_fusion was removed. Use "
-            "--actor_object_relation_in_transformer 1 for object-aware actor tokens."
-        )
+
     if getattr(hparams, "actor_object_residual_head", 0):
         raise ValueError(
             "actor_object_residual_head was removed. Use "
