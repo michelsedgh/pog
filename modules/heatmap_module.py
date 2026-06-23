@@ -3367,7 +3367,7 @@ class HeatmapModule(pl.LightningModule):
             )
             
             # --- Object Dropout Evaluation ---
-            if getattr(self.model, "actor_object_prompt_tokens", False) and target.get("object_valid") is not None:
+            if getattr(self.model, "actor_object_prompt_tokens_enabled", False) and target.get("object_valid") is not None:
                 dropout_target = target.copy()
                 dropout_target["object_valid"] = torch.zeros_like(target["object_valid"])
                 object_inputs = self._object_inputs_from_target(dropout_target, imgs.device)
