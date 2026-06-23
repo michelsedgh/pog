@@ -291,9 +291,7 @@ def print_compact_epoch_summary(epoch_df):
     ]
     display_cols = [col for col in cols if col in epoch_df.columns]
     if len(display_cols) > 1:
-        print("
-EPOCH SNAPSHOT:
-")
+        print("\nEPOCH SNAPSHOT:\n")
         with pd.option_context("display.max_columns", None, "display.width", 220):
             print(epoch_df[display_cols].to_string(index=False))
 
