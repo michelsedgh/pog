@@ -484,7 +484,7 @@ class KTPAttention(Attention):
             x, attn, feature = self.forward_part1(
                 x, size, key_padding_mask=key_padding_mask
             )
-            return x, last_idx, attn if self.sim_metric == 1 else feature
+            return x, last_idx, key_padding_mask
 
         # get top-k tokens and the corresponding indexes
         if self.keep_rate < 1:
