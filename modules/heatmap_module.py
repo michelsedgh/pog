@@ -1892,7 +1892,7 @@ class HeatmapModule(pl.LightningModule):
             loss_kp,
             preds,
             presence_logits,
-            relation_action_joint_outputs,
+            None,
         )
 
     def _unpack_model_data(self, data):
@@ -3318,12 +3318,10 @@ class HeatmapModule(pl.LightningModule):
                 loss_kp,
                 full_preds,
                 presence_logits,
-                relation_action_joint_outputs,
+                _
             ) = self._actor_step(
                 imgs, target, self.val_loss, "val"
             )
-            for name, tensor in relation_action_joint_outputs.items():
-                self.validation_step_outputs[name].append(tensor)
             self._log_actor_val_diagnostics(imgs, target, presence_logits)
             self._log_objectless_hard_negative_metrics(
                 "val",
