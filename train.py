@@ -521,24 +521,7 @@ def main():
             "actor_object_prompt_tokens requires --actor_interaction_heatmaps 1"
         )
 
-    if getattr(hparams, "actor_object_residual_head", 0):
-        raise ValueError(
-            "actor_object_residual_head was removed. Use "
-            "--actor_object_relation_in_transformer 1 for the clean PO-GUISE+ "
-            "runtime-object architecture."
-        )
-    if float(getattr(hparams, "actor_object_proposal_conf_jitter", 0.0)) != 0.0:
-        raise ValueError(
-            "actor_object_proposal_conf_jitter was removed. Detector confidence "
-            "is detector-side evidence, not an augmented actor-model feature; "
-            "use box jitter and distractor dropping for proposal robustness."
-        )
-    if float(getattr(hparams, "object_temporal_conf_power", 0.0)) != 0.0:
-        raise ValueError(
-            "object_temporal_conf_power was removed. Object existence is controlled "
-            "by detector-side thresholding and object_valid; sparse valid detections "
-            "are not down-weighted by temporal coverage inside the actor model."
-        )
+
 
     if (
         hparams.actor_object_prompt_tokens
