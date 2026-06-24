@@ -133,25 +133,6 @@ class HeatmapModule(pl.LightningModule):
                 "poguiseplus_interaction_heatmap_center_temperature must be > 0"
             )
 
-        self.actor_object_detector_dropout_prob = float(
-            hparams.get("actor_object_detector_dropout_prob", 0.0)
-        )
-        if not 0.0 <= self.actor_object_detector_dropout_prob <= 1.0:
-            raise ValueError("actor_object_detector_dropout_prob must be in [0, 1]")
-        self.actor_object_detector_dropout_action_loss_weight = float(
-            hparams.get("actor_object_detector_dropout_action_loss_weight", 0.0)
-        )
-        if self.actor_object_detector_dropout_action_loss_weight < 0:
-            raise ValueError(
-                "actor_object_detector_dropout_action_loss_weight must be >= 0"
-            )
-        self.actor_object_detector_dropout_relation_loss_weight = float(
-            hparams.get("actor_object_detector_dropout_relation_loss_weight", 0.0)
-        )
-        if self.actor_object_detector_dropout_relation_loss_weight < 0:
-            raise ValueError(
-                "actor_object_detector_dropout_relation_loss_weight must be >= 0"
-            )
         self.actor_object_present_margin_loss_weight = float(
             hparams.get("actor_object_present_margin_loss_weight", 0.0)
         )
@@ -195,13 +176,7 @@ class HeatmapModule(pl.LightningModule):
                 "is detector-side evidence, not an augmented actor-model feature; "
                 "use box jitter and distractor dropping for proposal robustness."
             )
-        self.actor_object_proposal_distractor_drop_prob = float(
-            hparams.get("actor_object_proposal_distractor_drop_prob", 0.0)
-        )
-        if not 0.0 <= self.actor_object_proposal_distractor_drop_prob <= 1.0:
-            raise ValueError(
-                "actor_object_proposal_distractor_drop_prob must be in [0, 1]"
-            )
+
         self.actor_pair_train_weight = float(hparams.get("actor_pair_train_weight", 0.0))
         if self.actor_pair_train_weight < 0:
             raise ValueError("actor_pair_train_weight must be >= 0")
@@ -1104,57 +1079,9 @@ class HeatmapModule(pl.LightningModule):
                     aug_mask.numel(),
                 )
 
-        if self.actor_object_proposal_distractor_drop_prob > 0.0:
-            teacher_mask = self._teacher_object_slot_mask(
-                target,
-                object_valid.shape,
-                device,
-            )
-            distractor_mask = object_valid & ~teacher_mask
-            drop_mask = distractor_mask & (
-                torch.rand(object_valid.shape, device=device, dtype=torch.float32)
-                < self.actor_object_proposal_distractor_drop_prob
-            )
-            output_valid = output_valid & ~drop_mask
-            confs = confs.masked_fill(drop_mask, 0.0)
-            self._log_scalar(
-                f"{stage}_object_proposal_distractor_drop_rate",
-                drop_mask.float().mean(),
-                drop_mask.numel(),
-            )
 
-        if self.actor_object_detector_dropout_prob > 0.0:
-            actions = target["actions"].to(device=device, dtype=torch.long)
-            valid = target["valid"].to(device=device, dtype=torch.bool)
-            info = self._exact_teacher_object_info(actions, valid, target, device)
-            if info is not None:
-                exact = info["valid"] & info["known_action"] & info["compatible_from_one_based"]
-                if exact.any():
-                    dropped_target_mask = exact & (
-                        torch.rand(exact.shape, device=device, dtype=torch.float32)
-                        < self.actor_object_detector_dropout_prob
-                    )
-                    if dropped_target_mask.any():
-                        object_classes = object_inputs["object_classes"].to(device=device, dtype=torch.long)
-                        dropped_object_mask = torch.zeros_like(object_valid, dtype=torch.bool)
-                        for action_idx, object_ids in self.action_object_ids_by_index.items():
-                            action_actor_mask = dropped_target_mask & (actions == int(action_idx))
-                            if not action_actor_mask.any():
-                                continue
-                            sample_mask = action_actor_mask.any(dim=1)
-                            object_ids = object_ids.to(device=device, dtype=torch.long)
-                            class_match = (
-                                object_classes.unsqueeze(-1) == object_ids.view(1, 1, -1)
-                            ).any(dim=-1)
-                            dropped_object_mask |= sample_mask[:, None] & object_valid & class_match
 
-                        output_valid = output_valid & ~dropped_object_mask
-                        confs = confs.masked_fill(dropped_object_mask, 0.0)
-                        self._log_scalar(
-                            f"{stage}_object_detector_dropout_rate",
-                            dropped_target_mask.float().mean(),
-                            dropped_target_mask.numel(),
-                        )
+
 
         return {
             "object_boxes": boxes,
@@ -3367,7 +3294,7 @@ class HeatmapModule(pl.LightningModule):
             )
             
             # --- Object Dropout Evaluation ---
-            if getattr(self.model, "actor_object_prompt_tokens_enabled", False) and target.get("object_valid") is not None:
+            if target.get("object_valid") is not None:
                 dropout_target = target.copy()
                 dropout_target["object_valid"] = torch.zeros_like(target["object_valid"])
                 object_inputs = self._object_inputs_from_target(dropout_target, imgs.device)
@@ -3392,7 +3319,7 @@ class HeatmapModule(pl.LightningModule):
                 self.validation_step_outputs["object_dropout_action"].append(dropout_correct.detach())
                 
                 # Uselaptop specifically (Action class 28 in default dataset)
-                uselaptop_idx = self.action_classes.index("Uselaptop") if "Uselaptop" in self.action_classes else -1
+                uselaptop_idx = self.action_names.index("Uselaptop") if "Uselaptop" in self.action_names else -1
                 if uselaptop_idx >= 0:
                     is_uselaptop = (labels == uselaptop_idx)
                     if is_uselaptop.any():

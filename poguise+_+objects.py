@@ -432,12 +432,7 @@ cmd = [
     "--actor_interaction_heatmaps", "1",
 
     "--actor_object_prompt_tokens", "1",
-    "--actor_object_region_visual_tokens", "1",
-    "--token_selection_cls_weight", "0.15",
-    "--token_selection_actor_weight", "0.25",
-    "--token_selection_heatmap_weight", "0.30",
-    "--actor_object_prompt_box_prior_weight", "0.20",
-    "--actor_object_prompt_box_prior_expand", "1.50",
+
     "--num_scene_object_tokens", "32",
     "--num_object_classes", "19",
 
@@ -449,13 +444,6 @@ cmd = [
     "--interaction_heatmap_sigma", "2.5",
 
     "--class_balanced_sampler", "1",
-
-    "--keep_rate", "0.6",
-    "--keep_rate_merge", "0.3",
-    "--merge_type", "sim",
-    "--merge_mode", "0",
-    "--sim_metric", "1",
-    "--topk_type", "1",
 
     "--grad_weights", "1",
     "--nash_update_weights_every", "20",
@@ -469,12 +457,10 @@ cmd = [
     "--poguiseplus_heatmap_mse_scale", "1000",
     "--poguiseplus_interaction_heatmap_pos_loss_weight", "2.0",
     "--poguiseplus_interaction_heatmap_pos_weight", "16.0",
-    "--actor_object_detector_dropout_prob", "0.50",
 
     "--actor_object_proposal_aug_prob", "0.35",
     "--actor_object_proposal_box_jitter", "0.08",
     "--actor_object_proposal_scale_jitter", "0.15",
-    "--actor_object_proposal_distractor_drop_prob", "0.08",
     "--batch_size", "32",
     "--accum_grad_batches", "1",
 
@@ -518,12 +504,9 @@ cmd = [
 print("\nSINGLE ACTOR-OBJECT RELATION TRAINING RUN", flush=True)
 print(f"epochs: {RUN_EPOCHS}", flush=True)
 print(
-    "actor-object relation: one CE over NULL plus detected object slots, "
-    "ORViT-style object-region visual memory pooled from proposal boxes, "
-    "HOTR-style normalized learned relation pointers, "
-    "learned actor-object pair action scoring, "
-    "moderate detector-miss auxiliary training, ROI object memory, "
-    "and PO-GUISE+ heatmap auxiliary supervision",
+    "actor-object relation: pure ViT architecture. "
+    "Actor and object tokens are concatenated and all-to-all interactions "
+    "are learned natively through deep self-attention, without late fusion heuristics.",
     flush=True,
 )
 run_dir = run_training_with_epoch_summaries(cmd, RUN_NAME, EPOCH_DIR, poll_secs=20)

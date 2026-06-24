@@ -231,13 +231,7 @@ class POGUISE(pl.LightningModule):
                 attn_drop_rate=self.hparams.attn_drop_rate,
                 drop_path_rate=self.hparams.drop_path_rate,
                 head_drop_rate=self.hparams.head_drop_rate,
-                keep_rate=self.hparams.keep_rate,
-                n_landmarks=self.hparams.n_landmarks,
-                sim_metric=self.hparams.sim_metric,
-                topk_type=self.hparams.topk_type,
-                merge_mode=self.hparams.merge_mode,
-                keep_rate_merge=self.hparams.keep_rate_merge,
-                merge_type=self.hparams.merge_type,
+
                 mode=self.mode,
                 hw_out_conv=self.hparams.hw_out_conv,
                 n_registers=n_registers,
@@ -262,13 +256,7 @@ class POGUISE(pl.LightningModule):
                 attn_drop_rate=self.hparams.attn_drop_rate,
                 drop_path_rate=self.hparams.drop_path_rate,
                 head_drop_rate=self.hparams.head_drop_rate,
-                keep_rate=self.hparams.keep_rate,
-                n_landmarks=self.hparams.n_landmarks,
-                sim_metric=self.hparams.sim_metric,
-                topk_type=self.hparams.topk_type,
-                merge_mode=self.hparams.merge_mode,
-                keep_rate_merge=self.hparams.keep_rate_merge,
-                merge_type=self.hparams.merge_type,
+
                 mode=self.mode,
                 hw_out_conv=self.hparams.hw_out_conv,
                 n_registers=n_registers,
@@ -485,19 +473,7 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--attn_drop_rate", type=float, default=0.0)
         parser.add_argument("--drop_path_rate", type=float, default=0.0)
         parser.add_argument("--head_drop_rate", type=float, default=0.0)
-        parser.add_argument("--keep_rate", type=float, default=0.6)
 
-        parser.add_argument(
-            "--sim_metric", type=int, default=1
-        )  # 0: k, 1: attn, 2: q, 3: v
-        parser.add_argument(
-            "--topk_type", type=int, default=1
-        )  # 0: all, 1: cls_hm, 2: cls
-        parser.add_argument("--merge_mode", type=int, default=1)  # 0: mean, 1: sum
-        parser.add_argument("--keep_rate_merge", type=float, default=0.3)
-        parser.add_argument(
-            "--merge_type", type=str, default="sim"
-        )  # sim :poguise, tome :tome
         # parser.add_argument("--enhanced_weight_class_obj", type=float, default=1)
         parser.add_argument("--hw_out_conv", type=int, default=8)
         parser.add_argument("--use_register_tokens", type=int, default=0)

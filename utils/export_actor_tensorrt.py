@@ -14,28 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 
 
 def uses_prompt_object_proposals(hparams):
-    if bool(hparams.get("actor_object_slot_head", 0)):
-        raise RuntimeError(
-            "actor_object_slot_head checkpoints are no longer supported. "
-            "Train/export with actor_object_prompt_tokens instead."
-        )
-    uses_objects = bool(hparams.get("actor_object_prompt_tokens", 0))
-    if uses_objects and not bool(hparams.get("actor_object_region_visual_tokens", 0)):
-        raise RuntimeError(
-            "Object-proposal checkpoints now require "
-            "actor_object_region_visual_tokens=1 so object memory contains visual "
-            "patch features pooled from proposal boxes."
-        )
-    if uses_objects and (
-        not bool(hparams.get("actor_object_relation_in_transformer", 0))
-        or not bool(hparams.get("actor_object_pair_action_head", 0))
-    ):
-        raise RuntimeError(
-            "Object-proposal checkpoints now have one supported export path: "
-            "actor_object_relation_in_transformer=1 and "
-            "actor_object_pair_action_head=1."
-        )
-    return uses_objects
+    return bool(int(hparams.get("num_scene_object_tokens", 0)) > 0)
 
 
 def parse_args():
@@ -56,15 +35,7 @@ def parse_args():
     parser.add_argument("--opset", type=int, default=17)
     parser.add_argument("--precision", choices=["fp16", "fp32"], default="fp16")
     parser.add_argument("--mask-input-dtype", choices=["bool", "int32"], default="bool")
-    parser.add_argument(
-        "--disable-token-pruning",
-        action="store_true",
-        help=(
-            "Export a TensorRT-friendlier actor graph by forcing keep_rate=1.0 "
-            "and keep_rate_merge=1.0. This changes the inference graph and must "
-            "be drift-checked before live use."
-        ),
-    )
+
     parser.add_argument(
         "--trt-safe-attention",
         action="store_true",
@@ -347,13 +318,7 @@ def benchmark_engine(trtexec, engine_out, args):
 
 def export_hparam_overrides(args):
     overrides = {}
-    if args.disable_token_pruning:
-        overrides.update(
-            {
-                "keep_rate": 1.0,
-                "keep_rate_merge": 1.0,
-            }
-        )
+
     if args.trt_safe_attention:
         overrides["trt_safe_attention"] = 1
     return overrides
@@ -424,8 +389,6 @@ def checkpoint_payload(checkpoint_path, hparam_overrides=None):
         "n_frames": int(hparams.get("n_frames", 16)),
         "num_actor_tokens": int(hparams.get("num_actor_tokens", 0)),
         "num_classes": int(hparams.get("num_classes", 31)),
-        "keep_rate": float(hparams.get("keep_rate", 1.0)),
-        "keep_rate_merge": float(hparams.get("keep_rate_merge", 1.0)),
         "merge_type": str(hparams.get("merge_type", "")),
         "trt_safe_attention": int(hparams.get("trt_safe_attention", 0)),
     }
@@ -433,8 +396,6 @@ def checkpoint_payload(checkpoint_path, hparam_overrides=None):
         "hparams": export_hparams,
         "hparam_overrides": dict(hparam_overrides or {}),
         "original_hparams": {
-            "keep_rate": float(original_hparams.get("keep_rate", 1.0)),
-            "keep_rate_merge": float(original_hparams.get("keep_rate_merge", 1.0)),
             "merge_type": str(original_hparams.get("merge_type", "")),
             "trt_safe_attention": int(original_hparams.get("trt_safe_attention", 0)),
         },
@@ -645,8 +606,6 @@ def main():
         "hparam_overrides": hparam_overrides,
         "original_hparams": original_hparams,
         "export_hparams": {
-            "keep_rate": float(hparams.get("keep_rate", 1.0)),
-            "keep_rate_merge": float(hparams.get("keep_rate_merge", 1.0)),
             "merge_type": str(hparams.get("merge_type", "")),
             "trt_safe_attention": int(hparams.get("trt_safe_attention", 0)),
             "actor_object_prompt_tokens": int(

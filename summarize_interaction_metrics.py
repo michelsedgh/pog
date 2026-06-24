@@ -88,8 +88,6 @@ CORE_COLUMNS = [
     "val_deploy_object_dropout_action_acc",
     "val_deploy_object_dropout_Uselaptop_acc",
     "val_actor_object_prompt_token_count",
-    "val_token_selection_actor_box_keep_rate",
-    "val_token_selection_visible_object_box_keep_rate",
     "val_interaction_heatmap_iou",
     "val_interaction_heatmap_soft_iou",
     "val_interaction_heatmap_positive_mean",

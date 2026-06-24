@@ -985,44 +985,15 @@ class TorchActorBackend:
                 "actor_object_prompt_tokens and "
                 "actor_object_relation_in_transformer."
             )
-        if self.actor_object_prompt_tokens and not self.actor_interaction_heatmaps:
-            raise RuntimeError(
-                "actor_object_prompt_tokens checkpoints require "
-                "actor_interaction_heatmaps in the clean PO-GUISE+ object path."
-            )
-        if self.actor_object_prompt_tokens and not self.actor_object_region_visual_tokens:
-            raise RuntimeError(
-                "Object-proposal checkpoints must use "
-                "actor_object_region_visual_tokens=1 so runtime object memory "
-                "contains visual patch features from each object box."
-            )
-        if self.actor_object_prompt_tokens and (
-            not self.actor_object_relation_in_transformer
-            or not self.actor_object_pair_action_head
-        ):
-            raise RuntimeError(
-                "Object-proposal checkpoints must use the single supported live "
-                "path: actor_object_relation_in_transformer=1 and "
-                "actor_object_pair_action_head=1."
-            )
-        self.uses_object_proposals = self.actor_object_prompt_tokens
-        self.num_scene_object_tokens = (
-            int(self.hparams.get("num_scene_object_tokens", 0))
-            if self.uses_object_proposals
-            else 0
-        )
+        
+        self.num_scene_object_tokens = int(self.hparams.get("num_scene_object_tokens", 0))
+        self.uses_object_proposals = self.num_scene_object_tokens > 0
+
         if self.clip_frames != TRAINING_CLIP_FRAMES:
             raise RuntimeError(
                 f"Checkpoint n_frames={self.clip_frames}; live inference is fixed to "
                 f"{TRAINING_CLIP_FRAMES} frames to match the trained actor model."
             )
-        if not self.uses_object_proposals:
-            raise RuntimeError(
-                "This dashboard requires actor checkpoints with object proposal "
-                "inputs: actor_object_prompt_tokens=1."
-            )
-        if self.num_scene_object_tokens <= 0:
-            raise RuntimeError("Checkpoint object proposal count must be positive.")
 
     def __call__(self, clip, boxes, valid, object_inputs=None):
         clip = clip.to(device=self.device, dtype=self.dtype)
@@ -1098,6 +1069,8 @@ class TensorRTLiveActorBackend:
             getattr(self.engine, "uses_object_proposals", False)
         )
         self.num_scene_object_tokens = int(self.engine.num_scene_object_tokens)
+        self.uses_object_proposals = self.num_scene_object_tokens > 0
+
         if self.clip_frames != TRAINING_CLIP_FRAMES:
             raise RuntimeError(
                 f"Actor engine clip_frames={self.clip_frames}; live inference is fixed "
@@ -1108,13 +1081,6 @@ class TensorRTLiveActorBackend:
                 f"Actor engine input_size={self.input_size}; live inference is fixed "
                 f"to {MODEL_INPUT_SIZE}."
             )
-        if not self.uses_object_proposals:
-            raise RuntimeError(
-                "This dashboard requires a TensorRT actor engine with object "
-                "proposal inputs."
-            )
-        if self.num_scene_object_tokens <= 0:
-            raise RuntimeError("TensorRT actor engine object proposal count must be positive.")
 
     def __call__(self, clip, boxes, valid, object_inputs=None):
         return self.engine(clip, boxes, valid, object_inputs)

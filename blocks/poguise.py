@@ -251,6 +251,7 @@ class CosAttention(nn.Module):
         return x
 
 
+
 class Attention(nn.Module):
     def __init__(
         self,
@@ -261,6 +262,7 @@ class Attention(nn.Module):
         attn_drop=0.0,
         proj_drop=0.0,
         attn_head_dim=None,
+        trt_safe_attention=False,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -269,6 +271,7 @@ class Attention(nn.Module):
             head_dim = attn_head_dim
         all_head_dim = head_dim * self.num_heads
         self.scale = qk_scale or head_dim**-0.5
+        self.trt_safe_attention = bool(trt_safe_attention)
 
         self.qkv = nn.Linear(dim, all_head_dim * 3, bias=False)
         if qkv_bias:
@@ -282,87 +285,7 @@ class Attention(nn.Module):
         self.proj = nn.Linear(all_head_dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x):
-        B, N, C = x.shape
-        qkv_bias = None
-        if self.q_bias is not None:
-            qkv_bias = torch.cat(
-                (
-                    self.q_bias,
-                    torch.zeros_like(self.v_bias, requires_grad=False),
-                    self.v_bias,
-                )
-            )
-        qkv = F.linear(input=x, weight=self.qkv.weight, bias=qkv_bias)
-        qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
-        q, k, v = (
-            qkv[0],
-            qkv[1],
-            qkv[2],
-        )  # make torchscript happy (cannot use tensor as tuple)
-
-        q = q * self.scale
-        attn = q @ k.transpose(-2, -1)
-
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
-
-        x = (attn @ v).transpose(1, 2).reshape(B, N, -1)
-
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
-
-
-def sim_matrixv2_batch(a, b, eps=1e-8):
-    """
-    added eps for numerical stability
-    """
-    a_n, b_n = a.norm(dim=-1)[:, :, None], b.norm(dim=-1)[:, :, None]
-    a_norm = a / torch.clamp(a_n, min=eps)
-    b_norm = b / torch.clamp(b_n, min=eps)
-    sim_mt = torch.bmm(a_norm, b_norm.transpose(-2, -1))
-    return sim_mt
-
-
-class KTPAttention(Attention):
-    """Attention with Keyframe-centric Token Pruning (KTP)."""
-
-    def __init__(
-        self,
-        dim,
-        num_heads=8,
-        qkv_bias=False,
-        qk_scale=None,
-        attn_drop=0.0,
-        proj_drop=0.0,
-        attn_head_dim=None,
-        use_checkpoint=False,
-        keep_rate=0.0,
-        n_heatmap_tokens=196,
-        sim_metric=0,
-        topk_type=0,
-        n_key_tokens=1,
-        needs_full_attention=False,
-        trt_safe_attention=False,
-    ):
-        super(KTPAttention, self).__init__(
-            dim, num_heads, qkv_bias, qk_scale, attn_drop, proj_drop, attn_head_dim
-        )
-        self.keep_rate = keep_rate
-        assert 0 < keep_rate <= 1, "keep_rate must > 0 and <= 1, got {0}".format(
-            keep_rate
-        )
-        self.n_heatmap_tokens = n_heatmap_tokens
-        self.use_checkpoint = use_checkpoint
-        # self.merge_type = "sim"
-        self.topk_type = topk_type  # 0: all, 1: cls_hm
-        self.sim_metric = sim_metric  # 0: k, 1: attn
-        self.n_key_tokens = n_key_tokens
-        self.needs_full_attention = bool(needs_full_attention)
-        self.trt_safe_attention = bool(trt_safe_attention)
-
-    def forward_part1(self, x, size=None, key_padding_mask=None):
+    def forward(self, x, key_padding_mask=None):
         B, N, C = x.shape
         if key_padding_mask is not None:
             if key_padding_mask.shape != (B, N):
@@ -371,6 +294,7 @@ class KTPAttention(Attention):
                     f"{(B, N)}, got {tuple(key_padding_mask.shape)}"
                 )
             key_padding_mask = key_padding_mask.to(device=x.device, dtype=torch.bool)
+            
         qkv_bias = None
         if self.q_bias is not None:
             qkv_bias = torch.cat(
@@ -380,45 +304,25 @@ class KTPAttention(Attention):
                     self.v_bias,
                 )
             )
-        # qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         qkv = F.linear(input=x, weight=self.qkv.weight, bias=qkv_bias)
         qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
-        q, k, v = (
-            qkv[0],
-            qkv[1],
-            qkv[2],
-        )  # make torchscript happy (cannot use tensor as tuple)
+        q, k, v = qkv[0], qkv[1], qkv[2]
 
-        if (
-            self.keep_rate >= 1
-            and not self.needs_full_attention
-            and not self.trt_safe_attention
-        ):
-            # use flash attention
+        if not self.trt_safe_attention:
             dropout_p = self.attn_drop.p if self.training else 0.0
             attn_mask = None
             if key_padding_mask is not None and key_padding_mask.any():
                 attn_mask = torch.zeros(
-                    B,
-                    1,
-                    1,
-                    N,
-                    device=x.device,
-                    dtype=q.dtype,
+                    B, 1, 1, N, device=x.device, dtype=q.dtype
                 )
                 attn_mask.masked_fill_(
                     key_padding_mask[:, None, None, :],
                     torch.finfo(q.dtype).min,
                 )
             x = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=attn_mask,
-                dropout_p=dropout_p,
+                q, k, v, attn_mask=attn_mask, dropout_p=dropout_p
             )
             x = x.transpose(1, 2).reshape(B, N, -1)
-            attn = None
         else:
             attn = (q * self.scale) @ k.transpose(-2, -1)
             if key_padding_mask is not None and (
@@ -429,84 +333,12 @@ class KTPAttention(Attention):
                     torch.finfo(attn.dtype).min,
                 )
             attn = attn.softmax(dim=-1)
-
             attn_for_output = self.attn_drop(attn)
             x = (attn_for_output @ v).transpose(1, 2).reshape(B, N, -1)
+
         x = self.proj(x)
         x = self.proj_drop(x)
-        sim_feat = x
-        if self.sim_metric == 1:
-            sim_feat = attn
-        elif self.sim_metric == 0:
-            sim_feat = k
-        elif self.sim_metric == 2:
-            sim_feat = q
-        elif self.sim_metric == 3:
-            sim_feat = v
-        return x, attn, sim_feat
-
-    def forward(
-        self,
-        x,
-        last_idx=None,
-        ws=None,
-        size=None,
-        key_padding_mask=None,
-    ):
-        B, N, C = x.shape
-        if self.keep_rate < 1:
-            x, attn, feature = self.forward_part1(
-                x, size, key_padding_mask=key_padding_mask
-            )
-        else:
-            x, attn, feature = self.forward_part1(
-                x, size, key_padding_mask=key_padding_mask
-            )
-            return x, last_idx, key_padding_mask
-
-        # get top-k tokens and the corresponding indexes
-        if self.keep_rate < 1:
-            num_s_tokens = self.n_heatmap_tokens + self.n_key_tokens
-            num_keep_tokens = math.ceil(self.keep_rate * (N - num_s_tokens))
-            if num_keep_tokens > 0:
-                attn_topk = attn.clone()
-                if key_padding_mask is not None and (
-                    self.trt_safe_attention or key_padding_mask.any()
-                ):
-                    attn_topk = attn_topk.masked_fill(
-                        key_padding_mask[:, None, :, None],
-                        0.0,
-                    )
-                prefix_count = self.n_heatmap_tokens + self.n_key_tokens
-                if self.topk_type == 0:
-                    attn_topk = attn_topk.sum(dim=-2).mean(
-                        dim=1
-                    )  # (B, N) for each token sum how much it is attended by all other tokens
-
-                elif self.topk_type == 1:
-                    attn_topk = (
-                        attn_topk[:, :, :prefix_count]
-                        .sum(dim=-2)
-                        .mean(dim=1)
-                    )
-                elif self.topk_type == 2:
-                    # only class token
-                    attn_topk = attn_topk[:, :, 0].mean(dim=1)
-                attn_topk = attn_topk[
-                    :, num_s_tokens:
-                ]  # remove class token and heatmap tokens
-                # average on all queries and num_heads
-                _, idx_evad = torch.topk(
-                    attn_topk,
-                    num_keep_tokens,
-                    dim=1,
-                    largest=True,
-                )  # (B, N_keep)
-                last_idx = idx_evad.sort(dim=1)[0]
-        if self.sim_metric == 1:
-            return x, last_idx, attn
-        else:
-            return x, last_idx, feature
+        return x
 
 
 class Block(nn.Module):
@@ -524,26 +356,12 @@ class Block(nn.Module):
         act_layer=nn.GELU,
         norm_layer=nn.LayerNorm,
         attn_head_dim=None,
-        cos_attn=False,
-        keep_rate=1.0,
-        n_heatmap_tokens=196,
-        merge_mode=0,
-        sim_metric=0,
-        merge_type="sim",
-        keep_rate_merge=1.0,
-        n_key_tokens=1,
+        trt_safe_attention=False,
         **kwargs,
     ):
         super().__init__()
         self.norm1 = norm_layer(dim)
-        self.keep_rate = keep_rate
-        self.n_heatmap_tokens = n_heatmap_tokens
-        self.merge_mode = merge_mode
-        self.sim_metric = sim_metric
-        self.merge_type = merge_type
-        self.keep_rate_merge = keep_rate_merge
-        self.n_key_tokens = n_key_tokens
-        self.attn = KTPAttention(
+        self.attn = Attention(
             dim,
             num_heads=num_heads,
             qkv_bias=qkv_bias,
@@ -551,15 +369,8 @@ class Block(nn.Module):
             attn_drop=attn_drop,
             proj_drop=drop,
             attn_head_dim=attn_head_dim,
-            keep_rate=keep_rate,
-            n_heatmap_tokens=n_heatmap_tokens,
-            sim_metric=sim_metric,
-            n_key_tokens=n_key_tokens,
-            needs_full_attention=keep_rate_merge < 1,
-            **kwargs,
+            trt_safe_attention=trt_safe_attention,
         )
-
-        # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -569,7 +380,6 @@ class Block(nn.Module):
             act_layer=act_layer,
             drop=drop,
         )
-        self._size_attn = None
 
         if init_values > 0:
             self.gamma_1 = nn.Parameter(
@@ -581,246 +391,15 @@ class Block(nn.Module):
         else:
             self.gamma_1, self.gamma_2 = None, None
 
-    def forward_KTPpart1(
-        self,
-        x,
-        last_idx,
-        window_size,
-        key_padding_mask=None,
-    ):
-        # check if self._size_attn shape matches with x
+    def forward(self, x, key_padding_mask=None):
         if self.gamma_1 is None:
-            tmp, idx, attn = self.attn(
-                self.norm1(x),
-                last_idx,
-                ws=window_size,
-                size=self._size_attn,
-                key_padding_mask=key_padding_mask,
-            )
-            return self.drop_path(tmp), idx, attn
+            x = x + self.drop_path(self.attn(self.norm1(x), key_padding_mask=key_padding_mask))
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
         else:
-            attn, idx = self.attn(
-                self.norm1(x),
-                last_idx,
-                ws=window_size,
-                size=self._size_attn,
-                key_padding_mask=key_padding_mask,
-            )
-            return self.drop_path(self.gamma_1 * attn), idx
-
-    def forward_KTP_part2(self, x):
-        if self.gamma_2 is None:
-            return self.drop_path(self.mlp(self.norm2(x)))
-        else:
-            return self.drop_path(self.gamma_2 * self.mlp(self.norm2(x)))
-
-    def forward(self, x, last_idx, ws=None, size=None, key_padding_mask=None):
-        tmp, idx, attn = self.forward_KTPpart1(
-            x,
-            last_idx=last_idx,
-            window_size=ws,
-            key_padding_mask=key_padding_mask,
-        )
-        x = x + tmp
-
-        # class token heatmap -centric token pruning
-        B, N, C = x.shape
-        num_s_tokens = self.n_heatmap_tokens + self.n_key_tokens  # 1 for class token
-        if key_padding_mask is not None:
-            if key_padding_mask.shape != (B, N):
-                raise ValueError(
-                    "key_padding_mask must have shape "
-                    f"{(B, N)}, got {tuple(key_padding_mask.shape)}"
-                )
-            key_padding_mask = key_padding_mask.to(device=x.device, dtype=torch.bool)
-        if self.keep_rate < 1:
-            x_key = x[:, :num_s_tokens]
-            x_nonkey_keep = x[:, num_s_tokens:]
-            index_nonkey_keep = idx.unsqueeze(-1).expand(-1, -1, C)  # (B, N_keep, C_e)
-            x_nonkey_keep = torch.gather(
-                x_nonkey_keep, dim=1, index=index_nonkey_keep
-            )  # (B, N_keep, C_e)
-
-            if self.keep_rate_merge < 1:
-                selected = torch.zeros(
-                    B,
-                    N - num_s_tokens,
-                    dtype=x.dtype,
-                    device=x.device,
-                )
-                selected = selected.scatter(
-                    1,
-                    idx.long(),
-                    torch.ones_like(idx, dtype=x.dtype, device=x.device),
-                )
-                num_nonselected = (N - num_s_tokens) - idx.shape[1]
-                idx_nonselected = torch.topk(
-                    1.0 - selected,
-                    num_nonselected,
-                    dim=1,
-                ).indices
-                idx_nonselected = torch.sort(idx_nonselected, dim=1).values
-                x_nonselected = torch.gather(
-                    x[:, num_s_tokens:],
-                    dim=1,
-                    index=idx_nonselected.unsqueeze(-1).expand(-1, -1, C),
-                )
-                attn_merge = attn.clone()
-                attn_merge = attn_merge.mean(
-                    dim=1
-                )  # (B, N) for each token sum how much it is attended by all other tokens
-                attn_merge = attn_merge[
-                    :, num_s_tokens:
-                ]  # remove class token and heatmap tokens
-                # filter attn by idx_nonselected
-                if self.sim_metric == 1:
-                    attn_merge = attn_merge.gather(
-                        dim=2,
-                        index=idx_nonselected.unsqueeze(1).expand(
-                            -1, attn_merge.shape[1], -1
-                        ),
-                    )
-                    # filter on the second attention
-                    attn_merge = attn_merge.gather(
-                        dim=1,
-                        index=idx_nonselected.unsqueeze(-1).expand(
-                            -1, -1, attn_merge.shape[-1]
-                        ),
-                    )
-                else:
-                    # filter attn_merge only on the first dimension
-                    attn_merge = attn_merge.gather(
-                        dim=1,
-                        index=idx_nonselected.unsqueeze(-1).expand(
-                            -1, -1, attn_merge.shape[-1]
-                        ),
-                    )
-                idx = torch.gather(last_idx, dim=1, index=idx)
-                merge, src_idx = self.bipartite_soft_matching(
-                    attn_merge, int(self.keep_rate_merge * attn_merge.shape[1])
-                )
-                x_nonselected = self.merge_wavg(merge, x_nonselected)
-                # update idx_nonselected by src_idx
-                idx_nonselected = idx_nonselected.gather(
-                    dim=1,
-                    index=src_idx.squeeze(-1),
-                )
-                idx_nonselected = torch.gather(last_idx, dim=1, index=idx_nonselected)
-                x_nonkey_keep = torch.cat([x_nonkey_keep, x_nonselected], dim=1)
-                # update the global index in video sequence
-                idx = torch.cat([idx, idx_nonselected], dim=1)
-            else:
-                idx = torch.gather(last_idx, dim=1, index=idx)
-
-            x = torch.cat([x_key, x_nonkey_keep], dim=1)
-            if key_padding_mask is not None:
-                key_mask = key_padding_mask[:, :num_s_tokens]
-                nonkey_mask = torch.zeros(
-                    B,
-                    x_nonkey_keep.shape[1],
-                    dtype=torch.bool,
-                    device=x.device,
-                )
-                key_padding_mask = torch.cat([key_mask, nonkey_mask], dim=1)
-        elif self.keep_rate_merge < 1:
-            num_s_tokens = self.n_heatmap_tokens + self.n_key_tokens
-            x_key = x[:, :num_s_tokens]
-            x_nonkey_keep = x[:, num_s_tokens:]
-            attn_merge = attn.clone()
-            attn_merge = attn_merge.mean(dim=1)
-            attn_merge = attn_merge[:, num_s_tokens:]
-            merge, src_idx = self.bipartite_soft_matching(
-                attn_merge, int(self.keep_rate_merge * attn_merge.shape[1])
-            )
-            x_nonkey_keep = self.merge_wavg(merge, x_nonkey_keep)
-            x = torch.cat([x_key, x_nonkey_keep], dim=1)
-            if key_padding_mask is not None:
-                key_mask = key_padding_mask[:, :num_s_tokens]
-                nonkey_mask = torch.zeros(
-                    B,
-                    x_nonkey_keep.shape[1],
-                    dtype=torch.bool,
-                    device=x.device,
-                )
-                key_padding_mask = torch.cat([key_mask, nonkey_mask], dim=1)
-        x = x + self.forward_KTP_part2(x)
+            x = x + self.drop_path(self.gamma_1 * self.attn(self.norm1(x), key_padding_mask=key_padding_mask))
+            x = x + self.drop_path(self.gamma_2 * self.mlp(self.norm2(x)))
         if key_padding_mask is not None:
             x = x.masked_fill(key_padding_mask.unsqueeze(-1), 0.0)
-
-        return x, idx, key_padding_mask
-
-    def bipartite_soft_matching(
-        self,
-        metric,
-        r,
-    ):
-        """
-        Modified from ToMe:
-        https://github.com/facebookresearch/ToMe/blob/main/tome/merge.py#L228
-        """
-
-        def sim_matrixv2_batch(a, b, eps=1e-8):
-            """
-            added eps for numerical stability
-            """
-            a_n, b_n = a.norm(dim=-1)[:, :, None], b.norm(dim=-1)[:, :, None]
-            a_norm = a / torch.clamp(a_n, min=eps)
-            b_norm = b / torch.clamp(b_n, min=eps)
-            sim_mt = torch.bmm(a_norm, b_norm.transpose(-2, -1))
-            return sim_mt
-
-        with torch.no_grad():
-
-            if self.merge_type == "sim":
-                scores = sim_matrixv2_batch(metric, metric)
-                diag_mask = torch.eye(
-                    scores.shape[-1],
-                    device=scores.device,
-                    dtype=torch.bool,
-                ).unsqueeze(0)
-                scores = scores.masked_fill(diag_mask, -1.0e4)
-                node_max, node_idx = scores.max(dim=-1)
-                edge_idx = node_max.argsort(dim=-1, descending=True)[..., None]
-                src_idx = edge_idx[..., :r, :]  # Merged Tokens
-                dst_idx = node_idx[..., None].gather(dim=-2, index=src_idx)
-            else:
-                with torch.no_grad():
-                    metric = metric / metric.norm(dim=-1, keepdim=True)
-                    a, b = metric[..., ::2, :], metric[..., 1::2, :]
-                    scores = a @ b.transpose(-1, -2)
-
-                    node_max, node_idx = scores.max(dim=-1)
-                    edge_idx = node_max.argsort(dim=-1, descending=True)[..., None]
-
-                    src_idx = edge_idx[..., :r, :]  # Merged Tokens
-                    dst_idx = node_idx[..., None].gather(dim=-2, index=src_idx)
-
-        def merge(x: torch.Tensor, mode="mean") -> torch.Tensor:
-            if self.merge_type == "sim":
-                src, dst = x, x
-
-            else:
-                src, dst = x[..., ::2, :], x[..., 1::2, :]
-            n, t1, c = src.shape
-            src = src.gather(dim=-2, index=src_idx.expand(n, r, c))
-            dst = dst.gather(dim=-2, index=dst_idx.expand(n, r, c))
-            if mode == "mean":
-                dst = dst + src
-                dst = dst / 2
-            elif mode == "sum":
-                dst = dst + src
-            return dst
-
-        return merge, src_idx
-
-    def merge_wavg(self, merge, x: torch.Tensor):
-        """
-        Applies the merge function by taking a weighted average based on token size.
-        Returns the merged tensor and the new token sizes.
-        """
-        mode = {0: "mean", 1: "sum"}
-        x = merge(x, mode=mode[self.merge_mode])
-
         return x
 
 
@@ -1339,17 +918,9 @@ class VisionTransformer(nn.Module):
         heatmap_end = heatmap_start + self.n_heatmap_tokens
 
 
-        # keep the global indexes of non-keyframe tokens during pruning
-        idx = torch.arange(0, N, device=x.device).unsqueeze(0).repeat(B, 1)
         for i in range(self.depth):
             blk = self.blocks[i]
-            x, idx, token_key_padding_mask = blk(
-                x,
-                idx,
-                ws=ws,
-                size=self._size_attn if hasattr(self, "_size_attn") else None,
-                key_padding_mask=token_key_padding_mask,
-            )
+            x = blk(x, key_padding_mask=token_key_padding_mask)
 
 
 
@@ -1357,7 +928,9 @@ class VisionTransformer(nn.Module):
             x_actor = x[:, actor_start:actor_end, :]
         x_object = None
         if self.actor_object_prompt_tokens:
-            x_object = object_memory_tokens
+            object_start = 1 + self.n_actor_tokens + self.n_registers
+            object_end = object_start + self.n_object_tokens
+            x_object = x[:, object_start:object_end, :]
         if self.n_heatmap_out_channels > 0:
             x_heatmap = x[
                 :,

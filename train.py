@@ -454,11 +454,6 @@ def build_parser():
         type=float,
         default=0.0,
     )
-    parser.add_argument(
-        "--actor_object_detector_dropout_prob",
-        type=float,
-        default=0.0,
-    )
 
     parser.add_argument(
         "--actor_object_proposal_aug_prob",
@@ -472,11 +467,6 @@ def build_parser():
     )
     parser.add_argument(
         "--actor_object_proposal_scale_jitter",
-        type=float,
-        default=0.0,
-    )
-    parser.add_argument(
-        "--actor_object_proposal_distractor_drop_prob",
         type=float,
         default=0.0,
     )
