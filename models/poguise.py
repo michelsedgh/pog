@@ -540,6 +540,7 @@ class POGUISE(pl.LightningModule):
         parser.add_argument("--num_scene_object_tokens", type=int, default=32)
         parser.add_argument("--num_object_classes", type=int, default=19)
         parser.add_argument("--actor_object_prompt_tokens", type=int, default=0)
+        parser.add_argument("--actor_object_pair_action_head", type=int, default=0)
 
         parser.add_argument("--trt_safe_attention", type=int, default=0)
         parser.add_argument("--ret_feat", type=int, default=0)
