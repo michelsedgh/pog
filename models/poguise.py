@@ -296,8 +296,14 @@ class POGUISE(pl.LightningModule):
         self.net.head = nn.Identity(self.net.num_features, self.net.num_features)
         self.head = nn.Linear(self.net.num_features, self.hparams.num_classes)
         if self.actor_prompt:
-            if self.actor_object_prompt_tokens_enabled:
-                self.actor_head = nn.Linear(
+            self.actor_object_pair_action_head = None
+            if self.hparams.get("actor_object_pair_action_head", 0):
+                self.actor_head = None
+                self.actor_object_relation_in_transformer = True
+                self.actor_object_null_pair_token = nn.Parameter(
+                    torch.zeros(1, 1, 1, self.net.num_features)
+                )
+                self.actor_object_pair_action_head = nn.Linear(
                     self.net.num_features * 2,
                     self.hparams.num_classes,
                 )
@@ -438,18 +444,50 @@ class POGUISE(pl.LightningModule):
                 x_visual_final = None
                 x_object_prompt = None
             self.last_actor_tokens = x_actor
-            if x_object_prompt is not None:
-                # Pool the object tokens (e.g., max pooling over the sequence dimension)
-                obj_feat = x_object_prompt.max(dim=1, keepdim=True)[0]
-                # Expand to match actor tokens if necessary, and concatenate
-                obj_feat = obj_feat.expand(-1, x_actor.shape[1], -1)
-                x_action = torch.cat([x_actor, obj_feat], dim=-1)
+            self.last_actor_action_tokens = x_actor
+            if self.actor_object_pair_action_head is not None and x_object_prompt is not None:
+                batch_size, num_actors, feature_dim = x_actor.shape
+                num_objects = x_object_prompt.shape[1]
+                
+                null_feat = self.actor_object_null_pair_token.expand(batch_size, 1, 1, feature_dim).squeeze(1)
+                all_objects = torch.cat([null_feat, x_object_prompt], dim=1)
+                
+                relation_logits = torch.einsum('bac,boc->bao', x_actor, all_objects)
+                relation_log_probs = F.log_softmax(relation_logits, dim=-1)
+                
+                actor_expanded = x_actor.unsqueeze(2).expand(batch_size, num_actors, num_objects + 1, feature_dim)
+                objects_expanded = all_objects.unsqueeze(1).expand(batch_size, num_actors, num_objects + 1, feature_dim)
+                
+                pair_features = torch.cat([actor_expanded, objects_expanded], dim=-1)
+                pair_action_logits = self.actor_object_pair_action_head(pair_features)
+                
+                # Zero out logits for invalid objects to prevent them from affecting logsumexp
+                # object_valid shape is [B, 32]. We need to prepend a True for the NULL object.
+                if object_valid is not None:
+                    valid_mask = torch.cat([torch.ones(batch_size, 1, dtype=torch.bool, device=x.device), object_valid.to(torch.bool)], dim=1)
+                    valid_mask = valid_mask.unsqueeze(1).unsqueeze(-1) # [B, 1, 33, 1]
+                    pair_action_logits = pair_action_logits.masked_fill(~valid_mask, -1.0e4)
+                    relation_log_probs = relation_log_probs.masked_fill(~valid_mask.squeeze(-1), -1.0e4)
+                    # Re-normalize log probs
+                    relation_log_probs = F.log_softmax(relation_log_probs, dim=-1)
+                    
+                pair_scores = pair_action_logits + relation_log_probs.unsqueeze(-1)
+                action_scores = torch.logsumexp(pair_scores, dim=2)
+                
+                self.last_actor_object_pair_action_logits = pair_action_logits
+                self.last_actor_object_pair_action_scores = pair_scores
+                self.last_actor_object_pair_action_log_probs = relation_log_probs
+                
+                # Make allowed mask for dashboard
+                if object_valid is not None:
+                    allowed = torch.cat([torch.ones(batch_size, num_actors, 1, dtype=torch.bool, device=x.device), object_valid.unsqueeze(1).expand(batch_size, num_actors, num_objects)], dim=2)
+                else:
+                    allowed = torch.ones(batch_size, num_actors, num_objects + 1, dtype=torch.bool, device=x.device)
+                self.last_actor_object_pair_action_allowed = allowed
             else:
-                x_action = x_actor
-            self.last_actor_action_tokens = x_action
-            if self.actor_head is None:
-                raise RuntimeError("actor_head is not initialized")
-            action_scores = self.actor_head(x_action)
+                if self.actor_head is None:
+                    raise RuntimeError("actor_head is not initialized")
+                action_scores = self.actor_head(x_actor)
             self.last_actor_action_logits = action_scores
             if self.presence_head is not None:
                 presence_logits = self.presence_head(x_actor).squeeze(-1)

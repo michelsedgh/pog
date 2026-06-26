@@ -1414,6 +1414,39 @@ class HeatmapModule(pl.LightningModule):
             loss_action = preds.sum() * 0.0
 
         loss_main_task = loss_action
+        
+        # Relation CE Objective
+        relation_log_probs = getattr(self.model, "last_actor_object_pair_action_log_probs", None)
+        if relation_log_probs is not None:
+            heatmap_info = self._exact_teacher_object_info(
+                actions, valid, target, valid.device
+            )
+            if heatmap_info is not None:
+                exact_compatible = valid & heatmap_info["known_action"] & heatmap_info["compatible_from_one_based"]
+                target_slot = torch.where(
+                    exact_compatible,
+                    heatmap_info["slot_index_from_one_based"] + 1,
+                    torch.zeros_like(heatmap_info["slot_index_from_one_based"])
+                )
+                
+                loss_relation = F.nll_loss(
+                    relation_log_probs.view(-1, relation_log_probs.shape[-1]),
+                    target_slot.view(-1),
+                    reduction='none'
+                ).view_as(target_slot)
+                
+                loss_relation = loss_relation[valid].mean()
+                
+                self.log(
+                    f"{stage}_loss_relation",
+                    loss_relation,
+                    on_step=is_train,
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                    sync_dist=True,
+                )
+                loss_main_task = loss_main_task + loss_relation
         if presence_logits is not None:
             loss_presence = F.binary_cross_entropy_with_logits(
                 presence_logits, valid.float()

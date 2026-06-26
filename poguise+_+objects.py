@@ -432,6 +432,7 @@ cmd = [
     "--actor_interaction_heatmaps", "1",
 
     "--actor_object_prompt_tokens", "1",
+    "--actor_object_pair_action_head", "1",
 
     "--num_scene_object_tokens", "32",
     "--num_object_classes", "19",
