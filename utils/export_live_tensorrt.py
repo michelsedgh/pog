@@ -135,8 +135,7 @@ def main():
         )
     if args.no_tf32:
         actor_export.append("--no-tf32")
-    if args.disable_token_pruning:
-        actor_export.append("--disable-token-pruning")
+    # Token pruning args removed
     if args.trt_safe_attention:
         actor_export.append("--trt-safe-attention")
     if args.force:
@@ -160,8 +159,7 @@ def main():
         "--max-abs-tolerance",
         str(actor_tol),
     ]
-    if args.disable_token_pruning:
-        actor_check_command.append("--disable-token-pruning")
+    # Token pruning args removed
     if args.trt_safe_attention:
         actor_check_command.append("--trt-safe-attention")
     run(actor_check_command)
@@ -245,7 +243,7 @@ def main():
         "checkpoint": str(checkpoint),
         "precision": args.precision,
         "no_tf32": bool(args.no_tf32),
-        "disable_token_pruning": bool(args.disable_token_pruning),
+        "disable_token_pruning": False,
         "trt_safe_attention": bool(args.trt_safe_attention),
         "mask_input_dtype": args.mask_input_dtype,
         "actor_onnx": str(actor_onnx),

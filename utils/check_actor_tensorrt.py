@@ -58,13 +58,6 @@ def metadata_hparam_overrides(engine_path):
 
 def cli_hparam_overrides(args):
     overrides = {}
-    if args.disable_token_pruning:
-        overrides.update(
-            {
-                "keep_rate": 1.0,
-                "keep_rate_merge": 1.0,
-            }
-        )
     if args.trt_safe_attention:
         overrides["trt_safe_attention"] = 1
     return overrides
@@ -191,95 +184,17 @@ def main():
     actor_object_region_visual_tokens = bool(
         hparams.get("actor_object_region_visual_tokens", 0)
     )
-    if bool(hparams.get("actor_object_residual_head", 0)):
-        raise RuntimeError(
-            "actor_object_residual_head checkpoints use the removed late object path. "
-            "Train/export with actor_object_relation_in_transformer instead."
-        )
     actor_object_relation_in_transformer = bool(
         hparams.get("actor_object_relation_in_transformer", 0)
     )
-    actor_object_relation_learned_scale = bool(
-        hparams.get("actor_object_relation_learned_scale", 0)
-    )
-    actor_object_relation_learned_logit_scale = bool(
-        hparams.get("actor_object_relation_learned_logit_scale", 0)
-    )
-    actor_object_relation_normalize_pointers = bool(
-        hparams.get("actor_object_relation_normalize_pointers", 0)
-    )
-    actor_object_pair_action_head = bool(
-        hparams.get("actor_object_pair_action_head", 0)
-    )
-    if actor_object_prompt_tokens and (
-        not actor_object_relation_in_transformer
-        or not actor_object_pair_action_head
-    ):
-        raise RuntimeError(
-            "Object-proposal checkpoints now have one supported TensorRT path: "
-            "actor_object_relation_in_transformer=1 and "
-            "actor_object_pair_action_head=1."
-        )
-    if actor_object_prompt_tokens and not actor_object_region_visual_tokens:
-        raise RuntimeError(
-            "Object-proposal checkpoints must use "
-            "actor_object_region_visual_tokens=1 so object memory includes visual "
-            "patch features from proposal boxes."
-        )
+
     uses_object_proposals = actor_object_prompt_tokens
     if uses_object_proposals != bool(engine.uses_object_proposals):
         raise RuntimeError(
             "Checkpoint/engine object-proposal input mismatch: "
             f"checkpoint={uses_object_proposals}, engine={engine.uses_object_proposals}"
         )
-    if actor_object_relation_in_transformer != bool(
-        getattr(engine, "actor_object_relation_in_transformer", False)
-    ):
-        raise RuntimeError(
-            "Checkpoint/engine actor-object relation mismatch: "
-            f"checkpoint={actor_object_relation_in_transformer}, "
-            f"engine={engine.actor_object_relation_in_transformer}"
-        )
-    if actor_object_relation_learned_scale != bool(
-        getattr(engine, "actor_object_relation_learned_scale", False)
-    ):
-        raise RuntimeError(
-            "Checkpoint/engine relation learned-scale mismatch: "
-            f"checkpoint={actor_object_relation_learned_scale}, "
-            f"engine={engine.actor_object_relation_learned_scale}"
-        )
-    if actor_object_region_visual_tokens != bool(
-        getattr(engine, "actor_object_region_visual_tokens", False)
-    ):
-        raise RuntimeError(
-            "Checkpoint/engine object-region-visual-token mismatch: "
-            f"checkpoint={actor_object_region_visual_tokens}, "
-            f"engine={engine.actor_object_region_visual_tokens}"
-        )
-    if actor_object_relation_learned_logit_scale != bool(
-        getattr(engine, "actor_object_relation_learned_logit_scale", False)
-    ):
-        raise RuntimeError(
-            "Checkpoint/engine relation learned-logit-scale mismatch: "
-            f"checkpoint={actor_object_relation_learned_logit_scale}, "
-            f"engine={engine.actor_object_relation_learned_logit_scale}"
-        )
-    if actor_object_relation_normalize_pointers != bool(
-        getattr(engine, "actor_object_relation_normalize_pointers", False)
-    ):
-        raise RuntimeError(
-            "Checkpoint/engine relation normalized-pointer mismatch: "
-            f"checkpoint={actor_object_relation_normalize_pointers}, "
-            f"engine={engine.actor_object_relation_normalize_pointers}"
-        )
-    if actor_object_pair_action_head != bool(
-        getattr(engine, "actor_object_pair_action_head", False)
-    ):
-        raise RuntimeError(
-            "Checkpoint/engine actor-object pair action head mismatch: "
-            f"checkpoint={actor_object_pair_action_head}, "
-            f"engine={engine.actor_object_pair_action_head}"
-        )
+
     wrapped = ActorExport(model, uses_object_proposals).eval()
 
     dummy_inputs, input_names = make_dummy_inputs(
@@ -326,13 +241,7 @@ def main():
         "checkpoint_epoch": metadata.get("epoch"),
         "onnx": str(Path(args.onnx)),
         "engine": str(Path(args.engine)),
-        "actor_object_prompt_tokens": actor_object_prompt_tokens,
-        "actor_object_region_visual_tokens": actor_object_region_visual_tokens,
-        "actor_object_relation_in_transformer": actor_object_relation_in_transformer,
         "uses_object_proposals": uses_object_proposals,
-        "hparam_overrides": hparam_overrides,
-        "num_actor_tokens": int(engine.num_actor_tokens),
-        "num_scene_object_tokens": int(engine.num_scene_object_tokens),
         "pytorch_vs_onnx": compare_outputs(
             reference,
             onnx_outputs,

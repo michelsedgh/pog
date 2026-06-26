@@ -478,8 +478,7 @@ def run_inspect_child(args):
         "--internal-json-out",
         str(inspect_out),
     ]
-    if args.disable_token_pruning:
-        command.append("--disable-token-pruning")
+    # Token pruning args removed
     if args.trt_safe_attention:
         command.append("--trt-safe-attention")
     run_command(command)
@@ -515,8 +514,7 @@ def run_export_child(args, onnx_out, clip_frames, max_actors, max_objects):
         "--mask-input-dtype",
         args.mask_input_dtype,
     ]
-    if args.disable_token_pruning:
-        command.append("--disable-token-pruning")
+    # Token pruning args removed
     if args.trt_safe_attention:
         command.append("--trt-safe-attention")
     run_command(command)
@@ -602,7 +600,7 @@ def main():
         "engine": str(engine_out),
         "precision": args.precision,
         "no_tf32": bool(args.no_tf32),
-        "disable_token_pruning": bool(args.disable_token_pruning),
+        "disable_token_pruning": False,
         "hparam_overrides": hparam_overrides,
         "original_hparams": original_hparams,
         "export_hparams": {

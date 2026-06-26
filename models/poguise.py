@@ -296,10 +296,16 @@ class POGUISE(pl.LightningModule):
         self.net.head = nn.Identity(self.net.num_features, self.net.num_features)
         self.head = nn.Linear(self.net.num_features, self.hparams.num_classes)
         if self.actor_prompt:
-            self.actor_head = nn.Linear(
-                self.net.num_features,
-                self.hparams.num_classes,
-            )
+            if self.actor_object_prompt_tokens_enabled:
+                self.actor_head = nn.Linear(
+                    self.net.num_features * 2,
+                    self.hparams.num_classes,
+                )
+            else:
+                self.actor_head = nn.Linear(
+                    self.net.num_features,
+                    self.hparams.num_classes,
+                )
             self.presence_head = (
                 nn.Linear(self.net.num_features, 1)
                 if self.hparams.get("actor_presence_head", 0)
@@ -432,7 +438,14 @@ class POGUISE(pl.LightningModule):
                 x_visual_final = None
                 x_object_prompt = None
             self.last_actor_tokens = x_actor
-            x_action = x_actor
+            if x_object_prompt is not None:
+                # Pool the object tokens (e.g., max pooling over the sequence dimension)
+                obj_feat = x_object_prompt.max(dim=1, keepdim=True)[0]
+                # Expand to match actor tokens if necessary, and concatenate
+                obj_feat = obj_feat.expand(-1, x_actor.shape[1], -1)
+                x_action = torch.cat([x_actor, obj_feat], dim=-1)
+            else:
+                x_action = x_actor
             self.last_actor_action_tokens = x_action
             if self.actor_head is None:
                 raise RuntimeError("actor_head is not initialized")

@@ -89,13 +89,7 @@ def parse_stage(stage):
 
 def hparam_overrides(args):
     overrides = {}
-    if args.disable_token_pruning:
-        overrides.update(
-            {
-                "keep_rate": 1.0,
-                "keep_rate_merge": 1.0,
-            }
-        )
+    # Token pruning args removed
     if args.trt_safe_attention:
         overrides["trt_safe_attention"] = 1
     return overrides
@@ -412,8 +406,7 @@ def max_abs(report):
 def output_paths(args):
     out_dir = Path(args.out_dir)
     suffix = []
-    if args.disable_token_pruning:
-        suffix.append("noprune")
+    # Token pruning args removed
     if args.trt_safe_attention:
         suffix.append("safeattn")
     if args.all_valid:
@@ -549,7 +542,7 @@ def main():
         "checkpoint": str(Path(args.checkpoint)),
         "checkpoint_epoch": metadata.get("epoch"),
         "stage": args.stage,
-        "disable_token_pruning": bool(args.disable_token_pruning),
+        "disable_token_pruning": False,
         "trt_safe_attention": bool(args.trt_safe_attention),
         "all_valid": bool(args.all_valid),
         "hparam_overrides": hparam_overrides(args),

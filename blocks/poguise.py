@@ -252,6 +252,7 @@ class CosAttention(nn.Module):
 
 
 
+
 class Attention(nn.Module):
     def __init__(
         self,
@@ -833,7 +834,7 @@ class VisionTransformer(nn.Module):
                 + self.valid_embed(valid.long()).to(dtype=x.dtype)
             )
             prefix_tokens.append(actor_tokens)
-            prefix_key_masks.append(~valid)
+            prefix_key_masks.append(valid == 0)
 
         if self.n_registers > 0:
             prefix_tokens.append(self.register_tokens.expand(B, -1, -1))
@@ -891,7 +892,7 @@ class VisionTransformer(nn.Module):
             )
             object_memory_tokens = object_tokens
             prefix_tokens.append(object_tokens)
-            prefix_key_masks.append(~object_valid)
+            prefix_key_masks.append(object_valid == 0)
         if self.n_heatmap_out_channels > 0:
             prefix_tokens.append(self.heatmap_tokens.expand(B, -1, -1))
             prefix_key_masks.append(
